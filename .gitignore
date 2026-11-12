@@ -1,0 +1,7 @@
+node_modules/
+app/node_modules/
+app/data/runtime.json
+app/data/settings.json
+app/data/window-profile/
+ZapretControl.exe
+*.log

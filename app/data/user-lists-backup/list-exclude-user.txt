@@ -1,0 +1,4 @@
+domain.example.abc
+planetminecraft.com
+www.planetminecraft.com
+otvet.mail.ru
