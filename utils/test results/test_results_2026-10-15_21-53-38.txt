@@ -1,0 +1,30 @@
+﻿Config: general (ALT11).bat (Type: standard)
+  DiscordMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 38 ms
+  DiscordGateway : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 35 ms
+  DiscordCDN : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 35 ms
+  DiscordUpdates : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 37 ms
+  YouTubeWeb : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 49 ms
+  YouTubeShort : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 74 ms
+  YouTubeImage : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 75 ms
+  YouTubeVideoRedirect : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 75 ms
+  GoogleMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 49 ms
+  GoogleGstatic : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 79 ms
+  CloudflareWeb : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 37 ms
+  CloudflareCDN : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 52 ms
+  XboxMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 58 ms
+  XboxAccount : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 59 ms
+  XboxLive : HTTP:SSL   TLS1.2:SSL   TLS1.3:UNSUP | Ping: 77 ms
+  XboxLiveAuth : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 57 ms
+  XboxAssets : HTTP:SSL   TLS1.2:SSL   TLS1.3:SSL   | Ping: Timeout
+  XboxServices : HTTP:SSL   TLS1.2:SSL   TLS1.3:SSL   | Ping: Timeout
+  XboxGamePass : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 58 ms
+  XboxStore : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 59 ms
+  CloudflareDNS1111 :  | Ping: 37 ms
+  CloudflareDNS1001 :  | Ping: 37 ms
+  GoogleDNS8888 :  | Ping: 46 ms
+  GoogleDNS8844 :  | Ping: 48 ms
+  Quad9DNS9999 :  | Ping: 49 ms
+
+=== ANALYTICS ===
+general (ALT11).bat : HTTP OK:  34, ERR:   8, UNSUP:  18, Ping OK:  23, Fail:   2
+Best strategy: general (ALT11).bat

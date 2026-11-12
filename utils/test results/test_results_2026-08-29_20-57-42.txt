@@ -1,0 +1,82 @@
+﻿Config: general (ALT11).bat (Type: standard)
+  DiscordMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 36 ms
+  DiscordGateway : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 39 ms
+  DiscordCDN : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 32 ms
+  DiscordUpdates : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 33 ms
+  YouTubeWeb : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 47 ms
+  YouTubeShort : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 80 ms
+  YouTubeImage : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 78 ms
+  YouTubeVideoRedirect : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 82 ms
+  GoogleMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 51 ms
+  GoogleGstatic : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 79 ms
+  CloudflareWeb : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 32 ms
+  CloudflareCDN : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 34 ms
+  CloudflareDNS1111 :  | Ping: 33 ms
+  CloudflareDNS1001 :  | Ping: 33 ms
+  GoogleDNS8888 :  | Ping: 49 ms
+  GoogleDNS8844 :  | Ping: 45 ms
+  Quad9DNS9999 :  | Ping: 49 ms
+
+Config: general (ALT12).bat (Type: standard)
+  DiscordMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 32 ms
+  DiscordGateway : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 32 ms
+  DiscordCDN : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 32 ms
+  DiscordUpdates : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 34 ms
+  YouTubeWeb : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 46 ms
+  YouTubeShort : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 78 ms
+  YouTubeImage : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 78 ms
+  YouTubeVideoRedirect : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 83 ms
+  GoogleMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 49 ms
+  GoogleGstatic : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 77 ms
+  CloudflareWeb : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 34 ms
+  CloudflareCDN : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 33 ms
+  CloudflareDNS1111 :  | Ping: 40 ms
+  CloudflareDNS1001 :  | Ping: 36 ms
+  GoogleDNS8888 :  | Ping: 49 ms
+  GoogleDNS8844 :  | Ping: 44 ms
+  Quad9DNS9999 :  | Ping: 50 ms
+
+Config: general (ALT13).bat (Type: standard)
+  DiscordMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 32 ms
+  DiscordGateway : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 32 ms
+  DiscordCDN : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 41 ms
+  DiscordUpdates : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 31 ms
+  YouTubeWeb : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 45 ms
+  YouTubeShort : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 78 ms
+  YouTubeImage : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 78 ms
+  YouTubeVideoRedirect : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 86 ms
+  GoogleMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 49 ms
+  GoogleGstatic : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 77 ms
+  CloudflareWeb : HTTP:OK    TLS1.2:ERROR TLS1.3:UNSUP | Ping: 32 ms
+  CloudflareCDN : HTTP:UNSUP TLS1.2:UNSUP TLS1.3:UNSUP | Ping: 32 ms
+  CloudflareDNS1111 :  | Ping: 40 ms
+  CloudflareDNS1001 :  | Ping: 36 ms
+  GoogleDNS8888 :  | Ping: 52 ms
+  GoogleDNS8844 :  | Ping: 46 ms
+  Quad9DNS9999 :  | Ping: 50 ms
+
+Config: general (EXP).bat (Type: standard)
+  DiscordMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 32 ms
+  DiscordGateway : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 32 ms
+  DiscordCDN : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 32 ms
+  DiscordUpdates : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 32 ms
+  YouTubeWeb : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 46 ms
+  YouTubeShort : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 83 ms
+  YouTubeImage : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 78 ms
+  YouTubeVideoRedirect : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 80 ms
+  GoogleMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 48 ms
+  GoogleGstatic : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 79 ms
+  CloudflareWeb : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 31 ms
+  CloudflareCDN : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: 32 ms
+  CloudflareDNS1111 :  | Ping: 32 ms
+  CloudflareDNS1001 :  | Ping: 32 ms
+  GoogleDNS8888 :  | Ping: 49 ms
+  GoogleDNS8844 :  | Ping: 49 ms
+  Quad9DNS9999 :  | Ping: 50 ms
+
+=== ANALYTICS ===
+general (ALT11).bat : HTTP OK:  24, ERR:   0, UNSUP:  12, Ping OK:  17, Fail:   0
+general (ALT12).bat : HTTP OK:  24, ERR:   0, UNSUP:  12, Ping OK:  17, Fail:   0
+general (EXP).bat   : HTTP OK:  24, ERR:   0, UNSUP:  12, Ping OK:  17, Fail:   0
+general (ALT13).bat : HTTP OK:  21, ERR:   1, UNSUP:  14, Ping OK:  17, Fail:   0
+Best strategy: general (ALT11).bat

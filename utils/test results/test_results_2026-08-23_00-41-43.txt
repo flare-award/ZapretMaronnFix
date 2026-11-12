@@ -1,0 +1,63 @@
+﻿
+Config: general (ALT3).bat (Type: standard)
+  UNKNOWN : HTTP:ERROR | Ping: Timeout
+  DiscordGateway : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  DiscordCDN : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  DiscordUpdates : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  YouTubeWeb : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  YouTubeShort : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  YouTubeImage : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  YouTubeVideoRedirect : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  GoogleMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: Timeout
+  GoogleGstatic : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: Timeout
+  CloudflareWeb : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  CloudflareCDN : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  CloudflareDNS1111 :  | Ping: Timeout
+  CloudflareDNS1001 :  | Ping: Timeout
+  GoogleDNS8888 :  | Ping: Timeout
+  GoogleDNS8844 :  | Ping: Timeout
+  Quad9DNS9999 :  | Ping: Timeout
+
+Config: general (ALT11).bat (Type: standard)
+  DiscordMain : HTTP:UNSUP TLS1.2:UNSUP TLS1.3:UNSUP | Ping: Timeout
+  DiscordGateway : HTTP:UNSUP TLS1.2:UNSUP TLS1.3:UNSUP | Ping: Timeout
+  DiscordCDN : HTTP:UNSUP TLS1.2:UNSUP TLS1.3:UNSUP | Ping: Timeout
+  DiscordUpdates : HTTP:UNSUP TLS1.2:UNSUP TLS1.3:UNSUP | Ping: Timeout
+  YouTubeWeb : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  YouTubeShort : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  YouTubeImage : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  YouTubeVideoRedirect : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  GoogleMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: Timeout
+  GoogleGstatic : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: Timeout
+  CloudflareWeb : HTTP:UNSUP TLS1.2:UNSUP TLS1.3:UNSUP | Ping: Timeout
+  CloudflareCDN : HTTP:UNSUP TLS1.2:UNSUP TLS1.3:UNSUP | Ping: Timeout
+  CloudflareDNS1111 :  | Ping: Timeout
+  CloudflareDNS1001 :  | Ping: Timeout
+  GoogleDNS8888 :  | Ping: Timeout
+  GoogleDNS8844 :  | Ping: Timeout
+  Quad9DNS9999 :  | Ping: Timeout
+
+Config: general (FAKE TLS AUTO ALT3).bat (Type: standard)
+  UNKNOWN : HTTP:ERROR | Ping: Timeout
+  DiscordGateway : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  DiscordCDN : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  DiscordUpdates : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  YouTubeWeb : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  YouTubeShort : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  YouTubeImage : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  YouTubeVideoRedirect : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  GoogleMain : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: Timeout
+  GoogleGstatic : HTTP:OK    TLS1.2:OK    TLS1.3:UNSUP | Ping: Timeout
+  CloudflareWeb : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  CloudflareCDN : HTTP:ERROR TLS1.2:ERROR TLS1.3:UNSUP | Ping: Timeout
+  CloudflareDNS1111 :  | Ping: Timeout
+  CloudflareDNS1001 :  | Ping: Timeout
+  GoogleDNS8888 :  | Ping: Timeout
+  GoogleDNS8844 :  | Ping: Timeout
+  Quad9DNS9999 :  | Ping: Timeout
+
+=== ANALYTICS ===
+general (ALT11).bat              : HTTP OK:   4, ERR:   8, UNSUP:  24, Ping OK:   0, Fail:  17
+general (ALT3).bat               : HTTP OK:   4, ERR:  19, UNSUP:  11, Ping OK:   0, Fail:  17
+general (FAKE TLS AUTO ALT3).bat : HTTP OK:   4, ERR:  19, UNSUP:  11, Ping OK:   0, Fail:  17
+Best strategy: general (ALT11).bat
