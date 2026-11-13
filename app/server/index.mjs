@@ -314,6 +314,9 @@ async function handleApi(req, res, pathname) {
     }
     if (body.selectedStrategy && body.selectedStrategy !== prev.selectedStrategy) {
       syncCurrentStateToActiveProfile(updated.zapretDir);
+      if (updated.autoRestartOnFilterChange) {
+        await restartIfRunning();
+      }
     }
     if (body.launchOnWindowsStartup !== undefined || body.startMinimizedToTray !== undefined) {
       if (

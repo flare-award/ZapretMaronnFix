@@ -168,10 +168,15 @@ export async function startStrategyProcess(strategyFileOverride) {
 }
 
 export async function restartIfRunning() {
-  if (!runtimeState.running || !runtimeState.activeStrategy) {
+  if (!runtimeState.running) {
     return getRuntimeState();
   }
-  return startStrategyProcess(runtimeState.activeStrategy);
+  const settings = loadSettings();
+  const nextStrat = settings.selectedStrategy || runtimeState.activeStrategy;
+  if (!nextStrat) {
+    return getRuntimeState();
+  }
+  return startStrategyProcess(nextStrat);
 }
 
 export async function applyWindowsStartupSetting(enabled, startMinimized = false) {

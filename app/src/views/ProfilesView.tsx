@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import {
   Plus,
   Check,
-  Play,
+  Copy,
   Pencil,
   Trash2,
   X,
@@ -53,7 +53,7 @@ export const ProfilesView: React.FC<ProfilesViewProps> = ({
   onUpdateProfile,
   onDeleteProfile,
 }) => {
-  const { profiles, activeProfileId, runtime } = state;
+  const { profiles, activeProfileId } = state;
 
   const [modalMode, setModalMode] = useState<'create' | 'edit' | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -77,6 +77,22 @@ export const ProfilesView: React.FC<ProfilesViewProps> = ({
   const closeModal = () => {
     setModalMode(null);
     setEditingId(null);
+  };
+
+  const handleDuplicate = (prof: UserProfile) => {
+    const baseCopyName = `${prof.name} (копия)`.slice(0, 48);
+    onCreateProfile({
+      name: baseCopyName,
+      description: prof.description || '',
+      strategy: prof.strategy,
+      gameFilterMode: prof.gameFilterMode,
+      gameFilterTcp: prof.gameFilterTcp,
+      gameFilterUdp: prof.gameFilterUdp,
+      ipsetMode: prof.ipsetMode,
+      discordFakeBin: prof.discordFakeBin,
+      gameFakeBin: prof.gameFakeBin,
+      activateNow: false,
+    });
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -104,122 +120,113 @@ export const ProfilesView: React.FC<ProfilesViewProps> = ({
       <div className="profiles-grid">
         {profiles.map((prof) => {
           const isActive = prof.id === activeProfileId;
-          return (
-            <div key={prof.id} className={`profile-card ${isActive ? 'active' : ''}`}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px' }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '7px', flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: '15px', fontWeight: 600 }}>{prof.name}</span>
-                      {isActive && (
-                        <span className="score-pill good">
-                          <Check size={11} strokeWidth={2.3} />
-                          Выбран
-                        </span>
-                      )}
-                    </div>
-                    {prof.description && (
-                      <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '3px' }}>
-                        {prof.description}
-                      </div>
-                    )}
-                  </div>
+          const stratText = formatStrategyName(prof.strategy);
 
-                  <div style={{ display: 'flex', gap: '5px', flexShrink: 0 }}>
+          return (
+            <div
+              key={prof.id}
+              role="button"
+              tabIndex={0}
+              className={`profile-card ${isActive ? 'active' : ''}`}
+              onClick={() => {
+                if (!busy && !isActive) {
+                  onActivateProfile(prof.id, false);
+                }
+              }}
+              onKeyDown={(e) => {
+                if ((e.key === 'Enter' || e.key === ' ') && !busy && !isActive) {
+                  e.preventDefault();
+                  onActivateProfile(prof.id, false);
+                }
+              }}
+            >
+              {/* Top: Title, optional description & action buttons */}
+              <div className="profile-card-top">
+                <div className="profile-card-heading">
+                  <div className="profile-card-title" title={prof.name}>
+                    {prof.name}
+                  </div>
+                  {prof.description && (
+                    <div className="profile-card-desc" title={prof.description}>
+                      {prof.description}
+                    </div>
+                  )}
+                </div>
+
+                <div className="profile-card-actions" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    type="button"
+                    className="btn-icon"
+                    title="Дублировать профиль"
+                    disabled={busy}
+                    onClick={() => handleDuplicate(prof)}
+                  >
+                    <Copy size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-icon"
+                    title="Изменить название и описание профиля"
+                    disabled={busy}
+                    onClick={() => openEditModal(prof)}
+                  >
+                    <Pencil size={14} />
+                  </button>
+                  {!prof.isDefault && (
                     <button
                       type="button"
                       className="btn-icon"
-                      title="Изменить название и описание профиля"
+                      title="Удалить профиль"
                       disabled={busy}
-                      onClick={() => openEditModal(prof)}
+                      onClick={() => onDeleteProfile(prof.id)}
                     >
-                      <Pencil size={14} />
+                      <Trash2 size={14} />
                     </button>
-                    {!prof.isDefault && (
-                      <button
-                        type="button"
-                        className="btn-icon"
-                        title="Удалить профиль"
-                        disabled={busy}
-                        onClick={() => onDeleteProfile(prof.id)}
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Live Saved State Summary */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '7px',
-                      fontSize: '12.5px',
-                      color: 'var(--m3-text)',
-                    }}
-                  >
-                    <Layers size={14} color="var(--m3-primary)" />
-                    <span style={{ color: 'var(--m3-text-secondary)' }}>Стратегия:</span>
-                    <span className="mono" style={{ fontWeight: 600 }}>
-                      {formatStrategyName(prof.strategy)}
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-                    <span className={`score-pill ${prof.gameFilterMode !== 'disabled' ? 'good' : ''}`}>
-                      <Gamepad2 size={11} />
-                      Game: {GAME_MODE_LABELS[prof.gameFilterMode]}
-                    </span>
-                    <span className={`score-pill ${prof.ipsetMode !== 'none' ? 'partial' : ''}`}>
-                      <Network size={11} />
-                      IPSet: {IPSET_MODE_LABELS[prof.ipsetMode]}
-                    </span>
-                  </div>
+                  )}
                 </div>
               </div>
 
-              <div style={{ display: 'flex', gap: '8px', paddingTop: '4px' }}>
-                {!isActive ? (
-                  <button
-                    type="button"
-                    className="btn btn-tonal"
-                    style={{ flex: 1, height: '33px' }}
-                    disabled={busy}
-                    onClick={() => onActivateProfile(prof.id, false)}
-                  >
-                    Выбрать профиль
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn btn-surface"
-                    style={{ flex: 1, height: '33px' }}
-                    disabled
-                  >
-                    <Check size={14} />
-                    Активный профиль
-                  </button>
-                )}
+              {/* Middle: Saved Strategy & Filter Badges */}
+              <div className="profile-card-body">
+                <div className="profile-strategy-row">
+                  <Layers size={15} color="var(--m3-primary)" style={{ flexShrink: 0 }} />
+                  <span className="profile-strategy-caption">Стратегия:</span>
+                  <span className="profile-strategy-value mono" title={stratText}>
+                    {stratText}
+                  </span>
+                </div>
 
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  style={{ height: '33px' }}
-                  disabled={busy}
-                  title="Применить этот профиль и запустить обход"
-                  onClick={() => onActivateProfile(prof.id, true)}
-                >
-                  <Play size={13} />
-                  {isActive && runtime.running ? 'Перезапустить' : 'Запустить'}
-                </button>
+                <div className="profile-badges-row">
+                  <span className={`score-pill ${prof.gameFilterMode !== 'disabled' ? 'good' : ''}`}>
+                    <Gamepad2 size={11.5} />
+                    Game: {GAME_MODE_LABELS[prof.gameFilterMode]}
+                  </span>
+                  <span className={`score-pill ${prof.ipsetMode !== 'none' ? 'partial' : ''}`}>
+                    <Network size={11.5} />
+                    IPSet: {IPSET_MODE_LABELS[prof.ipsetMode]}
+                  </span>
+                </div>
+              </div>
+
+              {/* Bottom: Clean Status Footer ("Текущий" / "Не выбран") */}
+              <div className="profile-card-footer">
+                {isActive ? (
+                  <span className="profile-status-pill current">
+                    <Check size={12.5} strokeWidth={2.4} />
+                    Текущий
+                  </span>
+                ) : (
+                  <span className="profile-status-pill idle">
+                    <span className="profile-status-dot" />
+                    Не выбран
+                  </span>
+                )}
               </div>
             </div>
           );
         })}
 
-        {/* Compact Add Profile Card right inside the grid */}
+        {/* Add Profile Card matching larger profile card proportions */}
         <button
           type="button"
           className="profile-add-card"
@@ -227,13 +234,13 @@ export const ProfilesView: React.FC<ProfilesViewProps> = ({
           onClick={openCreateModal}
         >
           <span className="profile-add-icon">
-            <Plus size={19} strokeWidth={2.2} />
+            <Plus size={21} strokeWidth={2.2} />
           </span>
-          <span style={{ fontSize: '13.5px', fontWeight: 600 }}>Добавить профиль</span>
+          <span style={{ fontSize: '14px', fontWeight: 600 }}>Добавить профиль</span>
         </button>
       </div>
 
-      {/* Create / Edit Profile Info Modal (Name & Description only) */}
+      {/* Create / Edit Profile Info Modal */}
       {modalMode && (
         <div className="modal-backdrop" onClick={closeModal}>
           <form

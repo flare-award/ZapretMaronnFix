@@ -16,12 +16,13 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("Zapret Control")]
 [assembly: AssemblyDescription("Desktop Controller for Zapret")]
-[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
 
 namespace ZapretControlHost
 {
     internal static class NativeWin32
     {
+        public const int WM_CLOSE = 0x0010;
         public const int WM_SETICON = 0x0080;
         public const int ICON_SMALL = 0;
         public const int ICON_BIG = 1;
@@ -51,6 +52,9 @@ namespace ZapretControlHost
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         public static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
 
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        public static extern bool PostMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
+
         [DllImport("gdi32.dll")]
         public static extern IntPtr CreateRoundRectRgn(
             int nLeftRect,
@@ -62,18 +66,10 @@ namespace ZapretControlHost
         );
     }
 
-    internal sealed class ProfileBrief
-    {
-        public string Id;
-        public string Name;
-    }
-
     internal sealed class TraySnapshot
     {
         public bool Running;
         public string StrategyLabel = "general";
-        public string ActiveProfileId = "default";
-        public List<ProfileBrief> Profiles = new List<ProfileBrief>();
     }
 
     internal static class Program
@@ -103,6 +99,7 @@ namespace ZapretControlHost
 
             if (!IsAdministrator())
             {
+                ReleaseSingleInstanceMutex();
                 try
                 {
                     ProcessStartInfo psi = new ProcessStartInfo
@@ -130,6 +127,28 @@ namespace ZapretControlHost
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new TrayHostContext(startMinimized));
+        }
+
+        public static void ReleaseSingleInstanceMutex()
+        {
+            if (singleInstanceMutex != null)
+            {
+                try
+                {
+                    singleInstanceMutex.ReleaseMutex();
+                }
+                catch
+                {
+                }
+                try
+                {
+                    singleInstanceMutex.Dispose();
+                }
+                catch
+                {
+                }
+                singleInstanceMutex = null;
+            }
         }
 
         private static bool IsAdministrator()
@@ -161,6 +180,22 @@ namespace ZapretControlHost
             return found;
         }
 
+        public static void CloseAllZapretControlWindows()
+        {
+            NativeWin32.EnumWindows((hWnd, lParam) =>
+            {
+                StringBuilder sb = new StringBuilder(256);
+                NativeWin32.GetWindowText(hWnd, sb, sb.Capacity);
+                string title = sb.ToString();
+                if (!string.IsNullOrEmpty(title) &&
+                    title.IndexOf("Zapret Control", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    NativeWin32.PostMessage(hWnd, NativeWin32.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                }
+                return true;
+            }, IntPtr.Zero);
+        }
+
         public static bool FocusExistingWindow()
         {
             IntPtr hWnd = FindZapretControlWindow();
@@ -189,6 +224,7 @@ namespace ZapretControlHost
         private Process uiAppProcess;
         private DarkTrayMenuForm activeMenu;
         private System.Windows.Forms.Timer iconSyncTimer;
+        private bool isShuttingDown;
 
         public TrayHostContext(bool startMinimized)
         {
@@ -209,7 +245,6 @@ namespace ZapretControlHost
             StartBackendServer();
             WaitForServerReady(port, 4800);
 
-            // Periodically ensure any open Zapret Control window carries the custom shield icon in titlebar & taskbar
             iconSyncTimer = new System.Windows.Forms.Timer();
             iconSyncTimer.Interval = 1800;
             iconSyncTimer.Tick += (s, e) => ApplyWindowIcons();
@@ -223,7 +258,7 @@ namespace ZapretControlHost
 
         private void OnTrayMouseUp(object sender, MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Right)
+            if (e.Button == MouseButtons.Right && !isShuttingDown)
             {
                 ShowCustomTrayMenu(Cursor.Position);
             }
@@ -247,17 +282,12 @@ namespace ZapretControlHost
                 {
                     if (snap.Running)
                     {
-                        PostApiJson("/api/runner/stop", "{}");
+                        PostApiJson("/api/runner/stop", "{}", 1500);
                     }
                     else
                     {
-                        PostApiJson("/api/runner/start", "{}");
+                        PostApiJson("/api/runner/start", "{}", 1500);
                     }
-                },
-                onSelectProfile: (profileId) =>
-                {
-                    string escaped = profileId.Replace("\\", "\\\\").Replace("\"", "\\\"");
-                    PostApiJson("/api/profiles/activate", "{\"id\":\"" + escaped + "\"}");
                 },
                 onOpenZapretFolder: () =>
                 {
@@ -279,7 +309,7 @@ namespace ZapretControlHost
             try
             {
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + port + "/api/state");
-                req.Timeout = 320;
+                req.Timeout = 300;
                 using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
                 using (Stream st = resp.GetResponseStream())
                 using (StreamReader sr = new StreamReader(st, Encoding.UTF8))
@@ -302,74 +332,12 @@ namespace ZapretControlHost
                         strat = strat.Substring(0, strat.Length - 4);
                     }
                     snap.StrategyLabel = strat;
-
-                    Match activeProf = Regex.Match(json, "\"activeProfileId\"\\s*:\\s*\"([^\"]+)\"");
-                    if (activeProf.Success)
-                    {
-                        snap.ActiveProfileId = activeProf.Groups[1].Value;
-                    }
-
-                    int profArrayIdx = json.IndexOf("\"profiles\"", StringComparison.Ordinal);
-                    if (profArrayIdx >= 0)
-                    {
-                        int openBracket = json.IndexOf('[', profArrayIdx);
-                        if (openBracket >= 0)
-                        {
-                            int depth = 0;
-                            int endBracket = -1;
-                            for (int i = openBracket; i < json.Length; i++)
-                            {
-                                if (json[i] == '[') depth++;
-                                else if (json[i] == ']')
-                                {
-                                    depth--;
-                                    if (depth == 0)
-                                    {
-                                        endBracket = i;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (endBracket > openBracket)
-                            {
-                                string arrText = json.Substring(openBracket, endBracket - openBracket + 1);
-                                MatchCollection objMatches = Regex.Matches(
-                                    arrText,
-                                    "\\{[^{}]*\"id\"\\s*:\\s*\"([^\"]+)\"[^{}]*\"name\"\\s*:\\s*\"([^\"]+)\"[^{}]*\\}"
-                                );
-                                foreach (Match m in objMatches)
-                                {
-                                    if (snap.Profiles.Count >= 6) break;
-                                    snap.Profiles.Add(new ProfileBrief
-                                    {
-                                        Id = UnescapeJsonString(m.Groups[1].Value),
-                                        Name = UnescapeJsonString(m.Groups[2].Value)
-                                    });
-                                }
-                            }
-                        }
-                    }
                 }
             }
             catch
             {
             }
-
-            if (snap.Profiles.Count == 0)
-            {
-                snap.Profiles.Add(new ProfileBrief { Id = "default", Name = "Основной" });
-            }
             return snap;
-        }
-
-        private static string UnescapeJsonString(string raw)
-        {
-            if (string.IsNullOrEmpty(raw)) return string.Empty;
-            return Regex.Replace(raw, "\\\\u([0-9a-fA-F]{4})", m =>
-            {
-                int code = Convert.ToInt32(m.Groups[1].Value, 16);
-                return ((char)code).ToString();
-            }).Replace("\\\"", "\"").Replace("\\\\", "\\");
         }
 
         private string ResolveRepoRoot()
@@ -498,6 +466,7 @@ namespace ZapretControlHost
             {
                 string profileDir = Path.Combine(repoRoot, "app", "data", "ui-window-v2");
                 Directory.CreateDirectory(profileDir);
+
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
                     FileName = browserExe,
@@ -506,7 +475,6 @@ namespace ZapretControlHost
                 };
                 uiAppProcess = Process.Start(psi);
 
-                // Apply custom shield icon to titlebar & taskbar as soon as the window appears
                 ThreadPool.QueueUserWorkItem(_ =>
                 {
                     for (int attempt = 0; attempt < 25; attempt++)
@@ -566,13 +534,13 @@ namespace ZapretControlHost
             return null;
         }
 
-        private void PostApiJson(string path, string jsonPayload)
+        private void PostApiJson(string path, string jsonPayload, int timeoutMs)
         {
             try
             {
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + port + path);
                 req.Method = "POST";
-                req.Timeout = 1500;
+                req.Timeout = timeoutMs;
                 req.ContentType = "application/json";
                 byte[] body = Encoding.UTF8.GetBytes(jsonPayload ?? "{}");
                 req.ContentLength = body.Length;
@@ -582,6 +550,29 @@ namespace ZapretControlHost
                 }
                 using (WebResponse resp = req.GetResponse())
                 {
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static void RunSilentProcess(string exe, string arguments, int waitMs)
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(exe, arguments)
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using (Process p = Process.Start(psi))
+                {
+                    if (p != null && waitMs > 0)
+                    {
+                        p.WaitForExit(waitMs);
+                    }
                 }
             }
             catch
@@ -662,19 +653,16 @@ namespace ZapretControlHost
 
         private void ShutdownAll()
         {
-            if (iconSyncTimer != null)
-            {
-                iconSyncTimer.Stop();
-                iconSyncTimer.Dispose();
-            }
-            PostApiJson("/api/runner/stop", "{}");
-            trayIcon.Visible = false;
+            if (isShuttingDown) return;
+            isShuttingDown = true;
 
             try
             {
-                if (uiAppProcess != null && !uiAppProcess.HasExited)
+                if (activeMenu != null && !activeMenu.IsDisposed)
                 {
-                    uiAppProcess.CloseMainWindow();
+                    activeMenu.Close();
+                    activeMenu.Dispose();
+                    activeMenu = null;
                 }
             }
             catch
@@ -683,9 +671,55 @@ namespace ZapretControlHost
 
             try
             {
+                if (iconSyncTimer != null)
+                {
+                    iconSyncTimer.Stop();
+                    iconSyncTimer.Dispose();
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                trayIcon.Visible = false;
+                trayIcon.Dispose();
+            }
+            catch
+            {
+            }
+
+            // 1. Close dedicated --app UI window immediately
+            Program.CloseAllZapretControlWindows();
+            try
+            {
+                if (uiAppProcess != null && !uiAppProcess.HasExited)
+                {
+                    RunSilentProcess("taskkill.exe", "/PID " + uiAppProcess.Id + " /T /F", 600);
+                }
+            }
+            catch
+            {
+            }
+
+            // Also terminate any detached Chromium/Edge process holding our isolated ui-window-v2 profile
+            RunSilentProcess(
+                "powershell.exe",
+                "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLine -like '*ui-window-v2*' -or $_.CommandLine -like '*window-profile*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\"",
+                900
+            );
+
+            // 2. Stop active winws bypass and kill any lingering winws.exe
+            PostApiJson("/api/runner/stop", "{}", 450);
+            RunSilentProcess("taskkill.exe", "/IM winws.exe /F", 600);
+
+            // 3. Terminate backend server process tree
+            try
+            {
                 if (backendProcess != null && !backendProcess.HasExited)
                 {
-                    backendProcess.Kill();
+                    RunSilentProcess("taskkill.exe", "/PID " + backendProcess.Id + " /T /F", 700);
                 }
             }
             catch
@@ -696,38 +730,26 @@ namespace ZapretControlHost
             {
                 if (powershellBackend != null && !powershellBackend.HasExited)
                 {
-                    powershellBackend.Kill();
+                    RunSilentProcess("taskkill.exe", "/PID " + powershellBackend.Id + " /T /F", 700);
                 }
             }
             catch
             {
             }
 
-            try
-            {
-                ProcessStartInfo tk = new ProcessStartInfo("taskkill.exe", "/IM winws.exe /F")
-                {
-                    CreateNoWindow = true,
-                    UseShellExecute = false
-                };
-                Process.Start(tk);
-            }
-            catch
-            {
-            }
-
-            Application.Exit();
+            Program.ReleaseSingleInstanceMutex();
+            Application.ExitThread();
+            Environment.Exit(0);
         }
     }
 
-    // Custom Telegram-style borderless dark popup menu with anti-aliased Lucide vector icons
+    // Custom borderless dark popup menu with anti-aliased Lucide vector icons
     internal sealed class DarkTrayMenuForm : Form
     {
         private enum IconKind
         {
             Window,
             Power,
-            Bookmark,
             Folder,
             Exit
         }
@@ -735,10 +757,8 @@ namespace ZapretControlHost
         private sealed class MenuEntry
         {
             public bool IsSeparator;
-            public bool IsSectionLabel;
             public string Label;
             public IconKind Icon;
-            public bool Checked;
             public Color? AccentColor;
             public Action OnClick;
             public Rectangle Bounds;
@@ -748,6 +768,7 @@ namespace ZapretControlHost
         private readonly Icon brandIcon;
         private readonly List<MenuEntry> entries = new List<MenuEntry>();
         private int hoveredIndex = -1;
+        private bool isExecutingAction;
 
         private static readonly Color BgSurface = Color.FromArgb(23, 27, 36);        // #171B24
         private static readonly Color BgHeader = Color.FromArgb(17, 20, 27);         // #11141B
@@ -762,10 +783,9 @@ namespace ZapretControlHost
         private static readonly Color AccentGreen = Color.FromArgb(125, 216, 166);   // #7DD8A6
         private static readonly Color AccentCoral = Color.FromArgb(242, 184, 181);   // #F2B8B5
 
-        private const int MenuWidth = 276;
+        private const int MenuWidth = 268;
         private const int HeaderHeight = 56;
-        private const int ItemHeight = 35;
-        private const int SectionHeight = 24;
+        private const int ItemHeight = 36;
         private const int SeparatorHeight = 11;
 
         public DarkTrayMenuForm(
@@ -773,7 +793,6 @@ namespace ZapretControlHost
             Icon icon,
             Action onOpenWindow,
             Action onToggleBypass,
-            Action<string> onSelectProfile,
             Action onOpenZapretFolder,
             Action onExitApp)
         {
@@ -788,12 +807,18 @@ namespace ZapretControlHost
             BackColor = BgSurface;
             Font = new Font("Segoe UI", 9.25f, FontStyle.Regular, GraphicsUnit.Point);
 
-            BuildEntries(onOpenWindow, onToggleBypass, onSelectProfile, onOpenZapretFolder, onExitApp);
+            BuildEntries(onOpenWindow, onToggleBypass, onOpenZapretFolder, onExitApp);
             LayoutEntries();
 
             Region = Region.FromHrgn(NativeWin32.CreateRoundRectRgn(0, 0, Width + 1, Height + 1, 16, 16));
 
-            Deactivate += (s, e) => SafeDismiss();
+            Deactivate += (s, e) =>
+            {
+                if (!isExecutingAction)
+                {
+                    SafeDismiss();
+                }
+            };
             KeyDown += (s, e) =>
             {
                 if (e.KeyCode == Keys.Escape) SafeDismiss();
@@ -808,7 +833,6 @@ namespace ZapretControlHost
         private void BuildEntries(
             Action onOpenWindow,
             Action onToggleBypass,
-            Action<string> onSelectProfile,
             Action onOpenZapretFolder,
             Action onExitApp)
         {
@@ -826,28 +850,6 @@ namespace ZapretControlHost
                 AccentColor = snapshot.Running ? AccentCoral : AccentGreen,
                 OnClick = onToggleBypass
             });
-
-            if (snapshot.Profiles != null && snapshot.Profiles.Count > 0)
-            {
-                entries.Add(new MenuEntry { IsSeparator = true });
-                entries.Add(new MenuEntry
-                {
-                    IsSectionLabel = true,
-                    Label = "ПРОФИЛЬ НАСТРОЕК"
-                });
-
-                foreach (ProfileBrief prof in snapshot.Profiles)
-                {
-                    string pid = prof.Id;
-                    entries.Add(new MenuEntry
-                    {
-                        Label = prof.Name,
-                        Icon = IconKind.Bookmark,
-                        Checked = string.Equals(pid, snapshot.ActiveProfileId, StringComparison.OrdinalIgnoreCase),
-                        OnClick = () => onSelectProfile(pid)
-                    });
-                }
-            }
 
             entries.Add(new MenuEntry { IsSeparator = true });
 
@@ -878,11 +880,6 @@ namespace ZapretControlHost
                 {
                     e.Bounds = new Rectangle(12, y, MenuWidth - 24, SeparatorHeight);
                     y += SeparatorHeight;
-                }
-                else if (e.IsSectionLabel)
-                {
-                    e.Bounds = new Rectangle(14, y, MenuWidth - 28, SectionHeight);
-                    y += SectionHeight;
                 }
                 else
                 {
@@ -925,7 +922,7 @@ namespace ZapretControlHost
             for (int i = 0; i < entries.Count; i++)
             {
                 MenuEntry item = entries[i];
-                if (!item.IsSeparator && !item.IsSectionLabel && item.Bounds.Contains(e.Location))
+                if (!item.IsSeparator && item.Bounds.Contains(e.Location))
                 {
                     found = i;
                     break;
@@ -950,18 +947,22 @@ namespace ZapretControlHost
             }
         }
 
-        protected override void OnMouseClick(MouseEventArgs e)
+        protected override void OnMouseDown(MouseEventArgs e)
         {
-            base.OnMouseClick(e);
-            if (e.Button != MouseButtons.Left) return;
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left || isExecutingAction) return;
             for (int i = 0; i < entries.Count; i++)
             {
                 MenuEntry item = entries[i];
-                if (!item.IsSeparator && !item.IsSectionLabel && item.Bounds.Contains(e.Location))
+                if (!item.IsSeparator && item.Bounds.Contains(e.Location))
                 {
+                    isExecutingAction = true;
                     Action act = item.OnClick;
                     SafeDismiss();
-                    if (act != null) act();
+                    if (act != null)
+                    {
+                        act();
+                    }
                     return;
                 }
             }
@@ -1031,16 +1032,6 @@ namespace ZapretControlHost
                     continue;
                 }
 
-                if (item.IsSectionLabel)
-                {
-                    using (Font secFont = new Font("Segoe UI Semibold", 7.5f, FontStyle.Bold))
-                    using (SolidBrush secBrush = new SolidBrush(TextMuted))
-                    {
-                        g.DrawString(item.Label, secFont, secBrush, item.Bounds.Left + 4, item.Bounds.Top + 5);
-                    }
-                    continue;
-                }
-
                 bool hovered = (i == hoveredIndex);
                 if (hovered)
                 {
@@ -1054,22 +1045,22 @@ namespace ZapretControlHost
 
                 Color fg = item.AccentColor.HasValue
                     ? item.AccentColor.Value
-                    : (hovered || item.Checked ? TextPrimary : Color.FromArgb(208, 214, 226));
+                    : (hovered ? TextPrimary : Color.FromArgb(208, 214, 226));
                 Color iconCol = item.AccentColor.HasValue
                     ? item.AccentColor.Value
-                    : (hovered || item.Checked ? AccentBlue : TextSecondary);
+                    : (hovered ? AccentBlue : TextSecondary);
 
-                RectangleF iconBox = new RectangleF(item.Bounds.Left + 11f, item.Bounds.Top + 9.5f, 16f, 16f);
+                RectangleF iconBox = new RectangleF(item.Bounds.Left + 11f, item.Bounds.Top + 10f, 16f, 16f);
                 DrawLucideIcon(g, item.Icon, iconBox, iconCol);
 
                 RectangleF textBox = new RectangleF(
                     item.Bounds.Left + 36f,
                     item.Bounds.Top,
-                    item.Bounds.Width - (item.Checked ? 64f : 44f),
+                    item.Bounds.Width - 44f,
                     item.Bounds.Height
                 );
                 using (SolidBrush tb = new SolidBrush(fg))
-                using (Font itemFont = new Font("Segoe UI", 9.15f, item.Checked ? FontStyle.Bold : FontStyle.Regular))
+                using (Font itemFont = new Font("Segoe UI", 9.15f, FontStyle.Regular))
                 {
                     StringFormat sf = new StringFormat
                     {
@@ -1078,12 +1069,6 @@ namespace ZapretControlHost
                         FormatFlags = StringFormatFlags.NoWrap
                     };
                     g.DrawString(item.Label, itemFont, tb, textBox, sf);
-                }
-
-                if (item.Checked)
-                {
-                    RectangleF checkBox = new RectangleF(item.Bounds.Right - 24f, item.Bounds.Top + 10f, 14f, 14f);
-                    DrawCheckGlyph(g, checkBox, AccentGreen);
                 }
             }
 
@@ -1112,20 +1097,6 @@ namespace ZapretControlHost
             }
         }
 
-        private static void DrawCheckGlyph(Graphics g, RectangleF r, Color color)
-        {
-            using (Pen p = CreateLucidePen(color, 2.0f))
-            {
-                PointF[] pts = new PointF[]
-                {
-                    new PointF(r.Left + r.Width * 0.14f, r.Top + r.Height * 0.54f),
-                    new PointF(r.Left + r.Width * 0.42f, r.Top + r.Height * 0.82f),
-                    new PointF(r.Left + r.Width * 0.88f, r.Top + r.Height * 0.22f)
-                };
-                g.DrawLines(p, pts);
-            }
-        }
-
         private static void DrawLucideIcon(Graphics g, IconKind kind, RectangleF r, Color color)
         {
             using (Pen p = CreateLucidePen(color, 1.7f))
@@ -1150,19 +1121,6 @@ namespace ZapretControlHost
                         g.DrawLine(p, cx, r.Top + 0.8f, cx, r.Top + r.Height * 0.48f);
                         break;
                     }
-                    case IconKind.Bookmark:
-                    {
-                        PointF[] pts = new PointF[]
-                        {
-                            new PointF(r.Left + r.Width * 0.22f, r.Top + r.Height * 0.10f),
-                            new PointF(r.Left + r.Width * 0.78f, r.Top + r.Height * 0.10f),
-                            new PointF(r.Left + r.Width * 0.78f, r.Top + r.Height * 0.90f),
-                            new PointF(r.Left + r.Width * 0.50f, r.Top + r.Height * 0.68f),
-                            new PointF(r.Left + r.Width * 0.22f, r.Top + r.Height * 0.90f)
-                        };
-                        g.DrawPolygon(p, pts);
-                        break;
-                    }
                     case IconKind.Folder:
                     {
                         PointF[] pts = new PointF[]
@@ -1179,7 +1137,6 @@ namespace ZapretControlHost
                     }
                     case IconKind.Exit:
                     {
-                        // Lucide LogOut icon
                         PointF[] door = new PointF[]
                         {
                             new PointF(r.Left + r.Width * 0.45f, r.Top + 1.5f),

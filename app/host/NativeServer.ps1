@@ -26,6 +26,7 @@ function Get-AppSettings {
         activeProfileId = "default"
         showBestStrategyCards = $true
         connectLayout = "split"
+        developerMode = $false
         autoStartStrategyOnLaunch = $false
         launchOnWindowsStartup = $false
         startMinimizedToTray = $false

@@ -222,6 +222,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
 
   const isClassicStackedLayout = settings.connectLayout === 'stacked';
   const showBestCards = settings.showBestStrategyCards !== false;
+  const developerMode = Boolean(settings.developerMode);
 
   const localBuildLabel =
     appUpdateInfo?.currentShortSha || appUpdateState?.installedShortSha
@@ -462,6 +463,24 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
                   connectLayout: isClassicStackedLayout ? 'split' : 'stacked',
                 })
               }
+            >
+              <span className="m3-switch-thumb" />
+            </button>
+          </div>
+
+          <div className="m3-switch-row">
+            <div className="m3-switch-info">
+              <div className="m3-switch-title">Режим разработчика</div>
+              <div className="m3-switch-desc">
+                Отображает технические параметры движка winws, команды запуска .bat, счётчики проверок и протоколы HTTP/TLS во вкладках «Подключение» и «Тесты и цели».
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={developerMode}
+              className={`m3-switch ${developerMode ? 'checked' : ''}`}
+              onClick={() => onUpdateSettings({ developerMode: !developerMode })}
             >
               <span className="m3-switch-thumb" />
             </button>

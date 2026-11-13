@@ -12,7 +12,6 @@ import {
   ChevronDown,
   ChevronUp,
   Check,
-  Play,
   History,
 } from 'lucide-react';
 import type { FullAppState, TestRunReport } from '../types';
@@ -21,12 +20,12 @@ import {
   classifyPingSpeed,
   classifyScoreTone,
   findBestStrategyForGoal,
+  formatTestStrategyName,
   getGoalLabel,
   getGoalMetrics,
   GoalFilter,
   SortOption,
   sortStrategiesWithMetrics,
-  stripBatExtension,
 } from '../utils/metrics';
 
 interface TestsViewProps {
@@ -53,6 +52,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
   onApplyStrategy,
 }) => {
   const { strategies, targetCategories, testHistory, testJob, settings, runtime } = state;
+  const devMode = Boolean(settings.developerMode);
 
   const availableCategories = useMemo(() => {
     if (targetCategories && targetCategories.length > 0) {
@@ -73,7 +73,28 @@ export const TestsView: React.FC<TestsViewProps> = ({
   );
   const knownCatsRef = useRef<Set<string>>(new Set(availableCategories.map((c) => c.id)));
 
-  // Automatically enable newly added services from targets.txt and prune removed ones
+  // Custom seamless history dropdown state
+  const [historyMenuOpen, setHistoryMenuOpen] = useState<boolean>(false);
+  const historyDropdownRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!historyMenuOpen) return;
+    const onDocMouseDown = (evt: MouseEvent) => {
+      if (historyDropdownRef.current && !historyDropdownRef.current.contains(evt.target as Node)) {
+        setHistoryMenuOpen(false);
+      }
+    };
+    const onKeyDown = (evt: KeyboardEvent) => {
+      if (evt.key === 'Escape') setHistoryMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [historyMenuOpen]);
+
   useEffect(() => {
     const currentIds = availableCategories.map((c) => c.id);
     setSelectedCategories((prev) => {
@@ -92,7 +113,6 @@ export const TestsView: React.FC<TestsViewProps> = ({
 
   const lookup = useMemo(() => buildMetricsLookup(activeReport), [activeReport]);
 
-  // Dynamic goal chips: 'all' + every service category in targets.txt (excluding pure DNS unless custom)
   const goalOptions = useMemo(() => {
     const serviceCats = availableCategories.filter((c) => c.id !== 'dns');
     return ['all', ...serviceCats.map((c) => c.id)];
@@ -104,7 +124,6 @@ export const TestsView: React.FC<TestsViewProps> = ({
     }
   }, [goalFilter, goalOptions]);
 
-  // Pill categories shown per strategy row
   const rowPillCategories = useMemo(
     () => availableCategories.filter((c) => c.id !== 'dns'),
     [availableCategories]
@@ -173,6 +192,12 @@ export const TestsView: React.FC<TestsViewProps> = ({
     });
   }, [strategies, lookup, goalFilter, sortBy, onlyPassing]);
 
+  const currentHistoryLabel = useMemo(() => {
+    if (selectedHistoryFile === 'latest') return 'Последний замер';
+    const found = testHistory.find((h) => h.fileName === selectedHistoryFile);
+    return found ? (devMode ? `Отчёт: ${found.label}` : found.label) : 'Последний замер';
+  }, [selectedHistoryFile, testHistory, devMode]);
+
   return (
     <div className="content-container">
       {/* Test Launcher Control Panel */}
@@ -187,27 +212,61 @@ export const TestsView: React.FC<TestsViewProps> = ({
           }}
         >
           <div style={{ fontSize: '15.5px', fontWeight: 600 }}>
-            Проверка задержки и доступности сервисов
+            Проверка стратегий
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             {testHistory.length > 0 && (
-              <div className="input-wrap">
-                <History size={14} className="input-icon" />
-                <select
-                  className="m3-select"
-                  style={{ paddingLeft: '32px', maxWidth: '245px' }}
-                  value={selectedHistoryFile}
+              <div
+                ref={historyDropdownRef}
+                className={`m3-seamless-dropdown ${historyMenuOpen ? 'open' : ''}`}
+              >
+                <button
+                  type="button"
+                  className="m3-seamless-trigger"
                   disabled={testJob.running}
-                  onChange={(e) => onSelectHistoryFile(e.target.value)}
+                  onClick={() => setHistoryMenuOpen((o) => !o)}
                 >
-                  <option value="latest">Последний замер</option>
-                  {testHistory.map((h) => (
-                    <option key={h.fileName} value={h.fileName}>
-                      Отчёт: {h.label}
-                    </option>
-                  ))}
-                </select>
+                  <History size={14} className="m3-seamless-icon" />
+                  <span className="m3-seamless-label">{currentHistoryLabel}</span>
+                  <ChevronDown
+                    size={15}
+                    className={`m3-seamless-chevron ${historyMenuOpen ? 'rotated' : ''}`}
+                  />
+                </button>
+
+                {historyMenuOpen && (
+                  <div className="m3-seamless-menu">
+                    <button
+                      type="button"
+                      className={`m3-seamless-option ${selectedHistoryFile === 'latest' ? 'active' : ''}`}
+                      onClick={() => {
+                        onSelectHistoryFile('latest');
+                        setHistoryMenuOpen(false);
+                      }}
+                    >
+                      <span>Последний замер</span>
+                      {selectedHistoryFile === 'latest' && <Check size={13} />}
+                    </button>
+                    {testHistory.map((h) => {
+                      const active = selectedHistoryFile === h.fileName;
+                      return (
+                        <button
+                          key={h.fileName}
+                          type="button"
+                          className={`m3-seamless-option ${active ? 'active' : ''}`}
+                          onClick={() => {
+                            onSelectHistoryFile(h.fileName);
+                            setHistoryMenuOpen(false);
+                          }}
+                        >
+                          <span>{devMode ? `Отчёт: ${h.label}` : h.label}</span>
+                          {active && <Check size={13} />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 
@@ -227,7 +286,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
                 }}
               >
                 <Gauge size={15} />
-                Запустить тестирование
+                Запустить тесты
               </button>
             )}
           </div>
@@ -235,7 +294,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
 
         <div style={{ marginTop: '14px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
           <span style={{ fontSize: '12.5px', color: 'var(--m3-text-muted)', marginRight: '2px' }}>
-            Категории:
+            Сервисы:
           </span>
           {availableCategories.map((cat) => {
             const active = selectedCategories.includes(cat.id);
@@ -260,16 +319,17 @@ export const TestsView: React.FC<TestsViewProps> = ({
               style={{
                 display: 'flex',
                 justifyContent: 'space-between',
+                gap: '8px',
                 fontSize: '12px',
                 color: 'var(--m3-text-secondary)',
                 marginBottom: '6px',
               }}
             >
-              <span>
-                Тестируется стратегия:{' '}
-                {testJob.currentStrategy ? stripBatExtension(testJob.currentStrategy) : 'запуск...'}
+              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                Проверка:{' '}
+                {testJob.currentStrategy ? formatTestStrategyName(testJob.currentStrategy) : 'запуск...'}
               </span>
-              <span className="mono">{testJob.progressPct}%</span>
+              <span className="mono" style={{ flexShrink: 0 }}>{testJob.progressPct}%</span>
             </div>
             <div className="progress-track">
               <div
@@ -281,15 +341,17 @@ export const TestsView: React.FC<TestsViewProps> = ({
         )}
       </div>
 
-      {/* Optional Best Strategy Recommendations per Target (toggleable in Settings) */}
+      {/* Best Strategy Recommendations per Target */}
       {settings.showBestStrategyCards !== false && (
         <div className="leaders-grid">
           {leaderCards.map((card) => (
             <div key={card.key} className="leader-card">
               <div className="leader-card-top">
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
                   {card.icon}
-                  {card.title}
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {card.title}
+                  </span>
                 </span>
                 {card.winner && (
                   <span className={`score-pill ${classifyScoreTone(card.winner.scorePct)}`}>
@@ -299,14 +361,18 @@ export const TestsView: React.FC<TestsViewProps> = ({
               </div>
 
               <div className="leader-strat-name">
-                {card.winner ? stripBatExtension(card.winner.strategy.fileName) : 'Нет данных'}
+                {card.winner ? formatTestStrategyName(card.winner.strategy.fileName) : 'Нет данных'}
               </div>
 
               <div className="leader-meta">
                 <span>
                   {card.winner
-                    ? `${card.winner.okText} OK / ${card.winner.pingMs !== null ? `${card.winner.pingMs} мс` : '-- мс'}`
-                    : 'Запустите тест'}
+                    ? devMode
+                      ? `${card.winner.okText} OK / ${card.winner.pingMs !== null ? `${card.winner.pingMs} мс` : '-- мс'}`
+                      : card.winner.pingMs !== null
+                        ? `${card.winner.pingMs} мс`
+                        : 'Готово'
+                    : 'Нет замера'}
                 </span>
                 {card.winner && (
                   <button
@@ -314,7 +380,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
                     className="m3-chip"
                     style={{ height: '24px', padding: '0 9px', fontSize: '11.5px' }}
                     disabled={busy}
-                    onClick={() => onApplyStrategy(card.winner!.strategy.fileName, runtime.running)}
+                    onClick={() => onApplyStrategy(card.winner!.strategy.fileName, false)}
                   >
                     Выбрать
                   </button>
@@ -341,28 +407,29 @@ export const TestsView: React.FC<TestsViewProps> = ({
             ))}
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          <div className="toolbar-controls">
             <button
               type="button"
               className={`m3-chip ${onlyPassing ? 'selected' : ''}`}
               onClick={() => setOnlyPassing((v) => !v)}
             >
               {onlyPassing && <Check size={12} strokeWidth={2.3} />}
-              Только без потерь (90%+)
+              {devMode ? 'Только без потерь (90%+)' : 'Без потерь'}
             </button>
 
-            <div className="input-wrap">
+            <div className="input-wrap toolbar-sort-wrap">
               <ArrowUpDown size={14} className="input-icon" />
               <select
-                className="m3-select"
-                style={{ paddingLeft: '32px' }}
+                className="m3-select toolbar-sort-select"
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value as SortOption)}
               >
                 <option value="best">
-                  По качеству соединения ({getGoalLabel(goalFilter, availableCategories)})
+                  {devMode
+                    ? `По качеству соединения (${getGoalLabel(goalFilter, availableCategories)})`
+                    : 'По лучшему результату'}
                 </option>
-                <option value="latency">По минимальной задержке (мс)</option>
+                <option value="latency">По задержке (мс)</option>
                 <option value="name">По названию (А-Я)</option>
               </select>
             </div>
@@ -376,7 +443,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
             const isExpanded = expandedRow === s.fileName;
             const isSelected = settings.selectedStrategy === s.fileName;
             const isRunningThis = runtime.running && runtime.activeStrategy === s.fileName;
-            const fullStrategyName = stripBatExtension(s.fileName);
+            const cleanTestName = formatTestStrategyName(s.fileName);
 
             const filteredTargets = m
               ? goalFilter === 'all'
@@ -387,80 +454,64 @@ export const TestsView: React.FC<TestsViewProps> = ({
             return (
               <div
                 key={s.fileName}
-                style={{
-                  borderRadius: '14px',
-                  background: isRunningThis
-                    ? 'rgba(23, 53, 37, 0.36)'
-                    : isSelected
-                      ? 'rgba(29, 52, 88, 0.34)'
-                      : 'var(--m3-surface-low)',
-                  border: '1px solid var(--m3-outline)',
-                  padding: '11px 14px',
-                }}
+                className={`test-strategy-card ${isRunningThis ? 'running' : isSelected ? 'selected' : ''}`}
               >
                 <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'minmax(175px, 1.25fr) minmax(210px, 1.7fr) 96px auto',
-                    alignItems: 'center',
-                    gap: '12px',
-                    cursor: 'pointer',
+                  className="test-strategy-row"
+                  onClick={() => {
+                    if (m) {
+                      setExpandedRow(isExpanded ? null : s.fileName);
+                    }
                   }}
-                  onClick={() => setExpandedRow(isExpanded ? null : s.fileName)}
                 >
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
-                      <span className="strategy-title" title={fullStrategyName}>
-                        {fullStrategyName}
+                  <div className="strategy-main">
+                    <div className="strategy-name-line">
+                      <span className="strategy-title" title={devMode ? s.fileName : cleanTestName}>
+                        {cleanTestName}
                       </span>
                       {gStat.scorePct !== null && (
                         <span className={`score-pill ${classifyScoreTone(gStat.scorePct)}`}>
-                          {gStat.scorePct}% ({gStat.okText})
+                          {devMode ? `${gStat.scorePct}% (${gStat.okText})` : `${gStat.scorePct}%`}
                         </span>
                       )}
                     </div>
-                    <div className="strategy-engine">{s.engineSummary}</div>
+                    {devMode && <div className="strategy-engine">{s.engineSummary}</div>}
                   </div>
 
-                  <div className="category-pills">
-                    {m ? (
-                      rowPillCategories.map((cat) => {
+                  {m && (
+                    <div className="category-pills">
+                      {rowPillCategories.map((cat) => {
                         const cs = m.categoryScores[cat.id];
                         if (!cs || cs.total === 0) return null;
                         return (
                           <span key={cat.id} className={`score-pill ${classifyScoreTone(cs.pct)}`}>
-                            {cat.shortLabel} {cs.ok}/{cs.total}
+                            {devMode ? `${cat.shortLabel} ${cs.ok}/${cs.total}` : cat.shortLabel}
                           </span>
                         );
-                      })
-                    ) : (
-                      <span className="score-pill">Ожидает тестирования</span>
+                      })}
+                    </div>
+                  )}
+
+                  <div className="strategy-right">
+                    {(gStat.pingMs !== null || devMode) && (
+                      <div className={`ping-badge ${classifyPingSpeed(gStat.pingMs)}`}>
+                        {gStat.pingMs !== null ? `${gStat.pingMs} мс` : '-- мс'}
+                      </div>
                     )}
-                  </div>
 
-                  <div className={`ping-badge ${classifyPingSpeed(gStat.pingMs)}`}>
-                    {gStat.pingMs !== null ? `${gStat.pingMs} мс` : '-- мс'}
-                  </div>
-
-                  <div className="row-actions" onClick={(e) => e.stopPropagation()}>
-                    <button
-                      type="button"
-                      className="btn btn-tonal"
-                      style={{ height: '30px', padding: '0 11px', fontSize: '12px' }}
-                      disabled={busy || testJob.running}
-                      onClick={() => onApplyStrategy(s.fileName, true)}
-                    >
-                      <Play size={12} />
-                      Запустить
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-icon"
-                      title="Показать детальный отчёт по хостам"
-                      onClick={() => setExpandedRow(isExpanded ? null : s.fileName)}
-                    >
-                      {isExpanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-                    </button>
+                    {m && (
+                      <button
+                        type="button"
+                        className="btn-icon"
+                        title="Подробности проверки"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setExpandedRow(isExpanded ? null : s.fileName);
+                        }}
+                      >
+                        {isExpanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -470,32 +521,42 @@ export const TestsView: React.FC<TestsViewProps> = ({
                       const passed = t.isPingOnly ? t.pingMs !== null : t.http === 'OK' && t.tls12 === 'OK';
                       return (
                         <div key={t.id} className="target-detail-card">
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontWeight: 600, fontSize: '12.5px' }}>{t.id}</span>
-                            <span className="mono" style={{ fontSize: '11.5px', color: 'var(--m3-text-secondary)' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                            <span style={{ fontWeight: 600, fontSize: '12.5px', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {t.id}
+                            </span>
+                            <span className="mono" style={{ fontSize: '11.5px', color: 'var(--m3-text-secondary)', flexShrink: 0 }}>
                               {t.pingMs !== null ? `${t.pingMs} мс` : 'таймаут'}
                             </span>
                           </div>
-                          {t.isPingOnly ? (
+                          {devMode ? (
+                            t.isPingOnly ? (
+                              <div style={{ display: 'flex', gap: '5px' }}>
+                                <span className={`score-pill ${passed ? 'good' : 'bad'}`}>
+                                  ICMP Ping: {passed ? 'OK' : 'TIMEOUT'}
+                                </span>
+                              </div>
+                            ) : (
+                              <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
+                                <span className={`score-pill ${t.http === 'OK' ? 'good' : 'bad'}`}>
+                                  HTTP: {t.http}
+                                </span>
+                                <span className={`score-pill ${t.tls12 === 'OK' ? 'good' : 'bad'}`}>
+                                  TLS1.2: {t.tls12}
+                                </span>
+                                <span
+                                  className={`score-pill ${
+                                    t.tls13 === 'OK' ? 'good' : t.tls13 === 'UNSUP' ? '' : 'bad'
+                                  }`}
+                                >
+                                  TLS1.3: {t.tls13}
+                                </span>
+                              </div>
+                            )
+                          ) : (
                             <div style={{ display: 'flex', gap: '5px' }}>
                               <span className={`score-pill ${passed ? 'good' : 'bad'}`}>
-                                ICMP Ping: {passed ? 'OK' : 'TIMEOUT'}
-                              </span>
-                            </div>
-                          ) : (
-                            <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
-                              <span className={`score-pill ${t.http === 'OK' ? 'good' : 'bad'}`}>
-                                HTTP: {t.http}
-                              </span>
-                              <span className={`score-pill ${t.tls12 === 'OK' ? 'good' : 'bad'}`}>
-                                TLS1.2: {t.tls12}
-                              </span>
-                              <span
-                                className={`score-pill ${
-                                  t.tls13 === 'OK' ? 'good' : t.tls13 === 'UNSUP' ? '' : 'bad'
-                                }`}
-                              >
-                                TLS1.3: {t.tls13}
+                                {passed ? 'Доступен' : 'Недоступен'}
                               </span>
                             </div>
                           )}

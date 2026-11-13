@@ -16,6 +16,7 @@ export interface AppSettings {
   showWinwsConsole: boolean;
   showBestStrategyCards: boolean;
   connectLayout: ConnectLayoutMode;
+  developerMode: boolean;
 }
 
 export interface UserProfile {

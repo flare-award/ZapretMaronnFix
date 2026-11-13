@@ -30,6 +30,19 @@ export function stripBatExtension(fileName: string): string {
   return fileName.replace(/\.bat$/i, '');
 }
 
+export function formatTestStrategyName(fileName: string): string {
+  const base = stripBatExtension(fileName).trim();
+  if (/^general$/i.test(base)) {
+    return 'Базовая';
+  }
+  const cleaned = base
+    .replace(/^general\s*/i, '')
+    .replace(/[()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || base;
+}
+
 export function formatDuration(startedAt: number | null, nowMs: number): string {
   if (!startedAt) return '00:00:00';
   const diffSec = Math.max(0, Math.floor((nowMs - startedAt) / 1000));

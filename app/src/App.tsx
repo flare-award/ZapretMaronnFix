@@ -7,7 +7,6 @@ import {
   ListFilter,
   Wrench,
   Settings,
-  Power,
   RotateCw,
   AlertCircle,
   CheckCircle2,
@@ -552,21 +551,10 @@ export const App: React.FC = () => {
             </span>
           </div>
           <div
+            className="mono"
             style={{
               fontSize: '11.5px',
               color: 'var(--m3-text-secondary)',
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-            }}
-          >
-            Профиль: {activeProfile ? activeProfile.name : 'Основной'}
-          </div>
-          <div
-            className="mono"
-            style={{
-              fontSize: '11px',
-              color: 'var(--m3-text-muted)',
               whiteSpace: 'nowrap',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
@@ -576,6 +564,17 @@ export const App: React.FC = () => {
               ? `${state.runtime.activeStrategy.replace(/\.bat$/i, '')} / ${formatDuration(state.runtime.startedAt, nowMs)}`
               : state.settings.selectedStrategy.replace(/\.bat$/i, '')}
           </div>
+          <div
+            style={{
+              fontSize: '11px',
+              color: 'var(--m3-text-muted)',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            Профиль: {activeProfile ? activeProfile.name : 'Основной'}
+          </div>
         </div>
       </aside>
 
@@ -584,20 +583,6 @@ export const App: React.FC = () => {
         <header className="topbar">
           <div className="topbar-titles">
             <h1 className="page-title">{TAB_LABELS[tab]}</h1>
-          </div>
-
-          <div className="topbar-actions">
-            {tab !== 'connect' && (
-              <button
-                type="button"
-                className={`btn ${state.runtime.running ? 'btn-danger-tonal' : 'btn-primary'}`}
-                disabled={busy || state.testJob.running}
-                onClick={handleTogglePower}
-              >
-                <Power size={14} />
-                {state.runtime.running ? 'Остановить' : 'Включить обход'}
-              </button>
-            )}
           </div>
         </header>
 

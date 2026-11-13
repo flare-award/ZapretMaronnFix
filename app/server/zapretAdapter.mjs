@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS = {
   showWinwsConsole: false,
   showBestStrategyCards: true,
   connectLayout: 'split',
+  developerMode: false,
 };
 
 export const LIST_DEFINITIONS = [

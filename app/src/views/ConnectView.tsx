@@ -7,7 +7,6 @@ import {
   Gamepad2,
   Network,
   Terminal,
-  Play,
   X,
   Check,
   Bookmark,
@@ -65,9 +64,9 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
   const [inspectStrategy, setInspectStrategy] = useState<StrategyItem | null>(null);
 
   const { runtime, settings, strategies, profiles, activeProfileId, filters, targetCategories, testJob } = state;
+  const devMode = Boolean(settings.developerMode);
   const metricsLookup = useMemo(() => buildMetricsLookup(activeReport), [activeReport]);
 
-  // Dynamic goals from targets.txt (excluding pure DNS ping group unless user explicitly added custom service)
   const goalOptions = useMemo(() => {
     const serviceCats = targetCategories.filter((c) => c.id !== 'dns');
     return ['all', ...serviceCats.map((c) => c.id)];
@@ -79,7 +78,6 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
     }
   }, [goal, goalOptions]);
 
-  // Pill categories shown on each strategy row (includes any custom services added to targets.txt)
   const pillCategories = useMemo(() => {
     const base = targetCategories.filter((c) => c.id !== 'dns' && c.id !== 'google');
     return base.length > 0
@@ -107,11 +105,11 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
           (s) =>
             stripBatExtension(s.fileName).toLowerCase().includes(q) ||
             s.displayName.toLowerCase().includes(q) ||
-            s.engineSummary.toLowerCase().includes(q)
+            (devMode && s.engineSummary.toLowerCase().includes(q))
         )
       : strategies;
     return sortStrategiesWithMetrics(base, metricsLookup, goal, sortBy);
-  }, [strategies, search, metricsLookup, goal, sortBy]);
+  }, [strategies, search, metricsLookup, goal, sortBy, devMode]);
 
   const gameModes: Array<{ value: GameFilterMode; label: string }> = [
     { value: 'disabled', label: 'Выкл' },
@@ -136,13 +134,13 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
           className="power-button"
           disabled={busy || testJob.running || !currentStrategyObj}
           onClick={onTogglePower}
-          title={runtime.running ? 'Остановить стратегию' : 'Запустить выбранную стратегию'}
+          title={runtime.running ? 'Остановить обход' : 'Запустить обход'}
         >
-          <Power size={34} strokeWidth={2} />
+          <Power size={40} strokeWidth={2.05} />
         </button>
       </div>
 
-      <div>
+      <div className="power-text-group">
         <div className="power-state-label">
           {testJob.running
             ? 'Выполняется тест...'
@@ -150,10 +148,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
               ? 'Обход активен'
               : 'Обход остановлен'}
         </div>
-        <div
-          className="mono"
-          style={{ fontSize: '12.5px', color: 'var(--m3-text-secondary)', marginTop: '4px' }}
-        >
+        <div className="power-strategy-label mono">
           {currentStrategyObj ? stripBatExtension(currentStrategyObj.fileName) : 'Стратегии не найдены'}
         </div>
       </div>
@@ -228,9 +223,11 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
             </button>
           ))}
         </div>
-        <div className="tile-sub mono">
-          TCP: {filters.gameFilter.tcpRange} / UDP: {filters.gameFilter.udpRange}
-        </div>
+        {devMode && (
+          <div className="tile-sub mono">
+            TCP: {filters.gameFilter.tcpRange} / UDP: {filters.gameFilter.udpRange}
+          </div>
+        )}
       </div>
 
       {/* 3. IPSet Filter Quick Tile */}
@@ -268,7 +265,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
   );
 
   const strategiesCardEl = (
-    <div className="m3-card">
+    <div className="m3-card connect-strategies-card">
       <div className="toolbar-bar">
         <div className="chip-row">
           {goalOptions.map((g) => (
@@ -283,24 +280,22 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
           ))}
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          <div className="input-wrap">
+        <div className="toolbar-controls">
+          <div className="input-wrap toolbar-search-wrap">
             <Search size={14} className="input-icon" />
             <input
               type="text"
-              className="m3-input with-icon"
+              className="m3-input with-icon toolbar-search-input"
               placeholder="Поиск стратегии..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              style={{ width: '185px' }}
             />
           </div>
 
-          <div className="input-wrap">
+          <div className="input-wrap toolbar-sort-wrap">
             <ArrowUpDown size={14} className="input-icon" />
             <select
-              className="m3-select"
-              style={{ paddingLeft: '32px' }}
+              className="m3-select toolbar-sort-select"
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value as SortOption)}
             >
@@ -318,16 +313,17 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
             style={{
               display: 'flex',
               justifyContent: 'space-between',
+              gap: '8px',
               fontSize: '12px',
               color: 'var(--m3-text-secondary)',
               marginBottom: '6px',
             }}
           >
-            <span>
-              Проверка стратегии:{' '}
+            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              Проверка:{' '}
               {testJob.currentStrategy ? stripBatExtension(testJob.currentStrategy) : 'подготовка...'}
             </span>
-            <span className="mono">
+            <span className="mono" style={{ flexShrink: 0 }}>
               {testJob.completedCount} / {testJob.totalCount}
             </span>
           </div>
@@ -364,23 +360,23 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
                     {fullStrategyName}
                   </span>
                   {isRunningThis && (
-                    <span className="score-pill good" style={{ fontSize: '10.5px' }}>
+                    <span className="score-pill good" style={{ fontSize: '10.5px', flexShrink: 0 }}>
                       Активна
                     </span>
                   )}
                   {goal !== 'all' && goalStat.scorePct === 100 && (
-                    <span className="score-pill good" style={{ fontSize: '10.5px' }}>
+                    <span className="score-pill good" style={{ fontSize: '10.5px', flexShrink: 0 }}>
                       <Check size={11} strokeWidth={2.3} />
                       {getGoalLabel(goal, targetCategories)}
                     </span>
                   )}
                 </div>
-                <div className="strategy-engine">{s.engineSummary}</div>
+                {devMode && <div className="strategy-engine">{s.engineSummary}</div>}
               </div>
 
-              <div className="category-pills">
-                {m ? (
-                  pillCategories.map((cat) => {
+              {devMode && m && (
+                <div className="category-pills">
+                  {pillCategories.map((cat) => {
                     const cs = m.categoryScores[cat.id];
                     if (!cs || cs.total === 0) return null;
                     return (
@@ -388,43 +384,40 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
                         {cat.shortLabel} {cs.ok}/{cs.total}
                       </span>
                     );
-                  })
-                ) : (
-                  <span className="score-pill">Нет данных замера</span>
+                  })}
+                </div>
+              )}
+
+              <div className="strategy-right" onClick={(e) => e.stopPropagation()}>
+                {(goalStat.pingMs !== null || devMode) && (
+                  <div
+                    className={`ping-badge ${classifyPingSpeed(goalStat.pingMs)}`}
+                    onClick={() => onSelectStrategy(s.fileName, false)}
+                  >
+                    {goalStat.pingMs !== null ? `${goalStat.pingMs} мс` : '-- мс'}
+                  </div>
                 )}
-              </div>
 
-              <div className={`ping-badge ${classifyPingSpeed(goalStat.pingMs)}`}>
-                {goalStat.pingMs !== null ? `${goalStat.pingMs} мс` : '-- мс'}
-              </div>
-
-              <div className="row-actions" onClick={(e) => e.stopPropagation()}>
                 <button
                   type="button"
                   className="btn-icon"
-                  title="Запустить эту стратегию сейчас"
-                  disabled={busy || testJob.running}
-                  onClick={() => onSelectStrategy(s.fileName, true)}
-                >
-                  <Play size={14} strokeWidth={2} />
-                </button>
-                <button
-                  type="button"
-                  className="btn-icon"
-                  title="Проверить только эту стратегию"
+                  title="Проверить эту стратегию"
                   disabled={testJob.running}
                   onClick={() => onRunQuickTest([s.fileName])}
                 >
                   <Gauge size={14} strokeWidth={1.9} />
                 </button>
-                <button
-                  type="button"
-                  className="btn-icon"
-                  title="Команда запуска .bat"
-                  onClick={() => setInspectStrategy(s)}
-                >
-                  <Terminal size={14} strokeWidth={1.9} />
-                </button>
+
+                {devMode && (
+                  <button
+                    type="button"
+                    className="btn-icon"
+                    title="Команда запуска .bat"
+                    onClick={() => setInspectStrategy(s)}
+                  >
+                    <Terminal size={14} strokeWidth={1.9} />
+                  </button>
+                )}
               </div>
             </div>
           );
@@ -459,7 +452,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
         </>
       )}
 
-      {/* Modal: Inspect exact .bat winws command */}
+      {/* Developer Mode Modal: Inspect exact .bat winws command */}
       {inspectStrategy && (
         <div className="modal-backdrop" onClick={() => setInspectStrategy(null)}>
           <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
@@ -496,11 +489,10 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
                 onClick={() => {
                   const target = inspectStrategy.fileName;
                   setInspectStrategy(null);
-                  onSelectStrategy(target, true);
+                  onSelectStrategy(target, false);
                 }}
               >
-                <Play size={14} />
-                Выбрать и запустить
+                Выбрать стратегию
               </button>
             </div>
           </div>
