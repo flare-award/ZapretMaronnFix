@@ -41,8 +41,18 @@ const IPSET_MODE_LABELS: Record<IpsetFilterMode, string> = {
   any: 'Any',
 };
 
+const MAX_PROFILE_NAME_LENGTH = 28;
+const MAX_PROFILE_DESC_LENGTH = 90;
+
 function formatStrategyName(fileName: string): string {
   return fileName.replace(/\.bat$/i, '');
+}
+
+function getProfileTitleSizeClass(title: string): string {
+  const len = title.trim().length;
+  if (len > 21) return 'size-compact';
+  if (len > 14) return 'size-medium';
+  return '';
 }
 
 export const ProfilesView: React.FC<ProfilesViewProps> = ({
@@ -70,8 +80,8 @@ export const ProfilesView: React.FC<ProfilesViewProps> = ({
   const openEditModal = (prof: UserProfile) => {
     setModalMode('edit');
     setEditingId(prof.id);
-    setName(prof.name);
-    setDescription(prof.description || '');
+    setName(prof.name.slice(0, MAX_PROFILE_NAME_LENGTH));
+    setDescription((prof.description || '').slice(0, MAX_PROFILE_DESC_LENGTH));
   };
 
   const closeModal = () => {
@@ -80,7 +90,9 @@ export const ProfilesView: React.FC<ProfilesViewProps> = ({
   };
 
   const handleDuplicate = (prof: UserProfile) => {
-    const baseCopyName = `${prof.name} (копия)`.slice(0, 48);
+    const suffix = ' (копия)';
+    const trimmedBase = prof.name.slice(0, MAX_PROFILE_NAME_LENGTH - suffix.length).trimEnd();
+    const baseCopyName = `${trimmedBase}${suffix}`;
     onCreateProfile({
       name: baseCopyName,
       description: prof.description || '',
@@ -143,7 +155,10 @@ export const ProfilesView: React.FC<ProfilesViewProps> = ({
               {/* Top: Title, optional description & action buttons */}
               <div className="profile-card-top">
                 <div className="profile-card-heading">
-                  <div className="profile-card-title" title={prof.name}>
+                  <div
+                    className={`profile-card-title ${getProfileTitleSizeClass(prof.name)}`}
+                    title={prof.name}
+                  >
                     {prof.name}
                   </div>
                   {prof.description && (
@@ -260,25 +275,31 @@ export const ProfilesView: React.FC<ProfilesViewProps> = ({
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <div>
-                <label
+                <div
                   style={{
-                    display: 'block',
-                    fontSize: '12px',
-                    color: 'var(--m3-text-secondary)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
                     marginBottom: '5px',
                   }}
                 >
-                  Название профиля
-                </label>
+                  <label style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
+                    Название профиля
+                  </label>
+                  <span className="mono" style={{ fontSize: '11px', color: 'var(--m3-text-muted)' }}>
+                    {name.length}/{MAX_PROFILE_NAME_LENGTH}
+                  </span>
+                </div>
                 <input
                   type="text"
                   required
                   autoFocus
+                  maxLength={MAX_PROFILE_NAME_LENGTH}
                   className="m3-input"
                   style={{ width: '100%' }}
                   placeholder="Например: Для игры"
                   value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => setName(e.target.value.slice(0, MAX_PROFILE_NAME_LENGTH))}
                 />
               </div>
 
@@ -295,11 +316,12 @@ export const ProfilesView: React.FC<ProfilesViewProps> = ({
                 </label>
                 <input
                   type="text"
+                  maxLength={MAX_PROFILE_DESC_LENGTH}
                   className="m3-input"
                   style={{ width: '100%' }}
                   placeholder="Краткая заметка о профиле"
                   value={description}
-                  onChange={(e) => setDescription(e.target.value)}
+                  onChange={(e) => setDescription(e.target.value.slice(0, MAX_PROFILE_DESC_LENGTH))}
                 />
               </div>
             </div>

@@ -799,12 +799,25 @@ pre,
   text-overflow: ellipsis;
 }
 
-/* Custom Seamless Dropdown ("Последний замер") */
+/* Custom Seamless Dropdown */
 .m3-seamless-dropdown {
   position: relative;
   display: inline-flex;
   min-width: 196px;
   max-width: 260px;
+}
+
+.m3-seamless-dropdown.full-width {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+
+.m3-seamless-dropdown.toolbar-sort-dropdown {
+  flex: 1 1 182px;
+  min-width: 148px;
+  max-width: 265px;
 }
 
 .m3-seamless-trigger {
@@ -842,7 +855,13 @@ pre,
   z-index: 46;
 }
 
+.m3-seamless-dropdown.open.drop-up .m3-seamless-trigger {
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+
 .m3-seamless-icon {
+  display: inline-flex;
+  align-items: center;
   color: var(--m3-text-muted);
   flex-shrink: 0;
 }
@@ -854,6 +873,10 @@ pre,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.m3-seamless-label.placeholder {
+  color: var(--m3-text-secondary);
 }
 
 .m3-seamless-chevron {
@@ -884,6 +907,16 @@ pre,
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.m3-seamless-dropdown.open.drop-up .m3-seamless-menu {
+  top: auto;
+  bottom: 100%;
+  margin-top: 0;
+  margin-bottom: -1px;
+  border-top: 1px solid rgba(168, 199, 250, 0.42);
+  border-bottom: 1px solid var(--m3-outline);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 
 .m3-seamless-option {
@@ -1542,12 +1575,22 @@ pre,
 }
 
 .profile-card-title {
-  font-size: 16.5px;
+  font-size: 18.5px;
   font-weight: 600;
-  line-height: 1.3;
+  letter-spacing: -0.01em;
+  line-height: 1.28;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: font-size 120ms var(--ease-m3);
+}
+
+.profile-card-title.size-medium {
+  font-size: 16.2px;
+}
+
+.profile-card-title.size-compact {
+  font-size: 14.3px;
 }
 
 .profile-card-desc {

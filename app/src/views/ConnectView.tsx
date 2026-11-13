@@ -30,6 +30,7 @@ import {
   sortStrategiesWithMetrics,
   stripBatExtension,
 } from '../utils/metrics';
+import { SeamlessSelect } from '../components/SeamlessSelect';
 
 interface ConnectViewProps {
   state: FullAppState;
@@ -60,7 +61,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
 }) => {
   const [search, setSearch] = useState('');
   const [goal, setGoal] = useState<GoalFilter>('all');
-  const [sortBy, setSortBy] = useState<SortOption>('best');
+  const [sortBy, setSortBy] = useState<SortOption>('name');
   const [inspectStrategy, setInspectStrategy] = useState<StrategyItem | null>(null);
 
   const { runtime, settings, strategies, profiles, activeProfileId, filters, targetCategories, testJob } = state;
@@ -292,18 +293,17 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
             />
           </div>
 
-          <div className="input-wrap toolbar-sort-wrap">
-            <ArrowUpDown size={14} className="input-icon" />
-            <select
-              className="m3-select toolbar-sort-select"
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as SortOption)}
-            >
-              <option value="best">Сначала лучшее соединение</option>
-              <option value="latency">По задержке (мс)</option>
-              <option value="name">По названию (А-Я)</option>
-            </select>
-          </div>
+          <SeamlessSelect
+            className="toolbar-sort-dropdown"
+            value={sortBy}
+            icon={<ArrowUpDown size={14} />}
+            options={[
+              { value: 'best', label: 'Сначала лучшее соединение' },
+              { value: 'latency', label: 'По задержке (мс)' },
+              { value: 'name', label: 'По названию (А-Я)' },
+            ]}
+            onChange={(val) => setSortBy(val as SortOption)}
+          />
         </div>
       </div>
 

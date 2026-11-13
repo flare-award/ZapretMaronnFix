@@ -1654,8 +1654,8 @@ export function createProfile(zapretDir, payload = {}) {
 
   const newProf = {
     id: `prof-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-    name: name.slice(0, 48),
-    description: String(payload.description || '').trim().slice(0, 120),
+    name: name.slice(0, 28),
+    description: String(payload.description || '').trim().slice(0, 90),
     isDefault: false,
     strategy: payload.strategy || snap.strategy,
     gameFilterMode: ['disabled', 'all', 'tcp', 'udp'].includes(payload.gameFilterMode)
@@ -1700,9 +1700,9 @@ export function updateProfile(zapretDir, profileId, patch = {}) {
 
   const updated = {
     ...existing,
-    name: nextName.slice(0, 48),
+    name: nextName.slice(0, 28),
     description:
-      patch.description !== undefined ? String(patch.description).trim().slice(0, 120) : existing.description,
+      patch.description !== undefined ? String(patch.description).trim().slice(0, 90) : existing.description,
     isDefault: existing.id === 'default',
     strategy: patch.strategy !== undefined ? patch.strategy : existing.strategy,
     gameFilterMode:

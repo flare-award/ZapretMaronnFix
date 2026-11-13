@@ -280,12 +280,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
                 <Sparkles size={18} />
               )}
             </div>
-            <div>
-              <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Обновление программы Zapret Control</div>
-              <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
-                Автоматическая загрузка, замена файлов программы и перезапуск с сохранением ваших профилей, настроек и списков
-              </div>
-            </div>
+            <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Обновление программы Zapret Control</div>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -451,124 +446,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
         </div>
       </div>
 
-      {/* 2. Interface & Display Settings */}
-      <div className="m3-card">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
-          <div className="brand-mark">
-            <LayoutPanelLeft size={18} />
-          </div>
-          <div>
-            <div style={{ fontSize: '15px', fontWeight: 600 }}>Отображение и интерфейс</div>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
-              Настройка расположения панелей на главном экране и карточек рекомендаций в тестах
-            </div>
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <div className="m3-switch-row">
-            <div className="m3-switch-info">
-              <div className="m3-switch-title">
-                Показывать плашки лучших стратегий во вкладке «Тесты и цели»
-              </div>
-              <div className="m3-switch-desc">
-                Отображает карточки «Лучшая для всего», «Лучшая для Discord», «Лучшая для YouTube», «Лучшая для Cloudflare» и «Лучшая для GitHub».
-              </div>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={showBestCards}
-              className={`m3-switch ${showBestCards ? 'checked' : ''}`}
-              onClick={() => onUpdateSettings({ showBestStrategyCards: !showBestCards })}
-            >
-              <span className="m3-switch-thumb" />
-            </button>
-          </div>
-
-          <div className="m3-switch-row">
-            <div className="m3-switch-info">
-              <div className="m3-switch-title">
-                Классическое расположение вкладки «Подключение» (список стратегий снизу)
-              </div>
-              <div className="m3-switch-desc">
-                По умолчанию список стратегий находится справа от кнопки подключения, а плашки фильтров и профиля — под кнопкой. Включите, чтобы вернуть прежний вариант.
-              </div>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={isClassicStackedLayout}
-              className={`m3-switch ${isClassicStackedLayout ? 'checked' : ''}`}
-              onClick={() =>
-                onUpdateSettings({
-                  connectLayout: isClassicStackedLayout ? 'split' : 'stacked',
-                })
-              }
-            >
-              <span className="m3-switch-thumb" />
-            </button>
-          </div>
-
-          <div className="m3-switch-row">
-            <div className="m3-switch-info">
-              <div className="m3-switch-title">Режим разработчика</div>
-              <div className="m3-switch-desc">
-                Отображает технические параметры движка winws, команды запуска .bat, счётчики проверок и протоколы HTTP/TLS во вкладках «Подключение» и «Тесты и цели».
-              </div>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={developerMode}
-              className={`m3-switch ${developerMode ? 'checked' : ''}`}
-              onClick={() => onUpdateSettings({ developerMode: !developerMode })}
-            >
-              <span className="m3-switch-thumb" />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* 3. Program Startup & Auto-Enable Strategy Settings */}
-      <div className="m3-card">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
-          <div className="brand-mark">
-            <Settings2 size={18} />
-          </div>
-          <div>
-            <div style={{ fontSize: '15px', fontWeight: 600 }}>Автозапуск и поведение программы</div>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
-              Настройки применяются мгновенно и сохраняются между перезапусками и обновлениями
-            </div>
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          {startupSwitches.map((sw) => {
-            const checked = Boolean(settings[sw.key]);
-            return (
-              <div key={sw.key} className="m3-switch-row">
-                <div className="m3-switch-info">
-                  <div className="m3-switch-title">{sw.title}</div>
-                  <div className="m3-switch-desc">{sw.desc}</div>
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={checked}
-                  className={`m3-switch ${checked ? 'checked' : ''}`}
-                  onClick={() => onUpdateSettings({ [sw.key]: !checked })}
-                >
-                  <span className="m3-switch-thumb" />
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* 4. Zapret Version & Update Checker */}
+      {/* 2. Zapret Versions & Update Checker */}
       <div className="m3-card">
         <div
           style={{
@@ -584,7 +462,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             <div className="brand-mark">
               {updateInfo?.updateAvailable ? <ArrowUpCircle size={19} /> : <CheckCircle2 size={19} />}
             </div>
-            <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Версия Zapret и проверка обновлений</div>
+            <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Версии Zapret и проверка обновлений</div>
           </div>
 
           <button type="button" className="btn btn-tonal" disabled={checkingUpdate} onClick={onCheckUpdate}>
@@ -706,10 +584,127 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
         )}
       </div>
 
-      {/* 5. Isolated Zapret Folder & User List Protection */}
+      {/* 3. Interface & Display Settings */}
+      <div className="m3-card">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
+          <div className="brand-mark">
+            <LayoutPanelLeft size={18} />
+          </div>
+          <div>
+            <div style={{ fontSize: '15px', fontWeight: 600 }}>Отображение и интерфейс</div>
+            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
+              Настройка расположения панелей на главном экране и карточек рекомендаций в тестах
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div className="m3-switch-row">
+            <div className="m3-switch-info">
+              <div className="m3-switch-title">
+                Показывать плашки лучших стратегий во вкладке «Тесты и цели»
+              </div>
+              <div className="m3-switch-desc">
+                Отображает карточки «Лучшая для всего», «Лучшая для Discord», «Лучшая для YouTube», «Лучшая для Cloudflare» и «Лучшая для GitHub».
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={showBestCards}
+              className={`m3-switch ${showBestCards ? 'checked' : ''}`}
+              onClick={() => onUpdateSettings({ showBestStrategyCards: !showBestCards })}
+            >
+              <span className="m3-switch-thumb" />
+            </button>
+          </div>
+
+          <div className="m3-switch-row">
+            <div className="m3-switch-info">
+              <div className="m3-switch-title">
+                Классическое расположение вкладки «Подключение» (список стратегий снизу)
+              </div>
+              <div className="m3-switch-desc">
+                По умолчанию список стратегий находится справа от кнопки подключения, а плашки фильтров и профиля — под кнопкой. Включите, чтобы вернуть прежний вариант.
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={isClassicStackedLayout}
+              className={`m3-switch ${isClassicStackedLayout ? 'checked' : ''}`}
+              onClick={() =>
+                onUpdateSettings({
+                  connectLayout: isClassicStackedLayout ? 'split' : 'stacked',
+                })
+              }
+            >
+              <span className="m3-switch-thumb" />
+            </button>
+          </div>
+
+          <div className="m3-switch-row">
+            <div className="m3-switch-info">
+              <div className="m3-switch-title">Режим разработчика</div>
+              <div className="m3-switch-desc">
+                Отображает технические параметры движка winws, команды запуска .bat, счётчики проверок и протоколы HTTP/TLS во вкладках «Подключение» и «Тесты и цели».
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={developerMode}
+              className={`m3-switch ${developerMode ? 'checked' : ''}`}
+              onClick={() => onUpdateSettings({ developerMode: !developerMode })}
+            >
+              <span className="m3-switch-thumb" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* 4. Program Startup & Auto-Enable Strategy Settings */}
+      <div className="m3-card">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
+          <div className="brand-mark">
+            <Settings2 size={18} />
+          </div>
+          <div>
+            <div style={{ fontSize: '15px', fontWeight: 600 }}>Автозапуск и поведение программы</div>
+            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
+              Настройки применяются мгновенно и сохраняются между перезапусками и обновлениями
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {startupSwitches.map((sw) => {
+            const checked = Boolean(settings[sw.key]);
+            return (
+              <div key={sw.key} className="m3-switch-row">
+                <div className="m3-switch-info">
+                  <div className="m3-switch-title">{sw.title}</div>
+                  <div className="m3-switch-desc">{sw.desc}</div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={checked}
+                  className={`m3-switch ${checked ? 'checked' : ''}`}
+                  onClick={() => onUpdateSettings({ [sw.key]: !checked })}
+                >
+                  <span className="m3-switch-thumb" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 5. Original Zapret Folder & User List Protection */}
       <div className="m3-card">
         <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: '4px' }}>
-          Изолированная папка файлов Zapret и сохранность ваших списков
+          Оригинальная папка Zapret со всеми стратегиями
         </div>
         <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '14px' }}>
           Чтобы обновить Zapret вручную, просто распакуйте новые файлы в папку ниже с заменой. Настройки, профили и резервные копии пользовательских списков хранятся отдельно в app/data и не затираются. Файлы в папке отслеживаются автоматически в реальном времени.

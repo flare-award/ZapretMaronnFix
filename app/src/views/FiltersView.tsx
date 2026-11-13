@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Gamepad2, Network, Binary, Check, RefreshCw, Save, ChevronDown } from 'lucide-react';
 import type { FullAppState, GameFilterMode, IpsetFilterMode } from '../types';
+import { SeamlessSelect } from '../components/SeamlessSelect';
 
 interface FiltersViewProps {
   state: FullAppState;
@@ -284,52 +285,44 @@ export const FiltersView: React.FC<FiltersViewProps> = ({
                 {activeFakes.discordCurrent || 'пользовательский / не задан'}
               </span>
             </div>
-            <select
-              className="m3-select mono"
-              style={{ width: '100%' }}
+            <SeamlessSelect
+              fullWidth
+              mono
               disabled={busy}
               value={activeFakes.discordCurrent || ''}
-              onChange={(e) => {
-                if (e.target.value) onSetActiveFake('discord', e.target.value);
+              placeholder="Выберите .bin файл из папки zapret/bin"
+              options={activeFakes.availableBins.map((b) => ({
+                value: b.fileName,
+                label: `${b.fileName} (${b.sizeBytes} байт)`,
+              }))}
+              onChange={(val) => {
+                if (val) onSetActiveFake('discord', val);
               }}
-            >
-              <option value="" disabled>
-                Выберите .bin файл из папки zapret/bin
-              </option>
-              {activeFakes.availableBins.map((b) => (
-                <option key={b.fileName} value={b.fileName}>
-                  {b.fileName} ({b.sizeBytes} байт)
-                </option>
-              ))}
-            </select>
+            />
           </div>
 
           <div className="m3-card-compact" style={{ background: 'var(--m3-surface-low)' }}>
-            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Пакет для Game Filter UDP (ACTIVE_GAME_UDP.bin)</div>
+            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Пакет для Game Filter (ACTIVE_GAME_UDP.bin)</div>
             <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '10px' }}>
               Текущий образец:{' '}
               <span className="mono" style={{ color: 'var(--m3-text)' }}>
                 {activeFakes.gameCurrent || 'пользовательский / не задан'}
               </span>
             </div>
-            <select
-              className="m3-select mono"
-              style={{ width: '100%' }}
+            <SeamlessSelect
+              fullWidth
+              mono
               disabled={busy}
               value={activeFakes.gameCurrent || ''}
-              onChange={(e) => {
-                if (e.target.value) onSetActiveFake('game', e.target.value);
+              placeholder="Выберите .bin файл из папки zapret/bin"
+              options={activeFakes.availableBins.map((b) => ({
+                value: b.fileName,
+                label: `${b.fileName} (${b.sizeBytes} байт)`,
+              }))}
+              onChange={(val) => {
+                if (val) onSetActiveFake('game', val);
               }}
-            >
-              <option value="" disabled>
-                Выберите .bin файл из папки zapret/bin
-              </option>
-              {activeFakes.availableBins.map((b) => (
-                <option key={b.fileName} value={b.fileName}>
-                  {b.fileName} ({b.sizeBytes} байт)
-                </option>
-              ))}
-            </select>
+            />
           </div>
         </div>
       </div>
