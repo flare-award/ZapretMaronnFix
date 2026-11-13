@@ -308,7 +308,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
       </div>
 
       {testJob.running && (
-        <div style={{ marginBottom: '14px' }}>
+        <div style={{ marginBottom: '12px', flexShrink: 0, paddingRight: '6px' }}>
           <div
             style={{
               display: 'flex',
@@ -336,8 +336,9 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
         </div>
       )}
 
-      <div className="strategy-list">
-        {filteredStrategies.map((s) => {
+      <div className="connect-strategy-scroll">
+        <div className="strategy-list">
+          {filteredStrategies.map((s) => {
           const isSelected = settings.selectedStrategy === s.fileName;
           const isRunningThis = runtime.running && runtime.activeStrategy === s.fileName;
           const m = metricsLookup.get(s.fileName.toLowerCase());
@@ -423,11 +424,12 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
           );
         })}
 
-        {filteredStrategies.length === 0 && (
-          <div style={{ padding: '28px', textAlign: 'center', color: 'var(--m3-text-muted)' }}>
-            Ни одной стратегии по запросу не найдено.
-          </div>
-        )}
+          {filteredStrategies.length === 0 && (
+            <div style={{ padding: '28px', textAlign: 'center', color: 'var(--m3-text-muted)' }}>
+              Ни одной стратегии по запросу не найдено.
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

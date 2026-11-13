@@ -586,7 +586,7 @@ export const App: React.FC = () => {
           </div>
         </header>
 
-        <div className="scroll-content">
+        <div className={`scroll-content ${tab === 'connect' ? 'connect-viewport-locked' : ''}`}>
           {tab === 'connect' && (
             <ConnectView
               state={state}

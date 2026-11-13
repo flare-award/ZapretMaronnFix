@@ -308,8 +308,16 @@ pre,
 
 .scroll-content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 20px 24px 28px;
+}
+
+.scroll-content.connect-viewport-locked {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 20px;
 }
 
 .content-container {
@@ -322,7 +330,10 @@ pre,
 }
 
 .content-container.connect-container {
+  width: 100%;
   max-width: 1360px;
+  flex: 1;
+  min-height: 0;
 }
 
 @keyframes fadeSlideIn {
@@ -721,10 +732,29 @@ pre,
   user-select: text;
 }
 
-/* Happ-style Strategy List (Flexible & 4:3 Safe) */
+/* Happ-style Strategy List (Flexible, 4:3 Safe & Independently Scrollable) */
 .connect-strategies-card {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
   min-width: 0;
   overflow: hidden;
+  padding: 18px 14px 16px 20px;
+}
+
+.connect-strategies-card .toolbar-bar {
+  flex-shrink: 0;
+  padding-right: 6px;
+}
+
+.connect-strategy-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 6px;
+  border-radius: 12px;
 }
 
 .toolbar-bar {
@@ -1411,12 +1441,19 @@ pre,
   flex-shrink: 0;
 }
 
-/* New Default Split Connect Layout: Left (Power + Tiles) | Right (Strategies List) */
+/* New Default Split Connect Layout: Left (Fixed Power + Tiles) | Right (Scrollable Strategies List) */
+.connect-hero {
+  flex-shrink: 0;
+}
+
 .connect-split-layout {
   display: grid;
   grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
   gap: 18px;
-  align-items: start;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
 }
 
 .connect-left-col {
@@ -1424,6 +1461,9 @@ pre,
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
 }
 
 .quick-tiles-stack {
@@ -1434,7 +1474,11 @@ pre,
 }
 
 .connect-right-col {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
 }
 
 .connect-split-layout .strategy-row {
@@ -1644,13 +1688,37 @@ pre,
   background: var(--m3-primary-container);
 }
 
-/* Responsive adaptation for 4:3 & narrow monitors (1280x1024, 1152x864, 1024x768, 800x600) */
+/* Responsive adaptation for 4:3, low-height & narrow monitors (1280x1024, 1152x864, 1024x768, 800x600) */
+@media (max-height: 780px) {
+  .scroll-content.connect-viewport-locked {
+    padding-top: 14px;
+    padding-bottom: 14px;
+  }
+  .power-panel {
+    min-height: 214px;
+    padding: 20px 18px 22px;
+    gap: 13px;
+  }
+  .power-button-ring {
+    width: 112px;
+    height: 112px;
+    border-radius: 34px;
+  }
+  .quick-tile {
+    padding: 12px 15px;
+    gap: 8px;
+  }
+}
+
 @media (max-width: 1240px) {
   .app-shell {
     grid-template-columns: 204px minmax(0, 1fr);
   }
   .scroll-content {
     padding: 16px 18px 24px;
+  }
+  .scroll-content.connect-viewport-locked {
+    padding-bottom: 16px;
   }
   .connect-split-layout {
     grid-template-columns: minmax(260px, 316px) minmax(0, 1fr);
@@ -1661,18 +1729,29 @@ pre,
   }
 }
 
-@media (max-width: 980px) {
+@media (max-width: 880px) {
   .app-shell {
-    grid-template-columns: 186px minmax(0, 1fr);
+    grid-template-columns: 184px minmax(0, 1fr);
   }
   .scroll-content {
     padding: 14px 14px 22px;
+  }
+  .scroll-content.connect-viewport-locked {
+    display: block;
+    overflow-y: auto;
   }
   .connect-hero {
     grid-template-columns: 1fr;
   }
   .connect-split-layout {
     grid-template-columns: 1fr;
+    height: auto;
+  }
+  .connect-right-col {
+    height: auto;
+  }
+  .connect-strategy-scroll {
+    max-height: 440px;
   }
   .strategy-row .category-pills,
   .test-strategy-row .category-pills {
