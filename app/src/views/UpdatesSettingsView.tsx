@@ -106,13 +106,18 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     },
     {
       key: 'launchOnWindowsStartup',
-      title: 'Открыть автозагрузку Windows для запуска при старте ПК',
-      desc: 'Открывает штатную папку автозагрузки Windows (shell:startup), куда можно поместить ярлык ZapretControl.bat без вмешательства в реестр.',
+      title: 'Запускать программу при старте компьютера',
+      desc: 'Добавляет Zapret Control в автозагрузку входа Windows (без установки постоянной фоновой службы winws).',
     },
     {
-      key: 'showWinwsConsole',
-      title: 'Показывать консольное окно процесса winws.exe',
-      desc: 'Отображать диагностическое окно процесса winws.exe при запуске обхода (по умолчанию скрыто).',
+      key: 'startMinimizedToTray',
+      title: 'Запускать свёрнутой в системный трей при старте ПК',
+      desc: 'При автоматическом старте вместе с Windows программа сразу сворачивается в область уведомлений.',
+    },
+    {
+      key: 'minimizeToTrayOnClose',
+      title: 'Сворачивать в трей при закрытии окна',
+      desc: 'При нажатии на крестик окна программа остаётся в трее и продолжает удерживать активную стратегию.',
     },
     {
       key: 'autoRestartOnFilterChange',

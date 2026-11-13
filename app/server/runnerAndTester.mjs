@@ -55,16 +55,35 @@ export function getTestJobState() {
   return { ...testJob };
 }
 
+async function killExistingWinwsOnWindows() {
+  if (!isWin) return;
+  try {
+    await execFileAsync('taskkill', ['/IM', 'winws.exe', '/F']);
+  } catch {
+    // ignore if not running
+  }
+}
+
+async function enableTcpTimestampsOnWindows() {
+  if (!isWin) return;
+  try {
+    await execFileAsync('netsh', ['interface', 'tcp', 'set', 'global', 'timestamps=enabled']);
+  } catch {
+    // ignore if lacking elevation
+  }
+}
+
 export async function stopStrategyProcess() {
   if (activeChild) {
     try {
       activeChild.removeAllListeners('exit');
-      activeChild.kill();
+      activeChild.kill('SIGTERM');
     } catch {
       // ignore
     }
     activeChild = null;
   }
+  await killExistingWinwsOnWindows();
   runtimeState = {
     ...runtimeState,
     running: false,
@@ -98,6 +117,7 @@ export async function startStrategyProcess(strategyFileOverride) {
     if (!fs.existsSync(parsed.winwsPath)) {
       throw new Error(`Не найден исполняемый файл ${parsed.winwsPath}`);
     }
+    await enableTcpTimestampsOnWindows();
     const child = spawn(parsed.winwsPath, parsed.args, {
       cwd: parsed.cwd,
       windowsHide: !settings.showWinwsConsole,
@@ -154,50 +174,126 @@ export async function restartIfRunning() {
   return startStrategyProcess(runtimeState.activeStrategy);
 }
 
-export async function applyWindowsStartupSetting(enabled) {
-  if (!isWin) {
-    return { applied: true, note: 'Настройка сохранена' };
-  }
+export async function applyWindowsStartupSetting(enabled, startMinimized = false) {
+  if (!isWin) return { applied: true, note: 'Настройка сохранена (применяется в реестре/планировщике на Windows)' };
+
+  const taskName = 'ZapretControlAutoStart';
+  const launcherExe = path.join(REPO_ROOT, 'ZapretControl.exe');
+  const launcherBat = path.join(REPO_ROOT, 'ZapretControl.bat');
+  const targetCmd = fs.existsSync(launcherExe)
+    ? `"${launcherExe}"${startMinimized ? ' --minimized' : ''}`
+    : `"${launcherBat}"${startMinimized ? ' --minimized' : ''}`;
+
   if (enabled) {
-    execFile('explorer.exe', ['shell:startup'], () => {});
+    try {
+      await execFileAsync('schtasks', [
+        '/Create',
+        '/TN',
+        taskName,
+        '/TR',
+        targetCmd,
+        '/SC',
+        'ONLOGON',
+        '/RL',
+        'HIGHEST',
+        '/F',
+      ]);
+      return { applied: true, method: 'schtasks' };
+    } catch {
+      // Fallback to HKCU Run if process wasn't elevated
+      await execFileAsync('reg', [
+        'add',
+        'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+        '/v',
+        taskName,
+        '/t',
+        'REG_SZ',
+        '/d',
+        targetCmd,
+        '/f',
+      ]);
+      return { applied: true, method: 'registry' };
+    }
+  } else {
+    try {
+      await execFileAsync('schtasks', ['/Delete', '/TN', taskName, '/F']);
+    } catch {
+      // ignore
+    }
+    try {
+      await execFileAsync('reg', [
+        'delete',
+        'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+        '/v',
+        taskName,
+        '/f',
+      ]);
+    } catch {
+      // ignore
+    }
+    return { applied: true, method: 'removed' };
   }
-  return {
-    applied: true,
-    note: 'Открыта системная папка автозагрузки Windows (поместите туда ярлык ZapretControl.bat)',
-  };
 }
 
 export async function fixWinDivertConflictsOnWindows() {
-  await stopStrategyProcess();
-  const settings = loadSettings();
-  const serviceBat = path.join(settings.zapretDir, 'service.bat');
-  if (isWin && fs.existsSync(serviceBat)) {
-    execFile('explorer.exe', ['/select,' + serviceBat], () => {});
-    return {
-      ok: true,
-      actions: ['Активный процесс остановлен, в Проводнике выделен штатный zapret\\service.bat (пункт 2 Remove Services)'],
-    };
+  if (!isWin) {
+    return { ok: true, actions: ['В среде Windows останавливает конфликтующие службы zapret, GoodbyeDPI и освобождает драйвер WinDivert'] };
   }
-  return {
-    ok: true,
-    actions: ['Активный процесс winws остановлен; при наличии старой системной службы используйте пункт Remove Services в zapret/service.bat'],
-  };
+  const actions = [];
+  for (const svc of ['zapret', 'GoodbyeDPI', 'discordfix_zapret', 'winws1', 'winws2', 'WinDivert', 'WinDivert14']) {
+    try {
+      await execFileAsync('net', ['stop', svc]);
+      actions.push(`Остановлена служба ${svc}`);
+    } catch {
+      // ignore
+    }
+    try {
+      await execFileAsync('sc.exe', ['delete', svc]);
+      actions.push(`Удалена автозапускаемая служба ${svc}`);
+    } catch {
+      // ignore
+    }
+  }
+  await killExistingWinwsOnWindows();
+  if (actions.length === 0) {
+    actions.push('Конфликтующих служб и зависших драйверов WinDivert не обнаружено');
+  }
+  return { ok: true, actions };
 }
 
 export async function clearDiscordCacheOnWindows() {
-  const settings = loadSettings();
-  const serviceBat = path.join(settings.zapretDir, 'service.bat');
-  if (isWin && fs.existsSync(serviceBat)) {
-    execFile('explorer.exe', ['/select,' + serviceBat], () => {});
-    return {
-      ok: true,
-      cleared: ['В Проводнике выделен штатный zapret\\service.bat для безопасной очистки кэша клиента'],
-    };
+  if (!isWin) {
+    return { ok: true, cleared: ['В среде Windows очищает Cache, Code Cache и GPUCache в %APPDATA%\\discord (Stable, PTB, Canary)'] };
   }
-  return {
-    ok: true,
-    cleared: ['Для очистки кэша клиента на Windows используйте штатную утилиту в zapret/service.bat'],
-  };
+  const appData = process.env.APPDATA;
+  if (!appData) throw new Error('Переменная APPDATA не найдена');
+
+  const variants = [
+    ['Discord.exe', 'Discord Stable', path.join(appData, 'discord')],
+    ['DiscordPTB.exe', 'Discord PTB', path.join(appData, 'discordptb')],
+    ['DiscordCanary.exe', 'Discord Canary', path.join(appData, 'discordcanary')],
+    ['DiscordDevelopment.exe', 'Discord Dev', path.join(appData, 'discorddevelopment')],
+  ];
+  const cleared = [];
+  for (const [procName, label, dir] of variants) {
+    if (!fs.existsSync(dir)) continue;
+    try {
+      await execFileAsync('taskkill', ['/IM', procName, '/F']);
+    } catch {
+      // ignore
+    }
+    for (const sub of ['Cache', 'Code Cache', 'GPUCache']) {
+      const subPath = path.join(dir, sub);
+      if (fs.existsSync(subPath)) {
+        fs.rmSync(subPath, { recursive: true, force: true });
+        cleared.push(`${label}: очищен ${sub}`);
+      }
+    }
+  }
+  if (cleared.length === 0) {
+    cleared.push('Кэш-папки Discord уже пусты или клиент не установлен в %APPDATA%');
+  }
+  return { ok: true, cleared };
 }
 
 function measureTcpConnectMs(host, port = 443, timeoutMs = 2500) {
@@ -382,6 +478,7 @@ export async function startTestSuite({ strategies: requestedStrategies, categori
         if (isWin) {
           // Real Windows test: launch winws.exe for this strategy, wait 900ms, probe all targets in parallel
           const parsed = parseBatWinwsArgs(zapretDir, stratFile);
+          await killExistingWinwsOnWindows();
           const child = spawn(parsed.winwsPath, parsed.args, {
             cwd: parsed.cwd,
             windowsHide: true,
@@ -392,11 +489,11 @@ export async function startTestSuite({ strategies: requestedStrategies, categori
             targetResults = await Promise.all(targets.map((t) => checkSingleTargetWindows(t, 4)));
           } finally {
             try {
-              child.kill();
+              child.kill('SIGTERM');
             } catch {
               // ignore
             }
-            await new Promise((r) => setTimeout(r, 250));
+            await killExistingWinwsOnWindows();
           }
         } else {
           // Preview sandbox mode: combine real TCP latency to GitHub with provider logs from utils/test results/

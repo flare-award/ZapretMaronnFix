@@ -101,14 +101,14 @@ export const ToolsView: React.FC<ToolsViewProps> = ({ onNotify }) => {
               <ShieldAlert size={18} />
             </div>
             <div>
-              <div style={{ fontWeight: 600, fontSize: '14px' }}>Остановка процесса и сервисное меню</div>
+              <div style={{ fontWeight: 600, fontSize: '14px' }}>Сброс служб и WinDivert</div>
               <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '3px' }}>
-                Завершает текущий процесс обхода и открывает штатный zapret/service.bat для удаления старых служб
+                Удаляет ранее установленные автозапускаемые службы zapret / GoodbyeDPI и освобождает драйвер WinDivert
               </div>
             </div>
           </div>
           <button type="button" className="btn btn-tonal" disabled={toolBusy} onClick={handleFixWinDivert}>
-            Остановить процесс и показать service.bat
+            Освободить драйвер и удалить службы
           </button>
         </div>
 
@@ -118,14 +118,14 @@ export const ToolsView: React.FC<ToolsViewProps> = ({ onNotify }) => {
               <Eraser size={18} />
             </div>
             <div>
-              <div style={{ fontWeight: 600, fontSize: '14px' }}>Штатная очистка кэша Discord</div>
+              <div style={{ fontWeight: 600, fontSize: '14px' }}>Очистка кэша Discord</div>
               <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '3px' }}>
-                Открывает проверенный сервисный скрипт zapret/service.bat для штатного сброса локального кэша при ошибках RTC
+                Очищает папки Cache, Code Cache и GPUCache для Discord Stable, PTB и Canary при ошибках RTC
               </div>
             </div>
           </div>
           <button type="button" className="btn btn-tonal" disabled={toolBusy} onClick={handleClearDiscord}>
-            Открыть утилиту в папке zapret
+            Очистить кэш Discord
           </button>
         </div>
 
@@ -135,14 +135,14 @@ export const ToolsView: React.FC<ToolsViewProps> = ({ onNotify }) => {
               <Globe size={18} />
             </div>
             <div>
-              <div style={{ fontWeight: 600, fontSize: '14px' }}>Актуальный список записей hosts</div>
+              <div style={{ fontWeight: 600, fontSize: '14px' }}>Проверка файла hosts</div>
               <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '3px' }}>
-                Загружает актуальный список записей hosts из репозитория Flowseal для обхода Geo-DNS блокировок
+                Сверяет системный файл hosts с актуальным списком репозитория Flowseal для обхода Geo-DNS блокировок
               </div>
             </div>
           </div>
           <button type="button" className="btn btn-tonal" disabled={loadingHosts} onClick={handleCheckHosts}>
-            {loadingHosts ? 'Загрузка с GitHub...' : 'Получить список hosts'}
+            {loadingHosts ? 'Проверка GitHub...' : 'Проверить актуальность hosts'}
           </button>
         </div>
       </div>
