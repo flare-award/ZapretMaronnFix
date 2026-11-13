@@ -771,6 +771,18 @@ export async function installProgramUpdate({
     }
   }
 
+  const localZapretRoot = path.join(REPO_ROOT, 'zapret');
+  if (fs.existsSync(localZapretRoot)) {
+    for (const fn of fs.readdirSync(localZapretRoot)) {
+      if (/^custom\s*-.*\.bat$/i.test(fn)) {
+        const srcBat = path.join(localZapretRoot, fn);
+        const dstBat = path.join(preserveDir, 'zapret', fn);
+        fs.mkdirSync(path.dirname(dstBat), { recursive: true });
+        fs.copyFileSync(srcBat, dstBat);
+      }
+    }
+  }
+
   if (activeRunningStrategy) {
     fs.writeFileSync(
       RESUME_AFTER_UPDATE_FILE,

@@ -91,7 +91,7 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
       setDoc(res.list);
       setRawText(res.list.content);
       onStateUpdated(res.state);
-      onNotify(`Список "${res.list.title}" сохранён (${res.list.entriesCount} записей)`);
+      onNotify(`Сохранено (${res.list.entriesCount})`);
     } catch (err) {
       onNotify(err instanceof Error ? err.message : String(err), true);
     } finally {
@@ -103,9 +103,19 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
     e.preventDefault();
     const val = newEntry.trim();
     if (!val || !doc) return;
-    const combined = rawText.trim() ? `${rawText.trimEnd()}\n${val}\n` : `${val}\n`;
-    setNewEntry('');
-    await handleSave(combined, doc.kind === 'domains');
+    setSaving(true);
+    try {
+      const res = await api.smartAddListEntries(doc.id, val);
+      setDoc(res.list);
+      setRawText(res.list.content);
+      onStateUpdated(res.state);
+      setNewEntry('');
+      onNotify(res.message);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleRemoveEntry = async (entryToRemove: string) => {
@@ -122,7 +132,7 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
         {/* Left Sidebar of Lists */}
         <div className="m3-card-compact" style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
           <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--m3-text-secondary)', padding: '2px 4px 4px' }}>
-            Файлы списков в папке zapret
+            Списки
           </div>
           {state.listsMeta.map((lm) => {
             const active = lm.id === selectedId;
@@ -137,16 +147,18 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                   <span style={{ fontWeight: 600, fontSize: '13px' }}>{lm.title}</span>
                   <span className="score-pill">{lm.entriesCount}</span>
                 </div>
-                <div
-                  className="mono"
-                  style={{
-                    fontSize: '11px',
-                    color: active ? 'var(--m3-on-primary-container)' : 'var(--m3-text-muted)',
-                    opacity: active ? 0.85 : 1,
-                  }}
-                >
-                  {lm.relPath}
-                </div>
+                {state.settings.developerMode && (
+                  <div
+                    className="mono"
+                    style={{
+                      fontSize: '11px',
+                      color: active ? 'var(--m3-on-primary-container)' : 'var(--m3-text-muted)',
+                      opacity: active ? 0.85 : 1,
+                    }}
+                  >
+                    {lm.relPath}
+                  </div>
+                )}
               </button>
             );
           })}
@@ -172,11 +184,11 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                     {doc.isUser && (
                       <span className="score-pill good">
                         <ShieldCheck size={11} />
-                        Авто-бэкап включён
+                        Защищён
                       </span>
                     )}
                   </div>
-                  <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '3px' }}>
+                  <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '2px' }}>
                     {doc.subtitle}
                   </div>
                 </div>
@@ -208,11 +220,11 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                       type="button"
                       className="btn btn-surface"
                       disabled={saving}
-                      title="Удалить https://, ошибочные *. и дубликаты доменов"
+                      title="Убрать https://, лишние символы и дубликаты"
                       onClick={() => handleSave(rawText, true)}
                     >
                       <Sparkles size={14} />
-                      Очистить мусор
+                      Очистить
                     </button>
                   )}
 
@@ -238,8 +250,8 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                         style={{ flex: 1 }}
                         placeholder={
                           doc.kind === 'ipset'
-                            ? 'Добавить IP или CIDR (например, 188.114.96.0/22)...'
-                            : 'Добавить домен (например, example.com)...'
+                            ? 'IP или подсеть (например, 188.114.96.0/22)...'
+                            : 'Вставьте ссылку или домен (например, https://example.com)...'
                         }
                         value={newEntry}
                         onChange={(e) => setNewEntry(e.target.value)}
@@ -250,13 +262,13 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                       </button>
                     </form>
 
-                    <div className="input-wrap" style={{ flex: '0 1 230px' }}>
+                    <div className="input-wrap" style={{ flex: '0 1 210px' }}>
                       <Search size={14} className="input-icon" />
                       <input
                         type="text"
                         className="m3-input with-icon"
                         style={{ width: '100%' }}
-                        placeholder="Фильтр по записям..."
+                        placeholder="Поиск..."
                         value={filterQuery}
                         onChange={(e) => setFilterQuery(e.target.value)}
                       />
@@ -287,13 +299,13 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
 
                   {visibleEntries.length > 300 && (
                     <div style={{ fontSize: '12px', color: 'var(--m3-text-muted)' }}>
-                      Показаны первые 300 из {visibleEntries.length} записей. Используйте поиск или режим "Текст" для просмотра всех строк.
+                      Показаны первые 300 из {visibleEntries.length}. Используйте поиск или режим "Текст".
                     </div>
                   )}
 
                   {visibleEntries.length === 0 && (
                     <div style={{ padding: '24px', textAlign: 'center', color: 'var(--m3-text-muted)' }}>
-                      В этом списке пока нет записей.
+                      Список пуст.
                     </div>
                   )}
                 </>
@@ -316,14 +328,14 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                       color: 'var(--m3-text-muted)',
                     }}
                   >
-                    <span>Формат сохранения: UTF-8 с переносами CRLF (совместимо с winws.exe)</span>
-                    <span className="mono">Активных строк: {parsedEntries.length}</span>
+                    <span>По одной записи на строке</span>
+                    <span className="mono">Записей: {parsedEntries.length}</span>
                   </div>
                 </div>
               )}
             </>
           ) : (
-            <div style={{ padding: '24px', color: 'var(--m3-text-secondary)' }}>Загрузка списка...</div>
+            <div style={{ padding: '24px', color: 'var(--m3-text-secondary)' }}>Загрузка...</div>
           )}
         </div>
       </div>

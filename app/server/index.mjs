@@ -19,6 +19,8 @@ import {
   readListsMeta,
   readListContent,
   saveListContent,
+  smartAddEntriesToList,
+  cleanAllDomainLists,
   backupUserLists,
   restoreUserLists,
   readTestHistory,
@@ -28,6 +30,12 @@ import {
   updateRemoteIpsetList,
   checkRemoteHostsDiff,
   runDiagnostics,
+  diagnoseSite,
+  exportFullConfig,
+  importFullConfig,
+  getStrategyBuilderSource,
+  saveCustomStrategy,
+  deleteCustomStrategy,
   readProfiles,
   syncCurrentStateToActiveProfile,
   activateProfile,
@@ -37,6 +45,7 @@ import {
   computeZapretDirectoryFingerprint,
 } from './zapretAdapter.mjs';
 import {
+  setRuntimeChangeListener,
   getRuntimeState,
   getTestJobState,
   startStrategyProcess,
@@ -45,7 +54,9 @@ import {
   restartIfRunning,
   applyWindowsStartupSetting,
   fixWinDivertConflictsOnWindows,
+  enableTcpTimestampsAction,
   clearDiscordCacheOnWindows,
+  runQuickLiveProbe,
   startTestSuite,
   stopTestSuite,
 } from './runnerAndTester.mjs';
@@ -250,7 +261,7 @@ function setupZapretWatchers(zapretDir) {
   }
 }
 
-async function handleApi(req, res, pathname) {
+async function handleApi(req, res, pathname, urlObj) {
   const method = req.method || 'GET';
 
   if (method === 'OPTIONS') {
@@ -448,6 +459,21 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  const listSmartAddMatch = pathname.match(/^\/api\/lists\/([a-z0-9-]+)\/add-smart$/i);
+  if (method === 'POST' && listSmartAddMatch) {
+    const listId = listSmartAddMatch[1];
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    const resAdd = smartAddEntriesToList(settings.zapretDir, listId, String(body.input ?? ''));
+    if (resAdd.added.length > 0 && settings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { ...resAdd, state: buildFullState() });
+    return;
+  }
+
   const listMatch = pathname.match(/^\/api\/lists\/([a-z0-9-]+)$/i);
   if (listMatch) {
     const listId = listMatch[1];
@@ -596,6 +622,88 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (method === 'POST' && pathname === '/api/probe/quick') {
+    const probe = await runQuickLiveProbe();
+    sendJson(res, 200, probe);
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/tools/check-site') {
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    const report = await diagnoseSite(settings.zapretDir, String(body.input || ''));
+    sendJson(res, 200, report);
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/config/export') {
+    const settings = loadSettings();
+    const bundle = exportFullConfig(settings.zapretDir);
+    sendJson(res, 200, bundle);
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/config/import') {
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    const summary = importFullConfig(settings.zapretDir, body);
+    const updatedSettings = loadSettings();
+    await applyWindowsStartupSetting(
+      updatedSettings.launchOnWindowsStartup,
+      updatedSettings.startMinimizedToTray
+    );
+    if (updatedSettings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(updatedSettings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { ...summary, state: buildFullState() });
+    return;
+  }
+
+  if (pathname === '/api/strategies/custom-source' && method === 'GET') {
+    const settings = loadSettings();
+    const file = urlObj.searchParams.get('file') || '';
+    const src = getStrategyBuilderSource(settings.zapretDir, file);
+    sendJson(res, 200, src);
+    return;
+  }
+
+  if (pathname === '/api/strategies/custom' && method === 'POST') {
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    const saved = saveCustomStrategy(settings.zapretDir, body);
+    const rt = getRuntimeState();
+    if (
+      settings.autoRestartOnFilterChange &&
+      rt.running &&
+      (rt.activeStrategy === saved.fileName ||
+        rt.activeStrategy === body.previousFileName ||
+        body.selectAfterSave)
+    ) {
+      await startStrategyProcess(saved.fileName);
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { fileName: saved.fileName, state: buildFullState() });
+    return;
+  }
+
+  if (pathname === '/api/strategies/custom' && method === 'DELETE') {
+    const settings = loadSettings();
+    const file = urlObj.searchParams.get('file') || '';
+    const rt = getRuntimeState();
+    const wasRunningDeleted = rt.running && rt.activeStrategy === path.basename(file);
+    const del = deleteCustomStrategy(settings.zapretDir, file);
+    if (wasRunningDeleted) {
+      await startStrategyProcess(del.fallbackStrategy);
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { ...del, state: buildFullState() });
+    return;
+  }
+
   if (method === 'GET' && pathname === '/api/diagnostics') {
     const settings = loadSettings();
     const diag = await runDiagnostics(settings.zapretDir);
@@ -606,6 +714,24 @@ async function handleApi(req, res, pathname) {
   if (method === 'POST' && pathname === '/api/diagnostics/fix-windivert') {
     const resFix = await fixWinDivertConflictsOnWindows();
     sendJson(res, 200, resFix);
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/diagnostics/clean-lists') {
+    const settings = loadSettings();
+    const resClean = cleanAllDomainLists(settings.zapretDir);
+    if (settings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { ...resClean, state: buildFullState() });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/diagnostics/enable-timestamps') {
+    const resTs = await enableTcpTimestampsAction();
+    sendJson(res, 200, resTs);
     return;
   }
 
@@ -686,7 +812,7 @@ const server = http.createServer(async (req, res) => {
     const urlObj = new URL(req.url || '/', 'http://localhost');
     const pathname = urlObj.pathname;
     if (pathname.startsWith('/api/')) {
-      await handleApi(req, res, pathname);
+      await handleApi(req, res, pathname, urlObj);
       return;
     }
     serveStatic(req, res, pathname);
@@ -694,6 +820,8 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
   }
 });
+
+setRuntimeChangeListener(broadcastStateChange);
 
 server.listen(PORT, HOST, async () => {
   console.log(`Zapret Control UI server listening on http://${HOST}:${PORT}`);

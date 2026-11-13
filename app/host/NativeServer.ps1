@@ -444,6 +444,14 @@ while ($listener.IsListening) {
                         [System.IO.File]::Copy($sFile, $dFile, $true)
                     }
                 }
+                $zRootLocal = Join-Path $RepoRoot "zapret"
+                if (Test-Path -LiteralPath $zRootLocal) {
+                    Get-ChildItem -LiteralPath $zRootLocal -Filter "custom -*.bat" -File -ErrorAction SilentlyContinue | ForEach-Object {
+                        $dCustom = Join-Path (Join-Path $preserveDir "zapret") $_.Name
+                        New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($dCustom)) | Out-Null
+                        [System.IO.File]::Copy($_.FullName, $dCustom, $true)
+                    }
+                }
 
                 if ($null -ne $script:ActiveWinws -and -not $script:ActiveWinws.HasExited -and $script:ActiveStrategy) {
                     (@{ strategy = $script:ActiveStrategy } | ConvertTo-Json) | Set-Content -Path $ResumeFlagFile -Encoding UTF8
@@ -568,6 +576,7 @@ Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction Silen
                     $strats += @{
                         fileName = $_.Name
                         displayName = ($_.BaseName)
+                        isCustom = ($_.Name -match '^custom\s*-')
                         sizeBytes = $_.Length
                         modifiedAt = $_.LastWriteTimeUtc.ToString("o")
                         engineSummary = "Стратегия Zapret"

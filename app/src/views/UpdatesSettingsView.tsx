@@ -4,6 +4,7 @@ import {
   FolderOpen,
   ExternalLink,
   Download,
+  Upload,
   Archive,
   RotateCcw,
   Settings2,
@@ -69,6 +70,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
   const [installingAppUpdate, setInstallingAppUpdate] = useState<boolean>(false);
   const [installPhaseText, setInstallPhaseText] = useState<string>('');
   const zipInputRef = useRef<HTMLInputElement | null>(null);
+  const configImportRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setCustomDir(settings.zapretDir);
@@ -88,7 +90,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
       if (res.updateInfo) {
         onUpdateInfoLoaded(res.updateInfo);
       }
-      onNotify(`Запущено скачивание архива ${res.assetName || 'Zapret (.zip)'}`);
+      onNotify(`Запущено скачивание ${res.assetName || 'Zapret (.zip)'}`);
     } catch (err) {
       onNotify(err instanceof Error ? err.message : String(err), true);
     } finally {
@@ -123,11 +125,11 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
   const handleInstallFromGitHub = async () => {
     const prevBootId = state.serverBootId;
     setInstallingAppUpdate(true);
-    setInstallPhaseText('Скачивание свежей сборки с GitHub и сохранение ваших профилей и списков...');
+    setInstallPhaseText('Скачивание сборки с GitHub и сохранение ваших данных...');
     try {
       const res = await api.installAppUpdate();
       if (res.restarting) {
-        setInstallPhaseText('Установка файлов и автоматический перезапуск Zapret Control...');
+        setInstallPhaseText('Установка файлов и автоматический перезапуск...');
         waitForRestartAndReload(prevBootId);
       } else {
         setInstallPhaseText('Обновление установлено. Перезагрузка интерфейса...');
@@ -148,7 +150,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
 
     const prevBootId = state.serverBootId;
     setInstallingAppUpdate(true);
-    setInstallPhaseText(`Чтение архива ${file.name} и сохранение ваших профилей и списков...`);
+    setInstallPhaseText(`Чтение архива ${file.name}...`);
     try {
       const base64 = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
@@ -159,10 +161,10 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
 
       const res = await api.installAppUpdate(base64);
       if (res.restarting) {
-        setInstallPhaseText('Установка файлов и автоматический перезапуск Zapret Control...');
+        setInstallPhaseText('Установка файлов и автоматический перезапуск...');
         waitForRestartAndReload(prevBootId);
       } else {
-        setInstallPhaseText('Обновление из ZIP установлено. Перезагрузка интерфейса...');
+        setInstallPhaseText('Обновление установлено. Перезагрузка интерфейса...');
         setTimeout(() => {
           window.location.replace(`${window.location.pathname}?updated=${Date.now()}`);
         }, 600);
@@ -173,12 +175,61 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     }
   };
 
+  const handleExportConfig = async () => {
+    setBackupBusy(true);
+    try {
+      const bundle = await api.exportConfig();
+      const jsonStr = JSON.stringify(bundle, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const dateTag = new Date().toISOString().slice(0, 10);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `zapret-control-config-${dateTag}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      onNotify('Конфигурация экспортирована в файл .json');
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleImportConfigFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setBackupBusy(true);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const res = await api.importConfig(parsed);
+      onStateUpdated(res.state);
+      onNotify(`Конфигурация восстановлена (профилей: ${res.profilesCount})`);
+    } catch (err) {
+      onNotify(
+        err instanceof SyntaxError
+          ? 'Выбранный файл не является корректным JSON'
+          : err instanceof Error
+            ? err.message
+            : String(err),
+        true
+      );
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
   const handleSaveBackup = async () => {
     setBackupBusy(true);
     try {
       const res = await api.saveBackups();
       onStateUpdated(res.state);
-      onNotify(`Резервная копия создана (${res.saved.length} пользовательских файлов защищено)`);
+      onNotify(`Резервная копия списков сохранена (${res.saved.length})`);
     } catch (err) {
       onNotify(err instanceof Error ? err.message : String(err), true);
     } finally {
@@ -193,7 +244,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
       onStateUpdated(res.state);
       onNotify(
         res.restored.length > 0
-          ? `Восстановлено файлов списков: ${res.restored.length}`
+          ? `Восстановлено списков: ${res.restored.length}`
           : 'Резервные копии пока отсутствуют'
       );
     } catch (err) {
@@ -220,32 +271,37 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     {
       key: 'autoStartStrategyOnLaunch',
       title: 'Включать стратегию при запуске программы',
-      desc: 'При открытии программы автоматически запускает выбранную стратегию активного профиля со всеми фильтрами.',
+      desc: 'Сразу запускает стратегию текущего профиля при открытии',
     },
     {
       key: 'launchOnWindowsStartup',
-      title: 'Запускать программу при старте компьютера',
-      desc: 'Добавляет Zapret Control в автозагрузку входа Windows (без установки постоянной фоновой службы winws).',
+      title: 'Запускать при старте Windows',
+      desc: 'Автозагрузка при входе в систему без установки службы',
     },
     {
       key: 'startMinimizedToTray',
-      title: 'Запускать свёрнутой в системный трей при старте ПК',
-      desc: 'При автоматическом старте вместе с Windows программа сразу сворачивается в область уведомлений.',
+      title: 'Запускать свёрнутой в трей',
+      desc: 'При старте с Windows не открывать главное окно на экране',
     },
     {
       key: 'minimizeToTrayOnClose',
       title: 'Сворачивать в трей при закрытии окна',
-      desc: 'При нажатии на крестик окна программа остаётся в трее и продолжает удерживать активную стратегию.',
+      desc: 'Крестик скрывает окно в трей, обход продолжает работать',
+    },
+    {
+      key: 'autoRestartOnCrash',
+      title: 'Перезапускать при неожиданном сбое winws.exe',
+      desc: 'Автоматически поднимает обход после сна ПК или сброса сети',
     },
     {
       key: 'autoRestartOnFilterChange',
-      title: 'Мгновенно применять изменения фильтров и списков',
-      desc: 'Автоматически перезапускает активный процесс winws.exe при переключении профиля, Game Filter, IPSet или сохранении списков.',
+      title: 'Сразу применять изменения фильтров и списков',
+      desc: 'Перезапускает активный обход при смене профиля или списков',
     },
     {
       key: 'autoCheckUpdates',
-      title: 'Автоматически проверять выход обновлений',
-      desc: 'При запуске проверяет наличие обновлений самой программы и новых релизов Zapret на GitHub.',
+      title: 'Проверять обновления при запуске',
+      desc: 'Фоновая проверка новых версий программы и Zapret',
     },
   ];
 
@@ -256,7 +312,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
   const localBuildLabel =
     appUpdateInfo?.currentShortSha || appUpdateState?.installedShortSha
       ? `#${appUpdateInfo?.currentShortSha || appUpdateState?.installedShortSha}`
-      : 'Локальная сборка';
+      : 'Локальная';
 
   return (
     <div className="content-container">
@@ -311,25 +367,23 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
             gap: '12px',
             marginBottom: '14px',
           }}
         >
           <div className="m3-card-compact" style={{ background: 'var(--m3-surface-low)' }}>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>Текущая ревизия программы</div>
+            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>Установленная сборка</div>
             <div className="mono" style={{ fontSize: '19px', fontWeight: 700, marginTop: '4px' }}>
               {localBuildLabel}
             </div>
             <div style={{ fontSize: '11.5px', color: 'var(--m3-text-muted)', marginTop: '4px' }}>
-              {appUpdateState?.installedBranch
-                ? `Ветка: ${appUpdateState.installedBranch}`
-                : 'Профили и списки защищены'}
+              Профили и списки сохраняются
             </div>
           </div>
 
           <div className="m3-card-compact" style={{ background: 'var(--m3-surface-low)' }}>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>Сборка на GitHub</div>
+            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>На GitHub</div>
             <div
               className="mono"
               style={{
@@ -343,7 +397,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
                   : 'var(--m3-text)',
               }}
             >
-              {appUpdateInfo ? `#${appUpdateInfo.latestShortSha}` : 'Нажмите проверить'}
+              {appUpdateInfo ? `#${appUpdateInfo.latestShortSha}` : 'Не проверено'}
             </div>
             <div
               style={{
@@ -357,9 +411,9 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             >
               {appUpdateInfo
                 ? appUpdateInfo.updateAvailable
-                  ? `Доступно обновление (файлов: ${appUpdateInfo.changedFilesCount})`
-                  : 'Установлена последняя версия программы'
-                : 'Источник: flare-award/ZapretMaronnFix'}
+                  ? `Доступно обновление (${appUpdateInfo.changedFilesCount})`
+                  : 'Актуальная версия'
+                : 'flare-award/ZapretMaronnFix'}
             </div>
           </div>
 
@@ -374,7 +428,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
               }}
             >
               <Calendar size={13} />
-              Дата последнего обновления
+              Дата сборки
             </div>
             <div style={{ fontSize: '14.5px', fontWeight: 600, marginTop: '7px' }}>
               {appUpdateInfo
@@ -394,7 +448,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
               }}
               title={appUpdateInfo?.commitMessage || appUpdateState?.commitMessage || ''}
             >
-              {appUpdateInfo?.commitMessage || appUpdateState?.commitMessage || 'Автоматическая пересборка лаунчера'}
+              {appUpdateInfo?.commitMessage || appUpdateState?.commitMessage || 'Готово к проверке'}
             </div>
           </div>
         </div>
@@ -406,10 +460,9 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
               className="btn btn-tonal"
               disabled={installingAppUpdate || checkingAppUpdate}
               onClick={handleInstallFromGitHub}
-              title="Скачать свежий архив с GitHub и переустановить файлы программы поверх текущих"
             >
               <Download size={14} />
-              Переустановить свежую сборку с GitHub
+              Переустановить с GitHub
             </button>
           )}
 
@@ -425,10 +478,9 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             className="btn btn-surface"
             disabled={installingAppUpdate}
             onClick={() => zipInputRef.current?.click()}
-            title="Обновить программу из скачанного вручную ZIP-архива репозитория без потери настроек"
           >
             <Archive size={14} />
-            Обновить из ZIP-файла
+            Обновить из ZIP
           </button>
 
           <button
@@ -441,7 +493,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             }
           >
             <ExternalLink size={14} />
-            Репозиторий программы на GitHub
+            GitHub
           </button>
         </div>
       </div>
@@ -474,7 +526,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
             gap: '12px',
             marginBottom: '14px',
           }}
@@ -485,12 +537,12 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
               v{zapretInfo.localVersion}
             </div>
             <div style={{ fontSize: '11.5px', color: 'var(--m3-text-muted)', marginTop: '4px' }}>
-              Стратегий: {zapretInfo.strategyCount} / бинарных пакетов: {zapretInfo.binCount}
+              Стратегий: {zapretInfo.strategyCount}
             </div>
           </div>
 
           <div className="m3-card-compact" style={{ background: 'var(--m3-surface-low)' }}>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>Последняя версия</div>
+            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>Последний релиз</div>
             <div
               className="mono"
               style={{
@@ -500,14 +552,14 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
                 color: updateInfo?.updateAvailable ? 'var(--m3-warn)' : 'var(--m3-success)',
               }}
             >
-              {updateInfo ? `v${updateInfo.latestVersion}` : 'Нажмите проверить'}
+              {updateInfo ? `v${updateInfo.latestVersion}` : 'Не проверено'}
             </div>
             <div style={{ fontSize: '11.5px', color: 'var(--m3-text-muted)', marginTop: '4px' }}>
               {updateInfo
                 ? updateInfo.updateAvailable
-                  ? 'Доступна более новая версия'
-                  : 'У вас установлена актуальная сборка'
-                : 'Источник: Flowseal/zapret-discord-youtube'}
+                  ? 'Доступна новая версия'
+                  : 'Установлена свежая сборка'
+                : 'Flowseal/zapret-discord-youtube'}
             </div>
           </div>
 
@@ -522,13 +574,13 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
               }}
             >
               <Calendar size={13} />
-              Дата выхода релиза
+              Дата релиза
             </div>
             <div style={{ fontSize: '14.5px', fontWeight: 600, marginTop: '7px' }}>
               {updateInfo ? formatRuDate(updateInfo.publishedAt) : 'Не проверено'}
             </div>
             <div style={{ fontSize: '11.5px', color: 'var(--m3-text-muted)', marginTop: '5px' }}>
-              {updateInfo?.assetName ? `Архив: ${updateInfo.assetName}` : 'Официальный пакет релизов'}
+              {updateInfo?.assetName || 'Официальный релиз'}
             </div>
           </div>
         </div>
@@ -548,7 +600,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             onClick={handleDownloadLatestZapret}
           >
             <Download size={14} />
-            {downloadingZapretZip ? 'Получение архива...' : 'Скачать релиз Zapret'}
+            {downloadingZapretZip ? 'Загрузка...' : 'Скачать релиз Zapret'}
           </button>
 
           <button
@@ -557,7 +609,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             onClick={() => handleOpenExternal('https://github.com/Flowseal/zapret-discord-youtube/releases')}
           >
             <ExternalLink size={14} />
-            Страница релиза GitHub
+            Релизы на GitHub
           </button>
         </div>
 
@@ -571,13 +623,13 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
               fontSize: '12px',
               color: 'var(--m3-text-secondary)',
               whiteSpace: 'pre-wrap',
-              maxHeight: '160px',
+              maxHeight: '150px',
               overflowY: 'auto',
               userSelect: 'text',
             }}
           >
             <div style={{ fontWeight: 600, color: 'var(--m3-text)', marginBottom: '4px' }}>
-              Описание релиза {updateInfo.releaseName}:
+              {updateInfo.releaseName}:
             </div>
             {updateInfo.releaseNotes}
           </div>
@@ -590,23 +642,14 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
           <div className="brand-mark">
             <LayoutPanelLeft size={18} />
           </div>
-          <div>
-            <div style={{ fontSize: '15px', fontWeight: 600 }}>Отображение и интерфейс</div>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
-              Настройка расположения панелей на главном экране и карточек рекомендаций в тестах
-            </div>
-          </div>
+          <div style={{ fontSize: '15px', fontWeight: 600 }}>Интерфейс</div>
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           <div className="m3-switch-row">
             <div className="m3-switch-info">
-              <div className="m3-switch-title">
-                Показывать плашки лучших стратегий во вкладке «Тесты и цели»
-              </div>
-              <div className="m3-switch-desc">
-                Отображает карточки «Лучшая для всего», «Лучшая для Discord», «Лучшая для YouTube», «Лучшая для Cloudflare» и «Лучшая для GitHub».
-              </div>
+              <div className="m3-switch-title">Карточки лучших стратегий во вкладке "Тесты"</div>
+              <div className="m3-switch-desc">Быстрые рекомендации для Discord, YouTube и других сервисов</div>
             </div>
             <button
               type="button"
@@ -621,12 +664,8 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
 
           <div className="m3-switch-row">
             <div className="m3-switch-info">
-              <div className="m3-switch-title">
-                Классическое расположение вкладки «Подключение» (список стратегий снизу)
-              </div>
-              <div className="m3-switch-desc">
-                По умолчанию список стратегий находится справа от кнопки подключения, а плашки фильтров и профиля — под кнопкой. Включите, чтобы вернуть прежний вариант.
-              </div>
+              <div className="m3-switch-title">Список стратегий под кнопкой подключения</div>
+              <div className="m3-switch-desc">Вертикальная раскладка главного экрана вместо двух колонок</div>
             </div>
             <button
               type="button"
@@ -647,7 +686,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             <div className="m3-switch-info">
               <div className="m3-switch-title">Режим разработчика</div>
               <div className="m3-switch-desc">
-                Отображает технические параметры движка winws, команды запуска .bat, счётчики проверок и протоколы HTTP/TLS во вкладках «Подключение» и «Тесты и цели».
+                Конструктор своих стратегий, параметры движка winws и протоколы HTTP/TLS
               </div>
             </div>
             <button
@@ -663,18 +702,13 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
         </div>
       </div>
 
-      {/* 4. Program Startup & Auto-Enable Strategy Settings */}
+      {/* 4. Program Startup & Behavior Settings */}
       <div className="m3-card">
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
           <div className="brand-mark">
             <Settings2 size={18} />
           </div>
-          <div>
-            <div style={{ fontSize: '15px', fontWeight: 600 }}>Автозапуск и поведение программы</div>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
-              Настройки применяются мгновенно и сохраняются между перезапусками и обновлениями
-            </div>
-          </div>
+          <div style={{ fontSize: '15px', fontWeight: 600 }}>Автозапуск и поведение</div>
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -701,20 +735,20 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
         </div>
       </div>
 
-      {/* 5. Original Zapret Folder & User List Protection */}
+      {/* 5. Zapret Folder & Full Configuration Backup / Restore (#11) */}
       <div className="m3-card">
         <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: '4px' }}>
-          Оригинальная папка Zapret со всеми стратегиями
+          Папка Zapret и резервные копии
         </div>
-        <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '14px' }}>
-          Чтобы обновить Zapret вручную, просто распакуйте новые файлы в папку ниже с заменой. Настройки, профили и резервные копии пользовательских списков хранятся отдельно в app/data и не затираются. Файлы в папке отслеживаются автоматически в реальном времени.
+        <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '12px' }}>
+          Сохраните все свои профили, настройки, списки и стратегии в один файл или перенесите их на другой ПК.
         </div>
 
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '12px' }}>
           <input
             type="text"
             className="m3-input mono"
-            style={{ flex: '1 1 320px' }}
+            style={{ flex: '1 1 300px' }}
             value={customDir}
             onChange={(e) => setCustomDir(e.target.value)}
           />
@@ -729,18 +763,41 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
           </button>
           <button type="button" className="btn btn-surface" onClick={handleOpenFolder}>
             <FolderOpen size={14} />
-            Открыть папку zapret
+            Открыть папку
           </button>
         </div>
 
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          <button type="button" className="btn btn-tonal" disabled={backupBusy} onClick={handleSaveBackup}>
-            <Archive size={14} />
-            Сохранить резервную копию моих списков
+          <button type="button" className="btn btn-primary" disabled={backupBusy} onClick={handleExportConfig}>
+            <Download size={14} />
+            Экспорт конфигурации
           </button>
+
+          <input
+            ref={configImportRef}
+            type="file"
+            accept=".json,application/json"
+            style={{ display: 'none' }}
+            onChange={handleImportConfigFile}
+          />
+          <button
+            type="button"
+            className="btn btn-tonal"
+            disabled={backupBusy}
+            onClick={() => configImportRef.current?.click()}
+          >
+            <Upload size={14} />
+            Импорт конфигурации
+          </button>
+
+          <button type="button" className="btn btn-surface" disabled={backupBusy} onClick={handleSaveBackup}>
+            <Archive size={14} />
+            Бэкап списков
+          </button>
+
           <button type="button" className="btn btn-surface" disabled={backupBusy} onClick={handleRestoreBackup}>
             <RotateCcw size={14} />
-            Восстановить мои списки после обновления
+            Восстановить списки
           </button>
         </div>
       </div>

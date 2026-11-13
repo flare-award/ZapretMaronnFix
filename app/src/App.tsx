@@ -37,9 +37,9 @@ type NavTab = 'connect' | 'profiles' | 'tests' | 'filters' | 'lists' | 'tools' |
 const TAB_LABELS: Record<NavTab, string> = {
   connect: 'Подключение',
   profiles: 'Профили',
-  tests: 'Тесты и цели',
-  filters: 'Фильтры и фейки',
-  lists: 'Списки доменов',
+  tests: 'Тесты',
+  filters: 'Фильтры',
+  lists: 'Списки',
   tools: 'Инструменты',
   settings: 'Настройки',
 };
@@ -276,8 +276,8 @@ export const App: React.FC = () => {
       const found = next.profiles.find((p) => p.id === profileId);
       notify(
         startNow
-          ? `Профиль «${found?.name || profileId}» применён и запущен`
-          : `Активирован профиль «${found?.name || profileId}»`
+          ? `Профиль "${found?.name || profileId}" применён и запущен`
+          : `Активирован профиль "${found?.name || profileId}"`
       );
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err), true);
@@ -291,7 +291,7 @@ export const App: React.FC = () => {
     try {
       const next = await api.createProfile(payload);
       setState(next);
-      notify(`Профиль «${payload.name}» сохранён`);
+      notify(`Профиль "${payload.name}" сохранён`);
       return true;
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err), true);
@@ -385,12 +385,29 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleStartTests = async (strategiesList?: string[], categories?: string[]) => {
+  const handleStartTests = async (
+    strategiesList?: string[],
+    categories?: string[],
+    mode: 'standard' | 'express' = 'standard'
+  ) => {
     try {
       setSelectedHistoryFile('latest');
-      await api.startTests({ strategies: strategiesList, categories });
+      await api.startTests({ strategies: strategiesList, categories, mode });
       await refreshState();
-      notify('Запущено тестирование стратегий');
+      notify(mode === 'express' ? 'Запущен экспресс-подбор стратегий' : 'Запущено тестирование стратегий');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err), true);
+    }
+  };
+
+  const handleToggleFavoriteStrategy = async (fileName: string) => {
+    if (!state) return;
+    const currentFavs = state.settings.favoriteStrategies || [];
+    const exists = currentFavs.includes(fileName);
+    const nextFavs = exists ? currentFavs.filter((f) => f !== fileName) : [...currentFavs, fileName];
+    try {
+      const next = await api.updateSettings({ favoriteStrategies: nextFavs });
+      setState(next);
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err), true);
     }
@@ -599,10 +616,13 @@ export const App: React.FC = () => {
               busy={busy}
               onTogglePower={handleTogglePower}
               onSelectStrategy={handleSelectStrategy}
+              onToggleFavorite={handleToggleFavoriteStrategy}
               onSelectProfile={(profileId) => handleActivateProfile(profileId, false)}
               onQuickGameMode={(mode) => handleSaveGameFilter({ mode })}
               onQuickIpsetMode={handleSetIpsetMode}
               onRunQuickTest={(strats) => handleStartTests(strats)}
+              onStateUpdated={setState}
+              onNotify={notify}
               onNavigate={(nextTab) => setTab(nextTab as NavTab)}
             />
           )}
@@ -625,7 +645,7 @@ export const App: React.FC = () => {
               selectedHistoryFile={selectedHistoryFile}
               onSelectHistoryFile={setSelectedHistoryFile}
               busy={busy}
-              onStartTests={(cats) => handleStartTests(undefined, cats)}
+              onStartTests={(cats, mode) => handleStartTests(undefined, cats, mode)}
               onStopTests={handleStopTests}
               onApplyStrategy={handleSelectStrategy}
             />
@@ -646,7 +666,9 @@ export const App: React.FC = () => {
             <ListsView state={state} onStateUpdated={setState} onNotify={notify} />
           )}
 
-          {tab === 'tools' && <ToolsView onNotify={notify} />}
+          {tab === 'tools' && (
+            <ToolsView state={state} onStateUpdated={setState} onNotify={notify} />
+          )}
 
           {tab === 'settings' && (
             <UpdatesSettingsView

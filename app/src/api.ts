@@ -1,12 +1,17 @@
 import type {
   AppProgramUpdateResult,
   AppSettings,
+  CustomStrategyParams,
+  CustomStrategySource,
   DiagnosticCheck,
   FullAppState,
   GameFilterMode,
   HostsCheckReport,
   IpsetFilterMode,
   ListDocument,
+  QuickProbeResult,
+  SiteDiagnosisReport,
+  SmartListAddResult,
   TestJobState,
   TestRunReport,
   UpdateCheckResult,
@@ -121,6 +126,56 @@ export const api = {
       body: JSON.stringify({ content, autoClean }),
     }),
 
+  smartAddListEntries: (id: string, input: string) =>
+    request<SmartListAddResult>(`/api/lists/${encodeURIComponent(id)}/add-smart`, {
+      method: 'POST',
+      body: JSON.stringify({ input }),
+    }),
+
+  runQuickProbe: () =>
+    request<QuickProbeResult>('/api/probe/quick', {
+      method: 'POST',
+    }),
+
+  checkSite: (input: string) =>
+    request<SiteDiagnosisReport>('/api/tools/check-site', {
+      method: 'POST',
+      body: JSON.stringify({ input }),
+    }),
+
+  exportConfig: () => request<Record<string, unknown>>('/api/config/export'),
+
+  importConfig: (bundle: Record<string, unknown>) =>
+    request<{ restoredLists: number; restoredCustomStrats: number; profilesCount: number; state: FullAppState }>(
+      '/api/config/import',
+      {
+        method: 'POST',
+        body: JSON.stringify(bundle),
+      }
+    ),
+
+  getCustomStrategySource: (fileName: string) =>
+    request<CustomStrategySource>(`/api/strategies/custom-source?file=${encodeURIComponent(fileName)}`),
+
+  saveCustomStrategy: (payload: {
+    title: string;
+    previousFileName?: string | null;
+    mode: 'visual' | 'raw';
+    params?: CustomStrategyParams;
+    winwsArgsText?: string;
+    selectAfterSave?: boolean;
+  }) =>
+    request<{ fileName: string; state: FullAppState }>('/api/strategies/custom', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  deleteCustomStrategy: (fileName: string) =>
+    request<{ deleted: string; fallbackStrategy: string; state: FullAppState }>(
+      `/api/strategies/custom?file=${encodeURIComponent(fileName)}`,
+      { method: 'DELETE' }
+    ),
+
   saveBackups: () =>
     request<{ saved: string[]; timestamp: string; state: FullAppState }>('/api/backups/save', {
       method: 'POST',
@@ -156,7 +211,7 @@ export const api = {
   getTestHistoryReport: (fileName: string) =>
     request<TestRunReport>(`/api/tests/history/${encodeURIComponent(fileName)}`),
 
-  startTests: (payload: { strategies?: string[]; categories?: string[] }) =>
+  startTests: (payload: { strategies?: string[]; categories?: string[]; mode?: 'standard' | 'express' }) =>
     request<{ testJob: TestJobState }>('/api/tests/start', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -170,6 +225,12 @@ export const api = {
   getDiagnostics: () => request<{ checks: DiagnosticCheck[]; checkedAt: string }>('/api/diagnostics'),
 
   fixWinDivert: () => request<{ ok: boolean; actions: string[] }>('/api/diagnostics/fix-windivert', { method: 'POST' }),
+
+  cleanDomainLists: () =>
+    request<{ cleanedFiles: number; state: FullAppState }>('/api/diagnostics/clean-lists', { method: 'POST' }),
+
+  enableTcpTimestamps: () =>
+    request<{ ok: boolean; message: string }>('/api/diagnostics/enable-timestamps', { method: 'POST' }),
 
   clearDiscordCache: () =>
     request<{ ok: boolean; cleared: string[] }>('/api/diagnostics/clear-discord-cache', { method: 'POST' }),

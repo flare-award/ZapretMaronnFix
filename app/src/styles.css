@@ -1731,6 +1731,188 @@ pre,
   background: var(--m3-primary-container);
 }
 
+/* Quick Live Availability Probe inside Power Panel (#1) */
+.power-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.power-probe-wrap {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.power-probe-pills {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: 100%;
+  animation: fadeSlideIn 160ms var(--ease-m3);
+}
+
+.probe-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 23px;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--m3-outline);
+  background: var(--m3-surface-low);
+  color: var(--m3-text-secondary);
+  white-space: nowrap;
+}
+
+.probe-pill.ok {
+  background: rgba(23, 53, 37, 0.7);
+  border-color: rgba(127, 209, 155, 0.28);
+  color: var(--m3-on-success-container);
+}
+
+.probe-pill.fail {
+  background: rgba(61, 30, 33, 0.7);
+  border-color: rgba(242, 139, 130, 0.28);
+  color: var(--m3-on-danger-container);
+}
+
+.probe-pill-ms {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  opacity: 0.85;
+}
+
+/* Favorite Star Button (#2) */
+.btn-icon.fav-active {
+  color: var(--m3-warn);
+  background: rgba(243, 201, 105, 0.11);
+  border-color: rgba(243, 201, 105, 0.26);
+}
+
+.btn-icon.fav-active:hover:not(:disabled) {
+  background: rgba(243, 201, 105, 0.18);
+}
+
+/* Site Diagnosis Cards (#5) */
+.site-check-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 9px;
+}
+
+.site-step-card {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--m3-surface-low);
+  border: 1px solid var(--m3-outline);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.site-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.site-step-val {
+  font-size: 11.5px;
+  color: var(--m3-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Strategy / Report Comparison Modal (#10) */
+.compare-selectors-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.compare-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.compare-summary-box {
+  padding: 11px 13px;
+  border-radius: 12px;
+  background: var(--m3-surface-low);
+  border: 1px solid var(--m3-outline);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.compare-table-scroll {
+  max-height: 350px;
+  overflow-y: auto;
+  border-radius: 12px;
+  border: 1px solid var(--m3-outline);
+  background: var(--m3-surface-low);
+}
+
+.compare-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.3fr) minmax(90px, 1fr) minmax(90px, 1fr) 76px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--m3-outline);
+  font-size: 12.5px;
+}
+
+.compare-row:last-child {
+  border-bottom: none;
+}
+
+.compare-row.head {
+  position: sticky;
+  top: 0;
+  background: var(--m3-surface-high);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--m3-text-secondary);
+  z-index: 1;
+}
+
+.compare-row.diff-highlight {
+  background: rgba(168, 199, 250, 0.045);
+}
+
+/* Custom Strategy Builder Grid (#12) */
+.builder-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 11px;
+}
+
+@media (max-width: 680px) {
+  .compare-selectors-grid,
+  .compare-summary-grid,
+  .builder-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Responsive adaptation for 4:3, low-height & narrow monitors (1280x1024, 1152x864, 1024x768, 800x600) */
 @media (max-height: 780px) {
   .scroll-content.connect-viewport-locked {

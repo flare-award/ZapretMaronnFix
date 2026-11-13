@@ -105,10 +105,17 @@ export function sortStrategiesWithMetrics(
   strategies: StrategyItem[],
   lookup: Map<string, StrategyTestMetrics>,
   goal: GoalFilter,
-  sortBy: SortOption
+  sortBy: SortOption,
+  favoritesSet?: Set<string>
 ): StrategyItem[] {
   const copy = [...strategies];
   copy.sort((a, b) => {
+    if (favoritesSet && favoritesSet.size > 0) {
+      const favA = favoritesSet.has(a.fileName) ? 1 : 0;
+      const favB = favoritesSet.has(b.fileName) ? 1 : 0;
+      if (favA !== favB) return favB - favA;
+    }
+
     const ma = lookup.get(a.fileName.toLowerCase());
     const mb = lookup.get(b.fileName.toLowerCase());
     const ga = getGoalMetrics(ma, goal);

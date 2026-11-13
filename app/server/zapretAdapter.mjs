@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
+import dns from 'node:dns';
+import net from 'node:net';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import https from 'node:https';
@@ -22,11 +24,13 @@ const DEFAULT_SETTINGS = {
   zapretDir: path.join(REPO_ROOT, 'zapret'),
   selectedStrategy: 'general (ALT11).bat',
   activeProfileId: 'default',
+  favoriteStrategies: [],
   autoStartStrategyOnLaunch: false,
   launchOnWindowsStartup: false,
   startMinimizedToTray: false,
   minimizeToTrayOnClose: true,
   autoRestartOnFilterChange: true,
+  autoRestartOnCrash: true,
   autoCheckUpdates: true,
   showWinwsConsole: false,
   showBestStrategyCards: true,
@@ -37,24 +41,24 @@ const DEFAULT_SETTINGS = {
 export const LIST_DEFINITIONS = [
   {
     id: 'list-general-user',
-    title: 'Пользовательский список доменов',
-    subtitle: 'Ваши собственные домены для обхода (не затираются в оригинальном Zapret)',
+    title: 'Мои сайты для обхода',
+    subtitle: 'Личный список доменов (сохраняется при обновлениях)',
     relPath: 'lists/list-general-user.txt',
     kind: 'domains',
     isUser: true,
   },
   {
     id: 'list-exclude-user',
-    title: 'Пользовательские исключения доменов',
-    subtitle: 'Домены, которые никогда не должны подвергаться десинку',
+    title: 'Мои исключения сайтов',
+    subtitle: 'Сайты, к которым обход не применяется',
     relPath: 'lists/list-exclude-user.txt',
     kind: 'domains',
     isUser: true,
   },
   {
     id: 'ipset-exclude-user',
-    title: 'Пользовательские исключения IP',
-    subtitle: 'IP-адреса и CIDR-подсети, исключённые из обработки',
+    title: 'Мои исключения IP',
+    subtitle: 'IP-адреса и подсети без обработки',
     relPath: 'lists/ipset-exclude-user.txt',
     kind: 'ipset',
     isUser: true,
@@ -62,39 +66,39 @@ export const LIST_DEFINITIONS = [
   {
     id: 'list-general',
     title: 'Основной список (list-general)',
-    subtitle: 'Базовый список Discord, Cloudflare и добавленных сервисов',
+    subtitle: 'Базовые домены Discord, Cloudflare и других сервисов',
     relPath: 'lists/list-general.txt',
     kind: 'domains',
     isUser: false,
   },
   {
     id: 'list-google',
-    title: 'Список YouTube и Google',
-    subtitle: 'Домены видеосерверов googlevideo.com, youtube.com и сервисов Google',
+    title: 'YouTube и Google',
+    subtitle: 'Домены видеосерверов YouTube и сервисов Google',
     relPath: 'lists/list-google.txt',
     kind: 'domains',
     isUser: false,
   },
   {
     id: 'list-exclude',
-    title: 'Основные исключения (list-exclude)',
-    subtitle: 'Российские сервисы, банки, Госуслуги и лаунчеры без блокировок',
+    title: 'Базовые исключения',
+    subtitle: 'Сайты и сервисы РФ, работающие напрямую',
     relPath: 'lists/list-exclude.txt',
     kind: 'domains',
     isUser: false,
   },
   {
     id: 'ipset-exclude',
-    title: 'Основные исключения IP',
-    subtitle: 'Системные и локальные подсети, исключённые из IPSet',
+    title: 'Базовые исключения IP',
+    subtitle: 'Локальные и системные подсети',
     relPath: 'lists/ipset-exclude.txt',
     kind: 'ipset',
     isUser: false,
   },
   {
     id: 'targets',
-    title: 'Цели тестирования (targets.txt)',
-    subtitle: 'Список эндпоинтов для проверки соединения и пинга по категориям',
+    title: 'Цели проверки (targets.txt)',
+    subtitle: 'Адреса сервисов для вкладки "Тесты"',
     relPath: 'utils/targets.txt',
     kind: 'targets',
     isUser: false,
@@ -112,6 +116,14 @@ export function loadSettings() {
     if (fs.existsSync(SETTINGS_PATH)) {
       const parsed = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
       const merged = { ...DEFAULT_SETTINGS, ...parsed };
+      if (!Array.isArray(merged.favoriteStrategies)) {
+        merged.favoriteStrategies = [];
+      } else {
+        merged.favoriteStrategies = Array.from(
+          new Set(merged.favoriteStrategies.filter((x) => typeof x === 'string' && x.trim()))
+        );
+      }
+      merged.autoRestartOnCrash = merged.autoRestartOnCrash !== false;
       if (!path.isAbsolute(merged.zapretDir)) {
         merged.zapretDir = path.resolve(REPO_ROOT, merged.zapretDir);
       }
@@ -123,7 +135,7 @@ export function loadSettings() {
   } catch {
     // ignore corrupt settings and restore defaults
   }
-  return { ...DEFAULT_SETTINGS };
+  return { ...DEFAULT_SETTINGS, favoriteStrategies: [] };
 }
 
 export function saveSettings(partial) {
@@ -462,6 +474,7 @@ export function readStrategies(zapretDir) {
     return {
       fileName,
       displayName: formatStrategyShortName(fileName),
+      isCustom: /^custom\s*-/i.test(fileName),
       sizeBytes: stat.size,
       modifiedAt: stat.mtime.toISOString(),
       engineSummary: summarizeStrategyEngine(content),
@@ -944,6 +957,216 @@ export function saveListContent(zapretDir, listId, rawContent, { autoClean = fal
   return readListContent(zapretDir, listId);
 }
 
+export function extractCleanDomainFromInput(rawToken) {
+  let s = String(rawToken || '').trim();
+  if (!s || s.startsWith('#')) return null;
+  s = s.replace(/^[.,;'"`([{<]+|[.,;'"`)\]}>]+$/g, '').trim();
+  if (!s) return null;
+  if (s.startsWith('*.')) s = s.slice(2);
+
+  let host = '';
+  try {
+    const withProto = /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `http://${s}`;
+    const u = new URL(withProto);
+    host = u.hostname || '';
+  } catch {
+    host = s.replace(/^[a-z]+:\/\//i, '').split(/[/?#:]/)[0].trim();
+  }
+
+  host = host.toLowerCase().replace(/^\.+|\.+$/g, '').replace(/^\*\./, '');
+  if (host.startsWith('www.')) {
+    const rest = host.slice(4);
+    if (rest.includes('.')) host = rest;
+  }
+
+  if (!host || host.length > 253 || host.includes('..')) return null;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return null;
+  if (!/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(host)) return null;
+  return host;
+}
+
+function extractCleanIpOrCidrFromInput(rawToken) {
+  let s = String(rawToken || '').trim();
+  if (!s || s.startsWith('#')) return null;
+  s = s.replace(/^[.,;'"`([{<]+|[.,;'"`)\]}>]+$/g, '').trim();
+  try {
+    if (/^https?:\/\//i.test(s)) {
+      s = new URL(s).hostname;
+    }
+  } catch {
+    // keep raw
+  }
+  const m = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/);
+  if (!m) return null;
+  const octets = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+  if (octets.some((n) => n < 0 || n > 255)) return null;
+  if (m[5] !== undefined) {
+    const prefix = Number(m[5]);
+    if (prefix < 0 || prefix > 32) return null;
+    return `${octets.join('.')}/${prefix}`;
+  }
+  return octets.join('.');
+}
+
+function readDomainSetFromFile(filePath) {
+  const set = new Set();
+  if (!fs.existsSync(filePath)) return set;
+  for (const raw of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
+    const s = raw.trim().toLowerCase();
+    if (s && !s.startsWith('#')) set.add(s);
+  }
+  return set;
+}
+
+function findCoveringParentDomain(domain, domainSet) {
+  const parts = domain.split('.');
+  for (let i = 1; i < parts.length - 1; i++) {
+    const parent = parts.slice(i).join('.');
+    if (domainSet.has(parent)) return parent;
+  }
+  return null;
+}
+
+export function smartAddEntriesToList(zapretDir, listId, rawInput) {
+  const def = LIST_DEFINITIONS.find((d) => d.id === listId);
+  if (!def) throw new Error('Список не найден');
+  if (def.kind === 'targets') {
+    throw new Error('Для файла целей используйте текстовый режим');
+  }
+
+  const tokens = String(rawInput || '')
+    .split(/[\r\n\s,;]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+
+  if (tokens.length === 0) {
+    throw new Error('Введите ссылку, домен или IP-адрес');
+  }
+
+  const currentDoc = readListContent(zapretDir, listId);
+  const existingLines = currentDoc.content.split(/\r?\n/);
+  const currentSet = new Set(
+    existingLines.map((l) => l.trim().toLowerCase()).filter((l) => l && !l.startsWith('#'))
+  );
+
+  const companionFiles =
+    listId === 'list-general-user'
+      ? [
+          { label: 'list-general', path: path.join(zapretDir, 'lists', 'list-general.txt') },
+          { label: 'list-google', path: path.join(zapretDir, 'lists', 'list-google.txt') },
+        ]
+      : listId === 'list-exclude-user'
+        ? [{ label: 'list-exclude', path: path.join(zapretDir, 'lists', 'list-exclude.txt') }]
+        : listId === 'ipset-exclude-user'
+          ? [{ label: 'ipset-exclude', path: path.join(zapretDir, 'lists', 'ipset-exclude.txt') }]
+          : [];
+
+  const companionSets = companionFiles.map((cf) => ({
+    label: cf.label,
+    set: readDomainSetFromFile(cf.path),
+  }));
+
+  const added = [];
+  const skippedDuplicates = [];
+  const coveredByBase = [];
+  const invalid = [];
+
+  for (const tok of tokens) {
+    if (def.kind === 'domains') {
+      const domain = extractCleanDomainFromInput(tok);
+      if (!domain) {
+        invalid.push(tok);
+        continue;
+      }
+      if (currentSet.has(domain)) {
+        skippedDuplicates.push(domain);
+        continue;
+      }
+      const parentInSelf = findCoveringParentDomain(domain, currentSet);
+      if (parentInSelf) {
+        coveredByBase.push(`${domain} (покрыт ${parentInSelf})`);
+        continue;
+      }
+      let coveredLabel = null;
+      for (const comp of companionSets) {
+        if (comp.set.has(domain)) {
+          coveredLabel = `${domain} (${comp.label})`;
+          break;
+        }
+        const parent = findCoveringParentDomain(domain, comp.set);
+        if (parent) {
+          coveredLabel = `${domain} (${parent} в ${comp.label})`;
+          break;
+        }
+      }
+      if (coveredLabel) {
+        coveredByBase.push(coveredLabel);
+        continue;
+      }
+      currentSet.add(domain);
+      added.push(domain);
+    } else if (def.kind === 'ipset') {
+      const ip = extractCleanIpOrCidrFromInput(tok);
+      if (!ip) {
+        invalid.push(tok);
+        continue;
+      }
+      if (currentSet.has(ip)) {
+        skippedDuplicates.push(ip);
+        continue;
+      }
+      const inBase = companionSets.find((c) => c.set.has(ip));
+      if (inBase) {
+        coveredByBase.push(`${ip} (${inBase.label})`);
+        continue;
+      }
+      currentSet.add(ip);
+      added.push(ip);
+    }
+  }
+
+  let updatedList = currentDoc;
+  if (added.length > 0) {
+    const baseText = currentDoc.content.trim();
+    const combined = baseText ? `${baseText}\n${added.join('\n')}\n` : `${added.join('\n')}\n`;
+    updatedList = saveListContent(zapretDir, listId, combined, { autoClean: false });
+  }
+
+  let message = '';
+  if (added.length === 1 && coveredByBase.length === 0 && invalid.length === 0) {
+    message = `Добавлено: ${added[0]}`;
+  } else if (added.length > 1) {
+    message = `Добавлено записей: ${added.length}`;
+  } else if (coveredByBase.length > 0) {
+    message = `Уже есть в базовом списке: ${coveredByBase[0]}`;
+  } else if (skippedDuplicates.length > 0) {
+    message = `Уже есть в этом списке: ${skippedDuplicates[0]}`;
+  } else {
+    throw new Error('Некорректный формат ссылки, домена или IP');
+  }
+
+  return {
+    list: updatedList,
+    added,
+    skippedDuplicates,
+    coveredByBase,
+    invalid,
+    message,
+  };
+}
+
+export function cleanAllDomainLists(zapretDir) {
+  let cleanedFiles = 0;
+  for (const def of LIST_DEFINITIONS.filter((d) => d.kind === 'domains')) {
+    const full = path.join(zapretDir, def.relPath);
+    if (!fs.existsSync(full)) continue;
+    const raw = fs.readFileSync(full, 'utf8');
+    saveListContent(zapretDir, def.id, raw, { autoClean: true });
+    cleanedFiles++;
+  }
+  return { cleanedFiles };
+}
+
 export function backupUserLists(zapretDir) {
   ensureDirs();
   const saved = [];
@@ -1395,19 +1618,19 @@ export async function runDiagnostics(zapretDir) {
   const hasCyrillic = /[\u0400-\u04FF]/.test(zapretDir);
   checks.push({
     id: 'path-cyrillic',
-    title: 'Путь к папке Zapret без кириллицы',
+    title: 'Путь без кириллицы',
     status: hasCyrillic ? 'warn' : 'ok',
-    detail: hasCyrillic
-      ? `В пути обнаружена кириллица (${zapretDir}). Рекомендуется размещать папку по пути вроде C:\\Zapret.`
-      : zapretDir,
+    detail: hasCyrillic ? `В пути есть кириллица (${zapretDir}). Лучше перенести в C:\\Zapret.` : zapretDir,
+    fixAction: null,
   });
 
   const inOneDrive = Boolean(process.env.OneDrive && zapretDir.toLowerCase().includes(process.env.OneDrive.toLowerCase()));
   checks.push({
     id: 'onedrive',
-    title: 'Изоляция от синхронизации OneDrive',
+    title: 'Вне папки OneDrive',
     status: inOneDrive ? 'error' : 'ok',
-    detail: inOneDrive ? 'Папка находится внутри OneDrive, это может блокировать WinDivert64.sys' : 'Папка вне каталога OneDrive',
+    detail: inOneDrive ? 'Папка в OneDrive может блокировать драйвер WinDivert' : 'Синхронизация OneDrive не мешает',
+    fixAction: null,
   });
 
   const binDir = path.join(zapretDir, 'bin');
@@ -1415,9 +1638,10 @@ export async function runDiagnostics(zapretDir) {
   const hasWinDivert = fs.existsSync(path.join(binDir, 'WinDivert64.sys')) || fs.existsSync(path.join(binDir, 'WinDivert.dll'));
   checks.push({
     id: 'binaries',
-    title: 'Файлы winws.exe и драйвера WinDivert',
+    title: 'Файлы winws.exe и WinDivert',
     status: hasWinws && hasWinDivert ? 'ok' : 'error',
-    detail: hasWinws && hasWinDivert ? 'winws.exe и WinDivert64.sys присутствуют в zapret/bin/' : 'Не найдены файлы в zapret/bin/',
+    detail: hasWinws && hasWinDivert ? 'Исполняемые файлы на месте' : 'Не найдены файлы в zapret/bin/',
+    fixAction: null,
   });
 
   // Validate all user/general domain lists for broken wildcards or spaces
@@ -1428,15 +1652,16 @@ export async function runDiagnostics(zapretDir) {
       for (const raw of fs.readFileSync(p, 'utf8').split(/\r?\n/)) {
         const s = raw.trim();
         if (!s || s.startsWith('#')) continue;
-        if (s.includes(' ') || s.includes('*')) listIssues++;
+        if (s.includes(' ') || s.includes('*') || /^https?:\/\//i.test(s)) listIssues++;
       }
     }
   }
   checks.push({
     id: 'hostlists',
-    title: 'Целостность списков доменов (lists/*.txt)',
+    title: 'Синтаксис списков доменов',
     status: listIssues === 0 ? 'ok' : 'warn',
-    detail: listIssues === 0 ? 'Все списки синтаксически корректны (0 ошибок)' : `Обнаружено некорректных строк с пробелами или *: ${listIssues}`,
+    detail: listIssues === 0 ? 'Ошибок нет' : `Найдено строк с лишними символами: ${listIssues}`,
+    fixAction: listIssues > 0 ? 'clean-lists' : null,
   });
 
   if (isWin) {
@@ -1445,12 +1670,13 @@ export async function runDiagnostics(zapretDir) {
       const bfeOk = /RUNNING/i.test(bfeOut);
       checks.push({
         id: 'bfe',
-        title: 'Служба фильтрации Base Filtering Engine (BFE)',
+        title: 'Служба фильтрации Windows (BFE)',
         status: bfeOk ? 'ok' : 'error',
-        detail: bfeOk ? 'Служба BFE запущена и работает штатно' : 'Служба BFE остановлена - она необходима для WinDivert',
+        detail: bfeOk ? 'Запущена' : 'Остановлена (нужна для работы WinDivert)',
+        fixAction: null,
       });
     } catch {
-      checks.push({ id: 'bfe', title: 'Служба Base Filtering Engine (BFE)', status: 'warn', detail: 'Не удалось опросить sc.exe' });
+      checks.push({ id: 'bfe', title: 'Служба фильтрации (BFE)', status: 'warn', detail: 'Нет данных от sc.exe', fixAction: null });
     }
 
     try {
@@ -1458,24 +1684,65 @@ export async function runDiagnostics(zapretDir) {
       const tsOk = /timestamps.*enabled/i.test(tsOut);
       checks.push({
         id: 'timestamps',
-        title: 'Глобальные TCP Timestamps в Windows',
+        title: 'TCP Timestamps в Windows',
         status: tsOk ? 'ok' : 'warn',
-        detail: tsOk ? 'TCP Timestamps включены (enabled)' : 'TCP Timestamps отключены - будут включены автоматически при старте стратегии',
+        detail: tsOk ? 'Включены' : 'Отключены (нужны для части стратегий)',
+        fixAction: tsOk ? null : 'enable-timestamps',
       });
     } catch {
-      checks.push({ id: 'timestamps', title: 'Глобальные TCP Timestamps', status: 'ok', detail: 'Включаются при старте обхода' });
+      checks.push({ id: 'timestamps', title: 'TCP Timestamps', status: 'ok', detail: 'Включаются при старте обхода', fixAction: null });
     }
 
     try {
       const { stdout: scOut } = await execFileAsync('sc.exe', ['query']);
-      const conflicts = ['GoodbyeDPI', 'discordfix_zapret', 'Killer', 'SmartByte', 'TracSrvWrapper'].filter((c) =>
-        new RegExp(c, 'i').test(scOut)
+      const conflicts = ['zapret', 'GoodbyeDPI', 'discordfix_zapret', 'winws1', 'winws2', 'Killer', 'SmartByte', 'TracSrvWrapper'].filter(
+        (c) => new RegExp(`SERVICE_NAME:\\s*${c}\\b`, 'i').test(scOut)
       );
       checks.push({
         id: 'conflicts',
-        title: 'Конфликтующие сетевые службы и DPI-утилиты',
+        title: 'Конфликтующие фоновые службы',
         status: conflicts.length === 0 ? 'ok' : 'warn',
-        detail: conflicts.length === 0 ? 'Конфликтующих сервисов (GoodbyeDPI, Killer, SmartByte) не найдено' : `Найдены потенциальные конфликты: ${conflicts.join(', ')}`,
+        detail:
+          conflicts.length === 0
+            ? 'Чужих служб zapret и GoodbyeDPI не найдено'
+            : `Активны фоновые службы: ${conflicts.join(', ')}`,
+        fixAction: conflicts.length > 0 ? 'fix-windivert' : null,
+      });
+    } catch {
+      // ignore
+    }
+
+    try {
+      const { stdout: regOut } = await execFileAsync('reg', [
+        'query',
+        'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings',
+        '/v',
+        'ProxyEnable',
+      ]);
+      const proxyOn = /0x1\b/i.test(regOut);
+      let proxyServer = '';
+      if (proxyOn) {
+        try {
+          const { stdout: srvOut } = await execFileAsync('reg', [
+            'query',
+            'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings',
+            '/v',
+            'ProxyServer',
+          ]);
+          const m = srvOut.match(/ProxyServer\s+REG_SZ\s+([^\r\n]+)/i);
+          if (m) proxyServer = m[1].trim();
+        } catch {
+          // ignore
+        }
+      }
+      checks.push({
+        id: 'system-proxy',
+        title: 'Системный прокси Windows',
+        status: proxyOn ? 'warn' : 'ok',
+        detail: proxyOn
+          ? `Включён системный прокси${proxyServer ? ` (${proxyServer})` : ''} - трафик может идти мимо winws`
+          : 'Выключен, трафик идёт напрямую',
+        fixAction: null,
       });
     } catch {
       // ignore
@@ -1483,9 +1750,10 @@ export async function runDiagnostics(zapretDir) {
   } else {
     checks.push({
       id: 'env-preview',
-      title: 'Среда выполнения ОС',
+      title: 'Сетевые службы и стек ОС',
       status: 'ok',
-      detail: 'Демонстрационный Linux-контейнер (на Windows ПК активируются системные проверки BFE, TCP Timestamps, реестра и WinDivert)',
+      detail: 'На Windows дополнительно проверяются BFE, службы GoodbyeDPI и системный прокси',
+      fixAction: null,
     });
   }
 
@@ -1778,4 +2046,572 @@ export function computeZapretDirectoryFingerprint(zapretDir) {
   }
   return crypto.createHash('sha1').update(parts.join('|')).digest('hex');
 }
+
+// ============================================================================
+// Site Availability & List Coverage Diagnostics (#5)
+// ============================================================================
+
+function checkDomainAgainstSet(domain, domainSet) {
+  if (domainSet.has(domain)) return domain;
+  const parent = findCoveringParentDomain(domain, domainSet);
+  return parent || null;
+}
+
+function isBogonOrStubIp(ip) {
+  return (
+    ip === '0.0.0.0' ||
+    ip.startsWith('127.') ||
+    ip.startsWith('10.') ||
+    ip.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip) ||
+    ip.startsWith('198.18.') ||
+    ip.startsWith('198.51.100.') ||
+    ip.startsWith('203.0.113.')
+  );
+}
+
+function measureTcp443(host, timeoutMs = 2600) {
+  return new Promise((resolve) => {
+    const start = performance.now();
+    const sock = net.createConnection({ host, port: 443 });
+    let finished = false;
+    const done = (val) => {
+      if (finished) return;
+      finished = true;
+      sock.destroy();
+      resolve(val);
+    };
+    sock.setTimeout(timeoutMs);
+    sock.on('connect', () => done(Math.max(1, Math.round(performance.now() - start))));
+    sock.on('timeout', () => done(null));
+    sock.on('error', () => done(null));
+  });
+}
+
+function measureTlsHandshake(domain, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    const sock = tls.connect({
+      host: domain,
+      port: 443,
+      servername: domain,
+      ca: SYSTEM_CA_BUNDLE,
+      rejectUnauthorized: false,
+    });
+    let finished = false;
+    const done = (ok, protocol = null) => {
+      if (finished) return;
+      finished = true;
+      sock.destroy();
+      resolve({ ok, protocol });
+    };
+    sock.setTimeout(timeoutMs);
+    sock.on('secureConnect', () => done(true, sock.getProtocol() || 'TLS'));
+    sock.on('timeout', () => done(false, null));
+    sock.on('error', () => done(false, null));
+  });
+}
+
+async function queryDohIps(domain) {
+  if (os.platform() !== 'win32') {
+    return [];
+  }
+  try {
+    const raw = await httpsGetJsonOrText(
+      `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(domain)}&type=A`,
+      { Accept: 'application/dns-json' }
+    );
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed.Answer)) return [];
+    return parsed.Answer.filter((a) => a && a.type === 1 && typeof a.data === 'string').map((a) => a.data.trim());
+  } catch {
+    return [];
+  }
+}
+
+export async function diagnoseSite(zapretDir, rawInput) {
+  const domain = extractCleanDomainFromInput(rawInput);
+  if (!domain) {
+    throw new Error('Введите корректную ссылку или домен (например, example.com)');
+  }
+
+  const listsDir = path.join(zapretDir, 'lists');
+  const userGenSet = readDomainSetFromFile(path.join(listsDir, 'list-general-user.txt'));
+  const baseGenSet = readDomainSetFromFile(path.join(listsDir, 'list-general.txt'));
+  const googleSet = readDomainSetFromFile(path.join(listsDir, 'list-google.txt'));
+  const userExclSet = readDomainSetFromFile(path.join(listsDir, 'list-exclude-user.txt'));
+  const baseExclSet = readDomainSetFromFile(path.join(listsDir, 'list-exclude.txt'));
+
+  const matchedUserExcl = checkDomainAgainstSet(domain, userExclSet);
+  const matchedBaseExcl = checkDomainAgainstSet(domain, baseExclSet);
+  const matchedUserGen = checkDomainAgainstSet(domain, userGenSet);
+  const matchedBaseGen = checkDomainAgainstSet(domain, baseGenSet);
+  const matchedGoogle = checkDomainAgainstSet(domain, googleSet);
+
+  const inExcludeList = Boolean(matchedUserExcl || matchedBaseExcl);
+  const inBypassList = !inExcludeList && Boolean(matchedUserGen || matchedBaseGen || matchedGoogle);
+
+  let listLabel = 'Не в списках';
+  let listMatchedRule = null;
+  if (matchedUserExcl) {
+    listLabel = 'В моих исключениях';
+    listMatchedRule = matchedUserExcl;
+  } else if (matchedBaseExcl) {
+    listLabel = 'В базовых исключениях';
+    listMatchedRule = matchedBaseExcl;
+  } else if (matchedUserGen) {
+    listLabel = 'В моих сайтах обхода';
+    listMatchedRule = matchedUserGen;
+  } else if (matchedGoogle) {
+    listLabel = 'В списке YouTube/Google';
+    listMatchedRule = matchedGoogle;
+  } else if (matchedBaseGen) {
+    listLabel = 'В основном списке обхода';
+    listMatchedRule = matchedBaseGen;
+  }
+
+  // Step 1: DNS resolution
+  let systemIps = [];
+  try {
+    const res = await dns.promises.lookup(domain, { all: true, family: 4 });
+    systemIps = Array.from(new Set(res.map((r) => r.address)));
+  } catch {
+    systemIps = [];
+  }
+  const dohIps = await queryDohIps(domain);
+  const hasStubIp = systemIps.some(isBogonOrStubIp);
+  const dnsOk = systemIps.length > 0 && !hasStubIp;
+
+  // Step 2 & 3: TCP 443 + TLS handshake
+  let tcpPingMs = null;
+  let tlsOk = false;
+  let httpOk = false;
+
+  if (dnsOk) {
+    if (os.platform() === 'win32') {
+      const [pingVal, curlRes] = await Promise.all([
+        measureTcp443(domain, 2500),
+        execFileAsync('curl.exe', ['-I', '-s', '-m', '3', '--connect-timeout', '2', '-o', 'NUL', `https://${domain}`])
+          .then(() => true)
+          .catch(() => false),
+      ]);
+      tcpPingMs = pingVal;
+      tlsOk = curlRes;
+      httpOk = curlRes;
+    } else {
+      const [pingVal, tlsRes] = await Promise.all([
+        measureTcp443(domain, 2500),
+        measureTlsHandshake(domain, 2800),
+      ]);
+      tcpPingMs = pingVal;
+      tlsOk = tlsRes.ok;
+      httpOk = tlsRes.ok;
+    }
+  }
+
+  let verdictStatus = 'ok';
+  let summary = 'Сайт доступен, соединение проходит штатно.';
+  if (!dnsOk) {
+    verdictStatus = 'error';
+    summary = hasStubIp
+      ? 'Провайдер подменяет DNS-ответ на заглушку. Включите защищённый DNS (DoH) в браузере или проверьте hosts.'
+      : dohIps.length > 0
+        ? 'Системный DNS не находит домен, но через DoH он виден. Включите защищённый DNS в браузере.'
+        : 'Домен не найден в DNS (проверьте правильность адреса или интернет-соединение).';
+  } else if (tcpPingMs === null) {
+    verdictStatus = 'error';
+    summary = 'Нет TCP-ответа на порт 443 - возможна блокировка по IP-адресу (попробуйте режим IPSet Loaded).';
+  } else if (!tlsOk) {
+    verdictStatus = 'warn';
+    summary = inBypassList
+      ? 'TCP проходит, но TLS блокируется - попробуйте другую стратегию на вкладке "Подключение".'
+      : inExcludeList
+        ? 'Домен находится в исключениях и блокируется по TLS - уберите его из исключений.'
+        : 'Соединение обрывается на TLS - добавьте сайт в список обхода одной кнопкой ниже.';
+  }
+
+  return {
+    domain,
+    verdictStatus,
+    summary,
+    dns: {
+      ok: dnsOk,
+      hasStubIp,
+      systemIps,
+      dohIps,
+    },
+    lists: {
+      inBypassList,
+      inExcludeList,
+      inUserBypass: Boolean(matchedUserGen),
+      inUserExclude: Boolean(matchedUserExcl),
+      label: listLabel,
+      matchedRule: listMatchedRule,
+    },
+    tcp: {
+      ok: tcpPingMs !== null,
+      pingMs: tcpPingMs,
+    },
+    tls: {
+      ok: tlsOk,
+      httpOk,
+    },
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+// ============================================================================
+// Unified Configuration Export / Import (#11)
+// ============================================================================
+
+export function exportFullConfig(zapretDir) {
+  const settings = loadSettings();
+  const { zapretDir: _omitZapretDir, ...portableSettings } = settings;
+  const { profiles, activeProfileId } = readProfiles(zapretDir);
+  const gameFilter = readGameFilter(zapretDir);
+  const ipsetFilter = readIpsetFilter(zapretDir);
+  const activeFakes = readActiveFakes(zapretDir);
+
+  const userLists = {};
+  for (const def of LIST_DEFINITIONS.filter((d) => d.isUser)) {
+    userLists[def.id] = readListContent(zapretDir, def.id).content;
+  }
+
+  const customStrategies = [];
+  if (fs.existsSync(zapretDir)) {
+    for (const fn of fs.readdirSync(zapretDir)) {
+      if (/^custom\s*-.*\.bat$/i.test(fn)) {
+        customStrategies.push({
+          fileName: fn,
+          content: fs.readFileSync(path.join(zapretDir, fn), 'utf8'),
+        });
+      }
+    }
+  }
+
+  return {
+    format: 'zapret-control-config',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    settings: portableSettings,
+    activeProfileId,
+    profiles,
+    gameFilter: {
+      mode: gameFilter.mode,
+      tcpRange: gameFilter.tcpRange,
+      udpRange: gameFilter.udpRange,
+    },
+    ipsetMode: ipsetFilter.mode,
+    activeFakes: {
+      discord: activeFakes.discordCurrent,
+      game: activeFakes.gameCurrent,
+    },
+    userLists,
+    customStrategies,
+  };
+}
+
+export function importFullConfig(zapretDir, bundle) {
+  if (!bundle || typeof bundle !== 'object' || bundle.format !== 'zapret-control-config') {
+    throw new Error('Файл не является резервной копией конфигурации Zapret Control');
+  }
+
+  let restoredCustomStrats = 0;
+  if (Array.isArray(bundle.customStrategies)) {
+    for (const cs of bundle.customStrategies) {
+      if (!cs || typeof cs.fileName !== 'string' || typeof cs.content !== 'string') continue;
+      const safeName = path.basename(cs.fileName).trim();
+      if (!/^custom\s*-\s*[^\\/:*?"<>|]+\.bat$/i.test(safeName)) continue;
+      if (!/winws\.exe/i.test(cs.content)) continue;
+      writeCrlfFile(path.join(zapretDir, safeName), cs.content);
+      restoredCustomStrats++;
+    }
+  }
+
+  let restoredLists = 0;
+  if (bundle.userLists && typeof bundle.userLists === 'object') {
+    for (const def of LIST_DEFINITIONS.filter((d) => d.isUser)) {
+      if (typeof bundle.userLists[def.id] === 'string') {
+        saveListContent(zapretDir, def.id, bundle.userLists[def.id], { autoClean: false });
+        restoredLists++;
+      }
+    }
+  }
+
+  if (Array.isArray(bundle.profiles) && bundle.profiles.length > 0) {
+    const cleanedProfiles = bundle.profiles
+      .filter((p) => p && typeof p.id === 'string' && typeof p.name === 'string')
+      .map((p) => ({
+        id: p.id,
+        name: String(p.name).trim().slice(0, 28) || 'Профиль',
+        description: String(p.description || '').trim().slice(0, 90),
+        isDefault: p.id === 'default',
+        strategy: String(p.strategy || 'general (ALT11).bat'),
+        gameFilterMode: ['disabled', 'all', 'tcp', 'udp'].includes(p.gameFilterMode)
+          ? p.gameFilterMode
+          : 'disabled',
+        gameFilterTcp: validatePortRange(p.gameFilterTcp) || '1024-65535',
+        gameFilterUdp: validatePortRange(p.gameFilterUdp) || '1024-65535',
+        ipsetMode: ['none', 'loaded', 'any'].includes(p.ipsetMode) ? p.ipsetMode : 'none',
+        discordFakeBin: typeof p.discordFakeBin === 'string' ? p.discordFakeBin : null,
+        gameFakeBin: typeof p.gameFakeBin === 'string' ? p.gameFakeBin : null,
+      }));
+    if (cleanedProfiles.length > 0) {
+      writeProfilesRaw(cleanedProfiles);
+    }
+  }
+
+  if (bundle.settings && typeof bundle.settings === 'object') {
+    const current = loadSettings();
+    const allowedPatch = {};
+    const boolKeys = [
+      'autoStartStrategyOnLaunch',
+      'launchOnWindowsStartup',
+      'startMinimizedToTray',
+      'minimizeToTrayOnClose',
+      'autoRestartOnFilterChange',
+      'autoRestartOnCrash',
+      'autoCheckUpdates',
+      'showWinwsConsole',
+      'showBestStrategyCards',
+      'developerMode',
+    ];
+    for (const k of boolKeys) {
+      if (typeof bundle.settings[k] === 'boolean') allowedPatch[k] = bundle.settings[k];
+    }
+    if (bundle.settings.connectLayout === 'split' || bundle.settings.connectLayout === 'stacked') {
+      allowedPatch.connectLayout = bundle.settings.connectLayout;
+    }
+    if (Array.isArray(bundle.settings.favoriteStrategies)) {
+      allowedPatch.favoriteStrategies = bundle.settings.favoriteStrategies.filter((s) => typeof s === 'string');
+    }
+    if (typeof bundle.settings.selectedStrategy === 'string') {
+      allowedPatch.selectedStrategy = bundle.settings.selectedStrategy;
+    }
+    if (typeof bundle.activeProfileId === 'string') {
+      allowedPatch.activeProfileId = bundle.activeProfileId;
+    } else if (typeof bundle.settings.activeProfileId === 'string') {
+      allowedPatch.activeProfileId = bundle.settings.activeProfileId;
+    }
+    allowedPatch.zapretDir = current.zapretDir;
+    saveSettings(allowedPatch);
+  }
+
+  const { activeProfileId } = readProfiles(zapretDir);
+  activateProfile(zapretDir, activeProfileId);
+
+  return {
+    restoredLists,
+    restoredCustomStrats,
+    profilesCount: readProfiles(zapretDir).profiles.length,
+  };
+}
+
+// ============================================================================
+// Safe Custom Strategy Builder ("custom - <name>.bat", #12)
+// ============================================================================
+
+function sanitizeCustomStrategyTitle(rawName) {
+  const stripped = String(rawName || '')
+    .replace(/\.bat$/i, '')
+    .replace(/^custom\s*-\s*/i, '')
+    .replace(/[\\/:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 42);
+  if (!stripped) {
+    throw new Error('Введите название стратегии');
+  }
+  return stripped;
+}
+
+export function getStrategyBuilderSource(zapretDir, fileName) {
+  const safe = path.basename(String(fileName || ''));
+  const fullPath = path.join(zapretDir, safe);
+  if (!fs.existsSync(fullPath)) {
+    throw new Error('Базовая стратегия не найдена');
+  }
+  const raw = fs.readFileSync(fullPath, 'utf8');
+  const idx = raw.toLowerCase().indexOf('winws.exe"');
+  let winwsTail = '';
+  if (idx !== -1) {
+    winwsTail = raw
+      .slice(idx + 'winws.exe"'.length)
+      .replace(/\^\r?\n/g, '\n')
+      .trim();
+  }
+  return {
+    fileName: safe,
+    isCustom: /^custom\s*-/i.test(safe),
+    cleanTitle: safe.replace(/\.bat$/i, '').replace(/^custom\s*-\s*/i, ''),
+    winwsArgsText: winwsTail,
+  };
+}
+
+export function buildWinwsArgsFromParams(params = {}) {
+  const tcpMode = String(params.tcpDesync || 'fake,multisplit');
+  const tcpRepeats = Math.min(16, Math.max(1, Number(params.tcpRepeats) || 6));
+  const fooling = String(params.fooling || 'ts');
+  const autottl = String(params.autottl || 'off');
+  const tlsBin = String(params.tlsFakeBin || 'tls_clienthello_www_google_com.bin').replace(/["\r\n]/g, '');
+  const quicBin = String(params.quicFakeBin || 'quic_initial_www_google_com.bin').replace(/["\r\n]/g, '');
+  const quicRepeats = Math.min(16, Math.max(1, Number(params.quicRepeats) || 8));
+  const includeDiscordVoice = params.includeDiscordVoice !== false;
+  const includeGameFilter = params.includeGameFilter !== false;
+
+  const wfTcp = includeGameFilter
+    ? '--wf-tcp=80,443,2053,2083,2087,2096,8443,%GameFilterTCP%'
+    : '--wf-tcp=80,443,2053,2083,2087,2096,8443';
+  const wfUdp = includeGameFilter
+    ? '--wf-udp=443,19294-19344,50000-50100,%GameFilterUDP%'
+    : '--wf-udp=443,19294-19344,50000-50100';
+
+  const tcpFlags = [`--dpi-desync=${tcpMode}`];
+  if (tcpMode.includes('fake')) {
+    tcpFlags.push(`--dpi-desync-repeats=${tcpRepeats}`);
+    tcpFlags.push(`--dpi-desync-fake-tls="%BIN%${tlsBin}"`);
+  }
+  if (tcpMode.includes('split') || tcpMode.includes('disorder')) {
+    tcpFlags.push('--dpi-desync-split-pos=1,midsld');
+    tcpFlags.push('--dpi-desync-split-seqovl=568');
+    tcpFlags.push(`--dpi-desync-split-seqovl-pattern="%BIN%${tlsBin}"`);
+  }
+  if (fooling && fooling !== 'none') {
+    tcpFlags.push(`--dpi-desync-fooling=${fooling}`);
+  }
+  if (autottl && autottl !== 'off') {
+    tcpFlags.push(`--dpi-desync-autottl=${autottl}`);
+  }
+  const tcpFlagStr = tcpFlags.join(' ');
+
+  const rules = [
+    `${wfTcp} ${wfUdp}`,
+    `--filter-udp=443 --hostlist="%LISTS%list-google.txt" --dpi-desync=fake --dpi-desync-repeats=${quicRepeats} --dpi-desync-fake-quic="%BIN%${quicBin}"`,
+    `--filter-udp=443 --hostlist="%LISTS%list-general.txt" --hostlist="%LISTS%list-general-user.txt" --hostlist-exclude="%LISTS%list-exclude.txt" --hostlist-exclude="%LISTS%list-exclude-user.txt" --ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" --dpi-desync=fake --dpi-desync-repeats=${quicRepeats} --dpi-desync-fake-quic="%BIN%${quicBin}"`,
+  ];
+
+  if (includeDiscordVoice) {
+    rules.push(
+      '--filter-udp=19294-19344,50000-50100 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-fake-discord="%BIN%ACTIVE_DISCORD_UDP.bin" --dpi-desync-fake-stun="%BIN%ACTIVE_DISCORD_UDP.bin" --dpi-desync-repeats=6'
+    );
+  }
+
+  rules.push(
+    `--filter-tcp=443 --hostlist="%LISTS%list-google.txt" --ip-id=zero ${tcpFlagStr}`,
+    `--filter-tcp=80,443,2053,2083,2087,2096,8443 --hostlist="%LISTS%list-general.txt" --hostlist="%LISTS%list-general-user.txt" --hostlist-exclude="%LISTS%list-exclude.txt" --hostlist-exclude="%LISTS%list-exclude-user.txt" --ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" ${tcpFlagStr}`,
+    `--filter-udp=443 --ipset="%LISTS%ipset-all.txt" --hostlist-exclude="%LISTS%list-exclude.txt" --hostlist-exclude="%LISTS%list-exclude-user.txt" --ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" --dpi-desync=fake --dpi-desync-repeats=${quicRepeats} --dpi-desync-fake-quic="%BIN%${quicBin}"`,
+    `--filter-tcp=80,443,8443 --ipset="%LISTS%ipset-all.txt" --hostlist-exclude="%LISTS%list-exclude.txt" --hostlist-exclude="%LISTS%list-exclude-user.txt" --ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" ${tcpFlagStr}`
+  );
+
+  if (includeGameFilter) {
+    rules.push(
+      `--filter-tcp=%GameFilterTCP% --ipset="%LISTS%ipset-all.txt" --ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" --dpi-desync=multisplit --dpi-desync-any-protocol=1 --dpi-desync-cutoff=n3 --dpi-desync-split-seqovl=568 --dpi-desync-split-pos=1 --dpi-desync-split-seqovl-pattern="%BIN%${tlsBin}"`,
+      '--filter-udp=%GameFilterUDP% --ipset="%LISTS%ipset-all.txt" --ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" --dpi-desync=fake --dpi-desync-repeats=10 --dpi-desync-any-protocol=1 --dpi-desync-fake-unknown-udp="%BIN%ACTIVE_GAME_UDP.bin" --dpi-desync-cutoff=n4'
+    );
+  }
+
+  return `${rules[0]} ^\n` + rules.slice(1).join(' --new ^\n');
+}
+
+export function saveCustomStrategy(zapretDir, payload = {}) {
+  const cleanTitle = sanitizeCustomStrategyTitle(payload.title);
+  const fileName = `custom - ${cleanTitle}.bat`;
+
+  if (payload.previousFileName) {
+    const prevSafe = path.basename(String(payload.previousFileName));
+    if (/^custom\s*-.*\.bat$/i.test(prevSafe) && prevSafe.toLowerCase() !== fileName.toLowerCase()) {
+      const prevFull = path.join(zapretDir, prevSafe);
+      if (fs.existsSync(prevFull)) {
+        fs.unlinkSync(prevFull);
+      }
+    }
+  }
+
+  let argsBlock = '';
+  if (payload.mode === 'raw' && typeof payload.winwsArgsText === 'string' && payload.winwsArgsText.trim()) {
+    const lines = payload.winwsArgsText
+      .split(/\r?\n/)
+      .map((l) => l.replace(/\s*\^\s*$/, '').trim())
+      .filter(Boolean);
+    if (lines.length === 0) {
+      throw new Error('Аргументы запуска winws.exe не могут быть пустыми');
+    }
+    // Disallow shell injection operators outside quotes
+    for (const ln of lines) {
+      const strippedQuotes = ln.replace(/"[^"]*"/g, '');
+      if (/[&|<>]/.test(strippedQuotes)) {
+        throw new Error('Недопустимые спецсимволы командной оболочки в аргументах');
+      }
+    }
+    argsBlock = lines.map((ln, i) => (i < lines.length - 1 ? `${ln} ^` : ln)).join('\n');
+  } else {
+    argsBlock = buildWinwsArgsFromParams(payload.params || {});
+  }
+
+  const batContent = [
+    '@echo off',
+    'chcp 65001 > nul',
+    ':: Custom strategy generated by Zapret Control',
+    '',
+    'cd /d "%~dp0"',
+    'call service.bat status_zapret',
+    'call service.bat check_updates',
+    'call service.bat load_game_filter',
+    'call service.bat load_user_lists',
+    'echo:',
+    '',
+    'set "BIN=%~dp0bin\\"',
+    'set "LISTS=%~dp0lists\\"',
+    'cd /d %BIN%',
+    '',
+    `start "zapret: %~n0" /min "%BIN%winws.exe" ${argsBlock}`,
+    '',
+  ].join('\n');
+
+  const fullPath = path.join(zapretDir, fileName);
+  writeCrlfFile(fullPath, batContent);
+
+  // Verify it parses cleanly with parseBatWinwsArgs
+  parseBatWinwsArgs(zapretDir, fileName);
+
+  if (payload.selectAfterSave) {
+    saveSettings({ selectedStrategy: fileName });
+    syncCurrentStateToActiveProfile(zapretDir);
+  }
+
+  return { fileName, strategies: readStrategies(zapretDir) };
+}
+
+export function deleteCustomStrategy(zapretDir, fileName) {
+  const safe = path.basename(String(fileName || ''));
+  if (!/^custom\s*-.*\.bat$/i.test(safe)) {
+    throw new Error('Удалять можно только пользовательские стратегии (custom - *.bat)');
+  }
+  const fullPath = path.join(zapretDir, safe);
+  if (!fs.existsSync(fullPath)) {
+    throw new Error('Файл стратегии не найден');
+  }
+  fs.unlinkSync(fullPath);
+
+  const remaining = readStrategies(zapretDir);
+  const fallback =
+    remaining.find((s) => s.fileName === 'general (ALT11).bat')?.fileName ||
+    remaining[0]?.fileName ||
+    'general.bat';
+
+  const settings = loadSettings();
+  const nextFavs = (settings.favoriteStrategies || []).filter((f) => f !== safe);
+  const patch = { favoriteStrategies: nextFavs };
+  if (settings.selectedStrategy === safe) {
+    patch.selectedStrategy = fallback;
+  }
+  saveSettings(patch);
+
+  // Update any profile pointing to the deleted custom strategy
+  const { profiles } = readProfiles(zapretDir);
+  const updatedProfiles = profiles.map((p) => (p.strategy === safe ? { ...p, strategy: fallback } : p));
+  writeProfilesRaw(updatedProfiles);
+
+  return { deleted: safe, fallbackStrategy: fallback };
+}
+
 

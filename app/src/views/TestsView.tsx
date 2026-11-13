@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Gauge,
+  Zap,
   Square,
   Trophy,
   MessageSquare,
@@ -13,7 +14,10 @@ import {
   ChevronUp,
   Check,
   History,
+  GitCompare,
+  X,
 } from 'lucide-react';
+import { api } from '../api';
 import type { FullAppState, TestRunReport } from '../types';
 import {
   buildMetricsLookup,
@@ -35,7 +39,7 @@ interface TestsViewProps {
   selectedHistoryFile: string;
   onSelectHistoryFile: (fileName: string) => void;
   busy: boolean;
-  onStartTests: (categories: string[]) => void;
+  onStartTests: (categories: string[], mode: 'standard' | 'express') => void;
   onStopTests: () => void;
   onApplyStrategy: (fileName: string, runNow: boolean) => void;
 }
@@ -54,6 +58,10 @@ export const TestsView: React.FC<TestsViewProps> = ({
 }) => {
   const { strategies, targetCategories, testHistory, testJob, settings, runtime } = state;
   const devMode = Boolean(settings.developerMode);
+  const favoritesSet = useMemo(
+    () => new Set(settings.favoriteStrategies || []),
+    [settings.favoriteStrategies]
+  );
 
   const availableCategories = useMemo(() => {
     if (targetCategories && targetCategories.length > 0) {
@@ -77,6 +85,17 @@ export const TestsView: React.FC<TestsViewProps> = ({
   // Custom seamless history dropdown state
   const [historyMenuOpen, setHistoryMenuOpen] = useState<boolean>(false);
   const historyDropdownRef = useRef<HTMLDivElement | null>(null);
+
+  // Comparison modal state (#10)
+  const [compareOpen, setCompareOpen] = useState<boolean>(false);
+  const [compareKind, setCompareKind] = useState<'strategies' | 'reports'>('strategies');
+  const [compareStratA, setCompareStratA] = useState<string>('');
+  const [compareStratB, setCompareStratB] = useState<string>('');
+  const [compareOnlyDiff, setCompareOnlyDiff] = useState<boolean>(false);
+  const [reportFileA, setReportFileA] = useState<string>('');
+  const [reportFileB, setReportFileB] = useState<string>('');
+  const [loadedReportA, setLoadedReportA] = useState<TestRunReport | null>(null);
+  const [loadedReportB, setLoadedReportB] = useState<TestRunReport | null>(null);
 
   useEffect(() => {
     if (!historyMenuOpen) return;
@@ -114,6 +133,51 @@ export const TestsView: React.FC<TestsViewProps> = ({
 
   const lookup = useMemo(() => buildMetricsLookup(activeReport), [activeReport]);
 
+  // Initialize default strategies/reports when comparison modal opens
+  useEffect(() => {
+    if (!compareOpen) return;
+    const tested = activeReport?.strategies || [];
+    if (tested.length >= 2) {
+      if (!compareStratA || !tested.some((s) => s.fileName === compareStratA)) {
+        setCompareStratA(tested[0].fileName);
+      }
+      if (!compareStratB || !tested.some((s) => s.fileName === compareStratB)) {
+        setCompareStratB(tested[1].fileName);
+      }
+    } else if (tested.length === 1) {
+      setCompareStratA(tested[0].fileName);
+      setCompareStratB(tested[0].fileName);
+    }
+    if (testHistory.length >= 2) {
+      if (!reportFileA) setReportFileA(testHistory[0].fileName);
+      if (!reportFileB) setReportFileB(testHistory[1].fileName);
+    }
+  }, [compareOpen, activeReport, testHistory, compareStratA, compareStratB, reportFileA, reportFileB]);
+
+  useEffect(() => {
+    if (!compareOpen || compareKind !== 'reports') return;
+    let cancelled = false;
+    if (reportFileA) {
+      api
+        .getTestHistoryReport(reportFileA)
+        .then((r) => {
+          if (!cancelled) setLoadedReportA(r);
+        })
+        .catch(() => {});
+    }
+    if (reportFileB) {
+      api
+        .getTestHistoryReport(reportFileB)
+        .then((r) => {
+          if (!cancelled) setLoadedReportB(r);
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [compareOpen, compareKind, reportFileA, reportFileB]);
+
   const goalOptions = useMemo(() => {
     const serviceCats = availableCategories.filter((c) => c.id !== 'dns');
     return ['all', ...serviceCats.map((c) => c.id)];
@@ -146,25 +210,25 @@ export const TestsView: React.FC<TestsViewProps> = ({
       },
       {
         key: 'discord' as GoalFilter,
-        title: 'Лучшая для Discord',
+        title: 'Discord',
         icon: <MessageSquare size={15} strokeWidth={1.9} />,
         winner: findBestStrategyForGoal(strategies, lookup, 'discord'),
       },
       {
         key: 'youtube' as GoalFilter,
-        title: 'Лучшая для YouTube',
+        title: 'YouTube',
         icon: <Tv size={15} strokeWidth={1.9} />,
         winner: findBestStrategyForGoal(strategies, lookup, 'youtube'),
       },
       {
         key: 'cloudflare' as GoalFilter,
-        title: 'Лучшая для Cloudflare',
+        title: 'Cloudflare',
         icon: <Cloud size={15} strokeWidth={1.9} />,
         winner: findBestStrategyForGoal(strategies, lookup, 'cloudflare'),
       },
       {
         key: 'github' as GoalFilter,
-        title: 'Лучшая для GitHub',
+        title: 'GitHub',
         icon: <GitBranch size={15} strokeWidth={1.9} />,
         winner: findBestStrategyForGoal(strategies, lookup, 'github'),
       },
@@ -175,7 +239,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
       .filter((c) => !builtinSet.has(c.id))
       .map((c) => ({
         key: c.id,
-        title: `Лучшая для ${c.label}`,
+        title: c.label,
         icon: <Globe size={15} strokeWidth={1.9} />,
         winner: findBestStrategyForGoal(strategies, lookup, c.id),
       }));
@@ -184,20 +248,81 @@ export const TestsView: React.FC<TestsViewProps> = ({
   }, [strategies, lookup, availableCategories]);
 
   const sortedStrategies = useMemo(() => {
-    const ordered = sortStrategiesWithMetrics(strategies, lookup, goalFilter, sortBy);
+    const ordered = sortStrategiesWithMetrics(strategies, lookup, goalFilter, sortBy, favoritesSet);
     if (!onlyPassing) return ordered;
     return ordered.filter((s) => {
       const m = lookup.get(s.fileName.toLowerCase());
       const g = getGoalMetrics(m, goalFilter);
       return g.scorePct !== null && g.scorePct >= 90;
     });
-  }, [strategies, lookup, goalFilter, sortBy, onlyPassing]);
+  }, [strategies, lookup, goalFilter, sortBy, onlyPassing, favoritesSet]);
 
   const currentHistoryLabel = useMemo(() => {
     if (selectedHistoryFile === 'latest') return 'Последний замер';
     const found = testHistory.find((h) => h.fileName === selectedHistoryFile);
-    return found ? (devMode ? `Отчёт: ${found.label}` : found.label) : 'Последний замер';
-  }, [selectedHistoryFile, testHistory, devMode]);
+    return found ? found.label : 'Последний замер';
+  }, [selectedHistoryFile, testHistory]);
+
+  // Computed Strategy A vs Strategy B rows (#10)
+  const stratMetricsA = compareStratA ? lookup.get(compareStratA.toLowerCase()) : undefined;
+  const stratMetricsB = compareStratB ? lookup.get(compareStratB.toLowerCase()) : undefined;
+
+  const strategyCompareRows = useMemo(() => {
+    if (!stratMetricsA && !stratMetricsB) return [];
+    const targetIds = Array.from(
+      new Set([
+        ...(stratMetricsA?.targets.map((t) => t.id) || []),
+        ...(stratMetricsB?.targets.map((t) => t.id) || []),
+      ])
+    );
+    const rows = targetIds.map((id) => {
+      const ta = stratMetricsA?.targets.find((t) => t.id === id);
+      const tb = stratMetricsB?.targets.find((t) => t.id === id);
+      const okA = ta ? (ta.isPingOnly ? ta.pingMs !== null : ta.http === 'OK' && ta.tls12 === 'OK') : null;
+      const okB = tb ? (tb.isPingOnly ? tb.pingMs !== null : tb.http === 'OK' && tb.tls12 === 'OK') : null;
+      const pingA = ta?.pingMs ?? null;
+      const pingB = tb?.pingMs ?? null;
+      const pingDiff = pingA !== null && pingB !== null ? pingB - pingA : null;
+      const isDiff = okA !== okB || (pingDiff !== null && Math.abs(pingDiff) >= 12);
+      return { id, okA, okB, pingA, pingB, pingDiff, isDiff };
+    });
+    return compareOnlyDiff ? rows.filter((r) => r.isDiff) : rows;
+  }, [stratMetricsA, stratMetricsB, compareOnlyDiff]);
+
+  const reportCompareRows = useMemo(() => {
+    if (!loadedReportA || !loadedReportB) return [];
+    const mapA = buildMetricsLookup(loadedReportA);
+    const mapB = buildMetricsLookup(loadedReportB);
+    const names = Array.from(
+      new Set([
+        ...loadedReportA.strategies.map((s) => s.fileName),
+        ...loadedReportB.strategies.map((s) => s.fileName),
+      ])
+    );
+    const rows = names.map((fn) => {
+      const ma = mapA.get(fn.toLowerCase());
+      const mb = mapB.get(fn.toLowerCase());
+      const scoreA = ma?.overallScore ?? null;
+      const scoreB = mb?.overallScore ?? null;
+      const pingA = ma?.avgPingMs ?? null;
+      const pingB = mb?.avgPingMs ?? null;
+      const scoreDelta = scoreA !== null && scoreB !== null ? scoreA - scoreB : null;
+      const isDiff = scoreA !== scoreB;
+      return {
+        fileName: fn,
+        label: formatTestStrategyName(fn),
+        scoreA,
+        scoreB,
+        pingA,
+        pingB,
+        scoreDelta,
+        isDiff,
+      };
+    });
+    return compareOnlyDiff ? rows.filter((r) => r.isDiff) : rows;
+  }, [loadedReportA, loadedReportB, compareOnlyDiff]);
+
+  const canCompare = Boolean(activeReport && activeReport.strategies.length >= 2) || testHistory.length >= 2;
 
   return (
     <div className="content-container">
@@ -212,9 +337,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
             gap: '12px',
           }}
         >
-          <div style={{ fontSize: '15.5px', fontWeight: 600 }}>
-            Проверка стратегий
-          </div>
+          <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Подбор лучшей стратегии</div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             {testHistory.length > 0 && (
@@ -261,7 +384,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
                             setHistoryMenuOpen(false);
                           }}
                         >
-                          <span>{devMode ? `Отчёт: ${h.label}` : h.label}</span>
+                          <span>{h.label}</span>
                           {active && <Check size={13} />}
                         </button>
                       );
@@ -277,24 +400,40 @@ export const TestsView: React.FC<TestsViewProps> = ({
                 Остановить ({testJob.completedCount}/{testJob.totalCount})
               </button>
             ) : (
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={strategies.length === 0}
-                onClick={() => {
-                  onSelectHistoryFile('latest');
-                  onStartTests(selectedCategories);
-                }}
-              >
-                <Gauge size={15} />
-                Запустить тесты
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="btn btn-tonal"
+                  disabled={strategies.length === 0}
+                  title="Быстрый отсев по маркерам и детальная проверка лучших кандидатов"
+                  onClick={() => {
+                    onSelectHistoryFile('latest');
+                    onStartTests(selectedCategories, 'express');
+                  }}
+                >
+                  <Zap size={14} />
+                  Экспресс-подбор
+                </button>
+
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={strategies.length === 0}
+                  onClick={() => {
+                    onSelectHistoryFile('latest');
+                    onStartTests(selectedCategories, 'standard');
+                  }}
+                >
+                  <Gauge size={15} />
+                  Полный тест
+                </button>
+              </>
             )}
           </div>
         </div>
 
-        <div style={{ marginTop: '14px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '12.5px', color: 'var(--m3-text-muted)', marginRight: '2px' }}>
+        <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', gap: '7px', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '12px', color: 'var(--m3-text-muted)', marginRight: '2px' }}>
             Сервисы:
           </span>
           {availableCategories.map((cat) => {
@@ -327,7 +466,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
               }}
             >
               <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                Проверка:{' '}
+                {testJob.phaseLabel ? `${testJob.phaseLabel} - ` : 'Проверка: '}
                 {testJob.currentStrategy ? formatTestStrategyName(testJob.currentStrategy) : 'запуск...'}
               </span>
               <span className="mono" style={{ flexShrink: 0 }}>{testJob.progressPct}%</span>
@@ -415,20 +554,27 @@ export const TestsView: React.FC<TestsViewProps> = ({
               onClick={() => setOnlyPassing((v) => !v)}
             >
               {onlyPassing && <Check size={12} strokeWidth={2.3} />}
-              {devMode ? 'Только без потерь (90%+)' : 'Без потерь'}
+              Без потерь
             </button>
+
+            {canCompare && (
+              <button
+                type="button"
+                className="m3-chip"
+                onClick={() => setCompareOpen(true)}
+                title="Сравнить две стратегии или два отчёта"
+              >
+                <GitCompare size={13} />
+                Сравнить
+              </button>
+            )}
 
             <SeamlessSelect
               className="toolbar-sort-dropdown"
               value={sortBy}
               icon={<ArrowUpDown size={14} />}
               options={[
-                {
-                  value: 'best',
-                  label: devMode
-                    ? `По качеству соединения (${getGoalLabel(goalFilter, availableCategories)})`
-                    : 'По лучшему результату',
-                },
+                { value: 'best', label: 'Лучший результат' },
                 { value: 'latency', label: 'По задержке (мс)' },
                 { value: 'name', label: 'По названию (А-Я)' },
               ]}
@@ -499,6 +645,19 @@ export const TestsView: React.FC<TestsViewProps> = ({
                         {gStat.pingMs !== null ? `${gStat.pingMs} мс` : '-- мс'}
                       </div>
                     )}
+
+                    <button
+                      type="button"
+                      className="m3-chip"
+                      style={{ height: '26px', padding: '0 10px', fontSize: '11.5px' }}
+                      disabled={busy}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onApplyStrategy(s.fileName, false);
+                      }}
+                    >
+                      {isSelected ? 'Выбрана' : 'Выбрать'}
+                    </button>
 
                     {m && (
                       <button
@@ -572,11 +731,217 @@ export const TestsView: React.FC<TestsViewProps> = ({
 
           {sortedStrategies.length === 0 && (
             <div style={{ padding: '26px', textAlign: 'center', color: 'var(--m3-text-muted)' }}>
-              Нет стратегий, соответствующих выбранному фильтру.
+              Нет подходящих стратегий по фильтру.
             </div>
           )}
         </div>
       </div>
+
+      {/* Comparison Modal (#10) */}
+      {compareOpen && (
+        <div className="modal-backdrop" onClick={() => setCompareOpen(false)}>
+          <div
+            className="modal-panel"
+            style={{ maxWidth: '680px' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: '15.5px', fontWeight: 600 }}>Сравнение результатов</span>
+                <div className="chip-row">
+                  <button
+                    type="button"
+                    className={`m3-chip ${compareKind === 'strategies' ? 'selected' : ''}`}
+                    onClick={() => setCompareKind('strategies')}
+                  >
+                    Две стратегии
+                  </button>
+                  {testHistory.length >= 2 && (
+                    <button
+                      type="button"
+                      className={`m3-chip ${compareKind === 'reports' ? 'selected' : ''}`}
+                      onClick={() => setCompareKind('reports')}
+                    >
+                      Два замера
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  type="button"
+                  className={`m3-chip ${compareOnlyDiff ? 'selected' : ''}`}
+                  onClick={() => setCompareOnlyDiff((v) => !v)}
+                >
+                  {compareOnlyDiff && <Check size={12} />}
+                  Только различия
+                </button>
+                <button type="button" className="btn-icon" onClick={() => setCompareOpen(false)}>
+                  <X size={16} />
+                </button>
+              </div>
+            </div>
+
+            {compareKind === 'strategies' ? (
+              <>
+                <div className="compare-selectors-grid">
+                  <SeamlessSelect
+                    fullWidth
+                    value={compareStratA}
+                    options={(activeReport?.strategies || []).map((s) => ({
+                      value: s.fileName,
+                      label: `${formatTestStrategyName(s.fileName)} (${s.overallScore}%)`,
+                    }))}
+                    onChange={setCompareStratA}
+                  />
+                  <SeamlessSelect
+                    fullWidth
+                    value={compareStratB}
+                    options={(activeReport?.strategies || []).map((s) => ({
+                      value: s.fileName,
+                      label: `${formatTestStrategyName(s.fileName)} (${s.overallScore}%)`,
+                    }))}
+                    onChange={setCompareStratB}
+                  />
+                </div>
+
+                {(stratMetricsA || stratMetricsB) && (
+                  <div className="compare-summary-grid">
+                    <div className="compare-summary-box">
+                      <span style={{ fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {stratMetricsA ? formatTestStrategyName(stratMetricsA.fileName) : '--'}
+                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                        {stratMetricsA && (
+                          <span className={`score-pill ${classifyScoreTone(stratMetricsA.overallScore)}`}>
+                            {stratMetricsA.overallScore}%
+                          </span>
+                        )}
+                        <span className="mono" style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
+                          {stratMetricsA?.avgPingMs ? `${stratMetricsA.avgPingMs} мс` : '--'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="compare-summary-box">
+                      <span style={{ fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {stratMetricsB ? formatTestStrategyName(stratMetricsB.fileName) : '--'}
+                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                        {stratMetricsB && (
+                          <span className={`score-pill ${classifyScoreTone(stratMetricsB.overallScore)}`}>
+                            {stratMetricsB.overallScore}%
+                          </span>
+                        )}
+                        <span className="mono" style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
+                          {stratMetricsB?.avgPingMs ? `${stratMetricsB.avgPingMs} мс` : '--'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="compare-table-scroll">
+                  <div className="compare-row head">
+                    <span>Цель</span>
+                    <span>Первая</span>
+                    <span>Вторая</span>
+                    <span>Разница</span>
+                  </div>
+                  {strategyCompareRows.map((row) => (
+                    <div key={row.id} className={`compare-row ${row.isDiff ? 'diff-highlight' : ''}`}>
+                      <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {row.id}
+                      </span>
+                      <span className="mono" style={{ color: row.okA ? 'var(--m3-success)' : 'var(--m3-danger)' }}>
+                        {row.okA === null ? '--' : row.okA ? `OK${row.pingA ? ` (${row.pingA}мс)` : ''}` : 'Ошибка'}
+                      </span>
+                      <span className="mono" style={{ color: row.okB ? 'var(--m3-success)' : 'var(--m3-danger)' }}>
+                        {row.okB === null ? '--' : row.okB ? `OK${row.pingB ? ` (${row.pingB}мс)` : ''}` : 'Ошибка'}
+                      </span>
+                      <span className="mono" style={{ fontSize: '11.5px', color: 'var(--m3-text-secondary)' }}>
+                        {row.pingDiff !== null
+                          ? `${row.pingDiff > 0 ? '+' : ''}${row.pingDiff} мс`
+                          : row.okA !== row.okB
+                            ? 'Статус'
+                            : 'Равно'}
+                      </span>
+                    </div>
+                  ))}
+                  {strategyCompareRows.length === 0 && (
+                    <div style={{ padding: '20px', textAlign: 'center', color: 'var(--m3-text-muted)' }}>
+                      Различий между выбранными стратегиями нет.
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="compare-selectors-grid">
+                  <SeamlessSelect
+                    fullWidth
+                    value={reportFileA}
+                    options={testHistory.map((h) => ({ value: h.fileName, label: `Новый: ${h.label}` }))}
+                    onChange={setReportFileA}
+                  />
+                  <SeamlessSelect
+                    fullWidth
+                    value={reportFileB}
+                    options={testHistory.map((h) => ({ value: h.fileName, label: `Предыдущий: ${h.label}` }))}
+                    onChange={setReportFileB}
+                  />
+                </div>
+
+                <div className="compare-table-scroll">
+                  <div className="compare-row head">
+                    <span>Стратегия</span>
+                    <span>Новый замер</span>
+                    <span>Предыдущий</span>
+                    <span>Динамика</span>
+                  </div>
+                  {reportCompareRows.map((row) => (
+                    <div key={row.fileName} className={`compare-row ${row.isDiff ? 'diff-highlight' : ''}`}>
+                      <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {row.label}
+                      </span>
+                      <span className="mono">
+                        {row.scoreA !== null ? `${row.scoreA}%${row.pingA ? ` (${row.pingA}мс)` : ''}` : '--'}
+                      </span>
+                      <span className="mono">
+                        {row.scoreB !== null ? `${row.scoreB}%${row.pingB ? ` (${row.pingB}мс)` : ''}` : '--'}
+                      </span>
+                      <span
+                        className="mono"
+                        style={{
+                          fontSize: '11.5px',
+                          color:
+                            row.scoreDelta && row.scoreDelta > 0
+                              ? 'var(--m3-success)'
+                              : row.scoreDelta && row.scoreDelta < 0
+                                ? 'var(--m3-danger)'
+                                : 'var(--m3-text-muted)',
+                        }}
+                      >
+                        {row.scoreDelta !== null
+                          ? row.scoreDelta === 0
+                            ? 'Без изм.'
+                            : `${row.scoreDelta > 0 ? '+' : ''}${row.scoreDelta}%`
+                          : '--'}
+                      </span>
+                    </div>
+                  ))}
+                  {reportCompareRows.length === 0 && (
+                    <div style={{ padding: '20px', textAlign: 'center', color: 'var(--m3-text-muted)' }}>
+                      Изменений между выбранными отчётами нет.
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

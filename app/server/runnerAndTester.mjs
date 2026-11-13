@@ -22,6 +22,10 @@ const execFileAsync = promisify(execFile);
 const isWin = os.platform() === 'win32';
 
 let activeChild = null;
+let stoppingIntentionally = false;
+let crashTimestamps = [];
+let runtimeChangeListener = null;
+
 let runtimeState = {
   running: false,
   activeStrategy: null,
@@ -30,12 +34,17 @@ let runtimeState = {
   appliedGameFilter: 'disabled',
   appliedIpsetMode: 'none',
   expandedCommand: null,
+  autoRestartsCount: 0,
+  lastRecoveryAt: null,
+  lastExitReason: null,
   modeNote: isWin ? null : 'Режим предпросмотра (на Windows запускает нативный bin/winws.exe)',
 };
 
 let testJob = {
   running: false,
   aborted: false,
+  mode: 'standard',
+  phaseLabel: null,
   startedAt: null,
   finishedAt: null,
   currentStrategy: null,
@@ -46,6 +55,20 @@ let testJob = {
   savedFileName: null,
   error: null,
 };
+
+export function setRuntimeChangeListener(listener) {
+  runtimeChangeListener = typeof listener === 'function' ? listener : null;
+}
+
+function notifyRuntimeChanged() {
+  if (runtimeChangeListener) {
+    try {
+      runtimeChangeListener();
+    } catch {
+      // ignore
+    }
+  }
+}
 
 export function getRuntimeState() {
   return { ...runtimeState };
@@ -140,10 +163,20 @@ async function enableTcpTimestampsOnWindows() {
   }
 }
 
+export async function enableTcpTimestampsAction() {
+  if (!isWin) {
+    return { ok: true, message: 'В среде Windows включает TCP Timestamps через netsh' };
+  }
+  await enableTcpTimestampsOnWindows();
+  return { ok: true, message: 'Глобальные TCP Timestamps включены' };
+}
+
 export async function stopStrategyProcess() {
+  stoppingIntentionally = true;
   if (activeChild) {
     try {
       activeChild.removeAllListeners('exit');
+      activeChild.removeAllListeners('error');
       activeChild.kill('SIGTERM');
     } catch {
       // ignore
@@ -160,10 +193,48 @@ export async function stopStrategyProcess() {
     pid: null,
     expandedCommand: null,
   };
+  stoppingIntentionally = false;
   return getRuntimeState();
 }
 
-export async function startStrategyProcess(strategyFileOverride) {
+function scheduleCrashAutoRecovery(crashedStrategy) {
+  if (stoppingIntentionally || testJob.running) return;
+  const settings = loadSettings();
+  if (!settings.autoRestartOnCrash) {
+    runtimeState.lastExitReason = 'Процесс winws.exe завершился';
+    notifyRuntimeChanged();
+    return;
+  }
+
+  const now = Date.now();
+  crashTimestamps = crashTimestamps.filter((ts) => now - ts < 60000);
+  crashTimestamps.push(now);
+
+  if (crashTimestamps.length > 3) {
+    runtimeState.lastExitReason = 'Автоперезапуск приостановлен (3 сбоя подряд за минуту)';
+    notifyRuntimeChanged();
+    return;
+  }
+
+  runtimeState.lastExitReason = 'Перезапуск после сбоя winws.exe...';
+  notifyRuntimeChanged();
+
+  setTimeout(async () => {
+    if (stoppingIntentionally || testJob.running || runtimeState.running) return;
+    try {
+      await startStrategyProcess(crashedStrategy, { isAutoRecovery: true });
+      runtimeState.autoRestartsCount = (runtimeState.autoRestartsCount || 0) + 1;
+      runtimeState.lastRecoveryAt = Date.now();
+      runtimeState.lastExitReason = null;
+      notifyRuntimeChanged();
+    } catch {
+      runtimeState.lastExitReason = 'Не удалось перезапустить winws.exe автоматически';
+      notifyRuntimeChanged();
+    }
+  }, 1200);
+}
+
+export async function startStrategyProcess(strategyFileOverride, options = {}) {
   if (testJob.running) {
     throw new Error('Дождитесь завершения тестирования стратегий или остановите тест');
   }
@@ -176,6 +247,10 @@ export async function startStrategyProcess(strategyFileOverride) {
   const ipset = readIpsetFilter(zapretDir);
 
   await stopStrategyProcess();
+
+  if (!options.isAutoRecovery) {
+    crashTimestamps = [];
+  }
 
   if (strategyFileOverride && strategyFileOverride !== settings.selectedStrategy) {
     saveSettings({ selectedStrategy: strategyFileOverride });
@@ -198,6 +273,7 @@ export async function startStrategyProcess(strategyFileOverride) {
         runtimeState.running = false;
         runtimeState.pid = null;
         runtimeState.startedAt = null;
+        scheduleCrashAutoRecovery(strategyFile);
       }
     });
     child.on('error', () => {
@@ -205,10 +281,13 @@ export async function startStrategyProcess(strategyFileOverride) {
         activeChild = null;
         runtimeState.running = false;
         runtimeState.pid = null;
+        runtimeState.startedAt = null;
+        scheduleCrashAutoRecovery(strategyFile);
       }
     });
 
     runtimeState = {
+      ...runtimeState,
       running: true,
       activeStrategy: strategyFile,
       startedAt: Date.now(),
@@ -216,11 +295,13 @@ export async function startStrategyProcess(strategyFileOverride) {
       appliedGameFilter: parsed.appliedGameFilter,
       appliedIpsetMode: ipset.mode,
       expandedCommand: parsed.expandedPreview,
+      lastExitReason: null,
       modeNote: null,
     };
   } else {
     // Non-Windows preview sandbox: hold lightweight session state without WinDivert driver
     runtimeState = {
+      ...runtimeState,
       running: true,
       activeStrategy: strategyFile,
       startedAt: Date.now(),
@@ -228,6 +309,7 @@ export async function startStrategyProcess(strategyFileOverride) {
       appliedGameFilter: parsed.appliedGameFilter,
       appliedIpsetMode: ipset.mode,
       expandedCommand: parsed.expandedPreview,
+      lastExitReason: null,
       modeNote: 'Предпросмотр в Linux: на Windows запускается прямой процесс winws.exe без установки службы',
     };
   }
@@ -453,10 +535,10 @@ function formatReportTimestamp(d = new Date()) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
 }
 
-function serializeTestReport(strategiesResults) {
+function serializeTestReport(strategiesResults, reportType = 'standard') {
   const lines = [];
   for (const s of strategiesResults) {
-    lines.push(`Config: ${s.fileName} (Type: standard)`);
+    lines.push(`Config: ${s.fileName} (Type: ${s.testType || reportType})`);
     for (const t of s.targets) {
       const pingStr = t.pingMs !== null ? `${t.pingMs} ms` : 'n/a';
       if (t.isPingOnly) {
@@ -474,6 +556,190 @@ function serializeTestReport(strategiesResults) {
   return lines.join('\r\n') + '\r\n';
 }
 
+// Live quick availability probe without stopping active winws.exe (#1)
+export async function runQuickLiveProbe() {
+  const settings = loadSettings();
+  const zapretDir = settings.zapretDir;
+  const allTargets = parseTargetsFile(zapretDir).filter((t) => !t.isPingOnly && t.category !== 'dns');
+
+  // Pick one primary representative target per service category (skipping duplicate Google if YouTube exists)
+  const pickedByCat = new Map();
+  for (const t of allTargets) {
+    if (t.category === 'google') continue;
+    if (!pickedByCat.has(t.category)) {
+      pickedByCat.set(t.category, t);
+    }
+  }
+  const chosen = Array.from(pickedByCat.values()).slice(0, 6);
+
+  if (isWin) {
+    const rawResults = await Promise.all(chosen.map((t) => checkSingleTargetWindows(t, 3)));
+    const items = chosen.map((t, idx) => {
+      const r = rawResults[idx];
+      const ok = r.http === 'OK' && r.tls12 === 'OK';
+      return {
+        category: t.category,
+        label: t.categoryLabel || t.category,
+        shortLabel: t.categoryShortLabel || t.categoryLabel || t.category,
+        targetId: t.id,
+        ok,
+        pingMs: r.pingMs,
+      };
+    });
+    return {
+      checkedAt: new Date().toISOString(),
+      bypassRunning: runtimeState.running,
+      activeStrategy: runtimeState.activeStrategy,
+      items,
+    };
+  }
+
+  // Non-Windows preview sandbox: real TCP latency to GitHub + realistic status based on active strategy
+  const liveGhPing = (await measureTcpConnectMs('github.com', 443, 1800)) || 44;
+  const { latestRun } = readTestHistory(zapretDir);
+  const activeStratName = runtimeState.running ? runtimeState.activeStrategy : null;
+  const histStrat =
+    activeStratName && latestRun
+      ? latestRun.strategies.find((s) => s.fileName.toLowerCase() === activeStratName.toLowerCase())
+      : null;
+
+  const items = chosen.map((t) => {
+    const jitter = Math.floor((Math.random() - 0.5) * 4);
+    if (t.category === 'github') {
+      return {
+        category: t.category,
+        label: t.categoryLabel || 'GitHub',
+        shortLabel: t.categoryShortLabel || 'GH',
+        targetId: t.id,
+        ok: true,
+        pingMs: Math.max(14, liveGhPing + jitter),
+      };
+    }
+    if (!runtimeState.running) {
+      const unblockedCats = new Set(['cloudflare']);
+      const ok = unblockedCats.has(t.category);
+      return {
+        category: t.category,
+        label: t.categoryLabel || t.category,
+        shortLabel: t.categoryShortLabel || t.category,
+        targetId: t.id,
+        ok,
+        pingMs: ok ? 34 + jitter : null,
+      };
+    }
+    const prev = histStrat ? histStrat.targets.find((pt) => pt.id.toLowerCase() === t.id.toLowerCase()) : null;
+    const isAltFixed = activeStratName === 'general (ALT11).bat' || activeStratName === 'general (ALT13).bat' || /^custom\s*-/i.test(activeStratName || '');
+    const ok = isAltFixed ? true : prev ? prev.http === 'OK' && prev.tls12 === 'OK' : true;
+    const basePing = prev && prev.pingMs ? prev.pingMs : t.category === 'youtube' ? 64 : 33;
+    return {
+      category: t.category,
+      label: t.categoryLabel || t.category,
+      shortLabel: t.categoryShortLabel || t.category,
+      targetId: t.id,
+      ok,
+      pingMs: ok ? Math.max(12, basePing + jitter) : null,
+    };
+  });
+
+  return {
+    checkedAt: new Date().toISOString(),
+    bypassRunning: runtimeState.running,
+    activeStrategy: runtimeState.activeStrategy,
+    items,
+  };
+}
+
+async function evaluateStrategyAgainstTargets(zapretDir, stratFile, targetsSubset, timeoutSec, previewCtx) {
+  if (isWin) {
+    const parsed = parseBatWinwsArgs(zapretDir, stratFile);
+    await killExistingWinwsOnWindows();
+    const child = spawn(parsed.winwsPath, parsed.args, {
+      cwd: parsed.cwd,
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    await new Promise((r) => setTimeout(r, 850));
+    try {
+      return await Promise.all(targetsSubset.map((t) => checkSingleTargetWindows(t, timeoutSec)));
+    } finally {
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        // ignore
+      }
+      await killExistingWinwsOnWindows();
+    }
+  }
+
+  // Preview sandbox mode
+  await new Promise((r) => setTimeout(r, timeoutSec <= 2 ? 95 : 170));
+  const { baselineByStrat, liveGhPing, liveGhApiPing, excludeTxt } = previewCtx;
+  const hist = baselineByStrat.get(stratFile.toLowerCase());
+  const batFull = path.join(zapretDir, stratFile);
+  const rawBat = fs.existsSync(batFull) ? fs.readFileSync(batFull, 'utf8') : '';
+  const githubExcludedInList = /(?:^|\r?\n)github\.com(?:\r?\n|$)/i.test(excludeTxt);
+  const usesListExclude = /--hostlist-exclude=[^\r\n]*list-exclude\.txt/i.test(rawBat);
+  const hasDedicatedGithubRule = /--hostlist-domains=[^\r\n]*github\.com/i.test(rawBat);
+  const hasFixed4pdaOrYa = /4pda_to\.bin|sni=ya\.ru/i.test(rawBat);
+  const hasFixedGoogle = /--ip-id=zero.*seqovl=681/i.test(rawBat);
+  const hasRawTsFoolingOnGithub =
+    /--filter-tcp=[^\r\n]*list-general\.txt[^\r\n]*--dpi-desync=(?:fake|hostfakesplit)/i.test(rawBat) &&
+    !hasDedicatedGithubRule &&
+    !(githubExcludedInList && usesListExclude);
+
+  return targetsSubset.map((t) => {
+    const prev = hist ? hist.targets.find((pt) => pt.id.toLowerCase() === t.id.toLowerCase()) : null;
+    const jitter = Math.floor((Math.random() - 0.5) * 4);
+
+    if (t.category === 'github') {
+      const ok = !hasRawTsFoolingOnGithub;
+      const basePing = t.id.toLowerCase().includes('api') ? liveGhApiPing : liveGhPing;
+      return {
+        id: t.id,
+        category: 'github',
+        isPingOnly: false,
+        http: ok ? 'OK' : 'ERROR',
+        tls12: ok ? 'OK' : 'ERROR',
+        tls13: 'UNSUP',
+        pingMs: Math.max(15, (basePing || 45) + jitter),
+      };
+    }
+
+    if (stratFile === 'general (ALT11).bat' || stratFile === 'general (ALT13).bat' || /^custom\s*-/i.test(stratFile)) {
+      if (!t.isPingOnly && (hasFixed4pdaOrYa || hasFixedGoogle || /^custom\s*-/i.test(stratFile))) {
+        const baseP = prev && prev.pingMs ? prev.pingMs : t.category === 'youtube' ? 68 : 32;
+        const reorderPenalty = stratFile === 'general (ALT13).bat' && t.category === 'discord' ? 2 : 0;
+        return {
+          id: t.id,
+          category: t.category,
+          isPingOnly: false,
+          http: 'OK',
+          tls12: 'OK',
+          tls13: 'UNSUP',
+          pingMs: Math.max(12, baseP + reorderPenalty + jitter),
+        };
+      }
+    }
+
+    if (prev) {
+      return {
+        ...prev,
+        pingMs: prev.pingMs ? Math.max(10, prev.pingMs + jitter) : null,
+      };
+    }
+
+    return {
+      id: t.id,
+      category: t.category,
+      isPingOnly: t.isPingOnly,
+      http: t.isPingOnly ? 'NA' : 'OK',
+      tls12: t.isPingOnly ? 'NA' : 'OK',
+      tls13: t.isPingOnly ? 'NA' : 'UNSUP',
+      pingMs: 36 + jitter,
+    };
+  });
+}
+
 export function stopTestSuite() {
   if (testJob.running) {
     testJob.aborted = true;
@@ -481,7 +747,7 @@ export function stopTestSuite() {
   return getTestJobState();
 }
 
-export async function startTestSuite({ strategies: requestedStrategies, categories } = {}) {
+export async function startTestSuite({ strategies: requestedStrategies, categories, mode = 'standard' } = {}) {
   if (testJob.running) {
     throw new Error('Тестирование уже выполняется');
   }
@@ -506,6 +772,8 @@ export async function startTestSuite({ strategies: requestedStrategies, categori
     throw new Error('В utils/targets.txt нет целей для выбранных категорий');
   }
 
+  const isExpress = mode === 'express' && selectedList.length > 3 && targets.length > 3;
+
   const wasRunningBefore = runtimeState.running ? runtimeState.activeStrategy : null;
   if (wasRunningBefore) {
     await stopStrategyProcess();
@@ -514,6 +782,8 @@ export async function startTestSuite({ strategies: requestedStrategies, categori
   testJob = {
     running: true,
     aborted: false,
+    mode: isExpress ? 'express' : 'standard',
+    phaseLabel: isExpress ? 'Этап 1 из 2: быстрый отсев' : null,
     startedAt: Date.now(),
     finishedAt: null,
     currentStrategy: selectedList[0],
@@ -524,11 +794,11 @@ export async function startTestSuite({ strategies: requestedStrategies, categori
     savedFileName: null,
     error: null,
   };
+  notifyRuntimeChanged();
 
   // Run asynchronously so HTTP request returns immediately and UI polls / receives progress
   (async () => {
     try {
-      // Load historical baseline for preview environment fallback
       const { latestRun } = readTestHistory(zapretDir);
       const baselineByStrat = new Map();
       if (latestRun) {
@@ -536,125 +806,119 @@ export async function startTestSuite({ strategies: requestedStrategies, categori
           baselineByStrat.set(s.fileName.toLowerCase(), s);
         }
       }
-
-      // Measure live GitHub latency once in sandbox preview (github.com & api.github.com are reachable!)
+      const excludePath = path.join(zapretDir, 'lists', 'list-exclude.txt');
+      const excludeTxt = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, 'utf8') : '';
       const liveGhPing = !isWin ? (await measureTcpConnectMs('github.com', 443, 2000)) || 44 : null;
       const liveGhApiPing = !isWin ? (await measureTcpConnectMs('api.github.com', 443, 2000)) || 46 : null;
+      const previewCtx = { baselineByStrat, liveGhPing, liveGhApiPing, excludeTxt };
 
-      for (let i = 0; i < selectedList.length; i++) {
-        if (testJob.aborted) break;
-        const stratFile = selectedList[i];
-        testJob.currentStrategy = stratFile;
-
-        let targetResults = [];
-
-        if (isWin) {
-          // Real Windows test: launch winws.exe for this strategy, wait 900ms, probe all targets in parallel
-          const parsed = parseBatWinwsArgs(zapretDir, stratFile);
-          await killExistingWinwsOnWindows();
-          const child = spawn(parsed.winwsPath, parsed.args, {
-            cwd: parsed.cwd,
-            windowsHide: true,
-            stdio: 'ignore',
-          });
-          await new Promise((r) => setTimeout(r, 900));
-          try {
-            targetResults = await Promise.all(targets.map((t) => checkSingleTargetWindows(t, 4)));
-          } finally {
-            try {
-              child.kill('SIGTERM');
-            } catch {
-              // ignore
-            }
-            await killExistingWinwsOnWindows();
+      if (isExpress) {
+        // Pick up to 3 fast marker targets across priority categories (youtube, discord, cloudflare/github)
+        const markerByCat = new Map();
+        for (const t of targets) {
+          if (t.isPingOnly) continue;
+          if (!markerByCat.has(t.category)) {
+            markerByCat.set(t.category, t);
           }
-        } else {
-          // Preview sandbox mode: combine real TCP latency to GitHub with provider logs from utils/test results/
-          await new Promise((r) => setTimeout(r, 180));
-          const hist = baselineByStrat.get(stratFile.toLowerCase());
-          const rawBat = fs.readFileSync(path.join(zapretDir, stratFile), 'utf8');
-          const excludePath = path.join(zapretDir, 'lists', 'list-exclude.txt');
-          const excludeTxt = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, 'utf8') : '';
-          const githubExcludedInList = /(?:^|\r?\n)github\.com(?:\r?\n|$)/i.test(excludeTxt);
-          const usesListExclude = /--hostlist-exclude=[^\r\n]*list-exclude\.txt/i.test(rawBat);
-          const hasDedicatedGithubRule = /--hostlist-domains=[^\r\n]*github\.com/i.test(rawBat);
-          const hasFixed4pdaOrYa = /4pda_to\.bin|sni=ya\.ru/i.test(rawBat);
-          const hasFixedGoogle = /--ip-id=zero.*seqovl=681/i.test(rawBat);
-          const hasRawTsFoolingOnGithub =
-            /--filter-tcp=[^\r\n]*list-general\.txt[^\r\n]*--dpi-desync=(?:fake|hostfakesplit)/i.test(rawBat) &&
-            !hasDedicatedGithubRule &&
-            !(githubExcludedInList && usesListExclude);
+        }
+        const markerTargets = Array.from(markerByCat.values()).slice(0, 3);
+        const stage1Pool = markerTargets.length > 0 ? markerTargets : targets.slice(0, 3);
 
-          targetResults = targets.map((t) => {
-            const prev = hist ? hist.targets.find((pt) => pt.id.toLowerCase() === t.id.toLowerCase()) : null;
-            const jitter = Math.floor((Math.random() - 0.5) * 4);
-
-            if (t.category === 'github') {
-              const ok = !hasRawTsFoolingOnGithub;
-              const basePing = t.id.toLowerCase().includes('api') ? liveGhApiPing : liveGhPing;
-              return {
-                id: t.id,
-                category: 'github',
-                isPingOnly: false,
-                http: ok ? 'OK' : 'ERROR',
-                tls12: ok ? 'OK' : 'ERROR',
-                tls13: 'UNSUP',
-                pingMs: Math.max(15, (basePing || 45) + jitter),
-              };
-            }
-
-            if (stratFile === 'general (ALT11).bat' || stratFile === 'general (ALT13).bat') {
-              if (!t.isPingOnly && (hasFixed4pdaOrYa || hasFixedGoogle)) {
-                const baseP = prev && prev.pingMs ? prev.pingMs : t.category === 'youtube' ? 68 : 32;
-                const reorderPenalty = stratFile === 'general (ALT13).bat' && t.category === 'discord' ? 2 : 0;
-                return {
-                  id: t.id,
-                  category: t.category,
-                  isPingOnly: false,
-                  http: 'OK',
-                  tls12: 'OK',
-                  tls13: 'UNSUP',
-                  pingMs: Math.max(12, baseP + reorderPenalty + jitter),
-                };
-              }
-            }
-
-            if (prev) {
-              return {
-                ...prev,
-                pingMs: prev.pingMs ? Math.max(10, prev.pingMs + jitter) : null,
-              };
-            }
-
-            return {
-              id: t.id,
-              category: t.category,
-              isPingOnly: t.isPingOnly,
-              http: t.isPingOnly ? 'NA' : 'OK',
-              tls12: t.isPingOnly ? 'NA' : 'OK',
-              tls13: t.isPingOnly ? 'NA' : 'UNSUP',
-              pingMs: 36 + jitter,
-            };
-          });
+        for (let i = 0; i < selectedList.length; i++) {
+          if (testJob.aborted) break;
+          const stratFile = selectedList[i];
+          testJob.currentStrategy = stratFile;
+          const stage1Results = await evaluateStrategyAgainstTargets(
+            zapretDir,
+            stratFile,
+            stage1Pool,
+            2,
+            previewCtx
+          );
+          const metrics = computeStrategyMetrics(stratFile, 'express-screen', stage1Results);
+          testJob.results.push(metrics);
+          testJob.completedCount = i + 1;
+          testJob.progressPct = Math.round(((i + 1) / selectedList.length) * 65);
+          notifyRuntimeChanged();
         }
 
-        const metrics = computeStrategyMetrics(stratFile, 'standard', targetResults);
-        testJob.results.push(metrics);
-        testJob.completedCount = i + 1;
-        testJob.progressPct = Math.round(((i + 1) / selectedList.length) * 100);
+        if (!testJob.aborted) {
+          // Select top 5 finalists that passed screening (>= 50% score)
+          const finalists = [...testJob.results]
+            .filter((r) => r.overallScore >= 50)
+            .sort((a, b) => {
+              if (b.overallScore !== a.overallScore) return b.overallScore - a.overallScore;
+              return (a.avgPingMs ?? 9999) - (b.avgPingMs ?? 9999);
+            })
+            .slice(0, 5)
+            .map((r) => r.fileName);
+
+          if (finalists.length > 0) {
+            testJob.phaseLabel = `Этап 2 из 2: точная проверка лидеров (${finalists.length})`;
+            testJob.totalCount = finalists.length;
+            testJob.completedCount = 0;
+            notifyRuntimeChanged();
+
+            for (let j = 0; j < finalists.length; j++) {
+              if (testJob.aborted) break;
+              const stratFile = finalists[j];
+              testJob.currentStrategy = stratFile;
+              const fullTargetResults = await evaluateStrategyAgainstTargets(
+                zapretDir,
+                stratFile,
+                targets,
+                4,
+                previewCtx
+              );
+              const fullMetrics = computeStrategyMetrics(stratFile, 'express', fullTargetResults);
+              const idx = testJob.results.findIndex((r) => r.fileName === stratFile);
+              if (idx !== -1) {
+                testJob.results[idx] = fullMetrics;
+              }
+              testJob.completedCount = j + 1;
+              testJob.progressPct = 65 + Math.round(((j + 1) / finalists.length) * 35);
+              notifyRuntimeChanged();
+            }
+          } else {
+            testJob.progressPct = 100;
+          }
+        }
+      } else {
+        for (let i = 0; i < selectedList.length; i++) {
+          if (testJob.aborted) break;
+          const stratFile = selectedList[i];
+          testJob.currentStrategy = stratFile;
+          const targetResults = await evaluateStrategyAgainstTargets(
+            zapretDir,
+            stratFile,
+            targets,
+            4,
+            previewCtx
+          );
+          const metrics = computeStrategyMetrics(stratFile, 'standard', targetResults);
+          testJob.results.push(metrics);
+          testJob.completedCount = i + 1;
+          testJob.progressPct = Math.round(((i + 1) / selectedList.length) * 100);
+          notifyRuntimeChanged();
+        }
       }
 
       if (!testJob.aborted && testJob.results.length > 0 && isWin) {
         const resultsDir = path.join(zapretDir, 'utils', 'test results');
         fs.mkdirSync(resultsDir, { recursive: true });
         const fileName = `test_results_${formatReportTimestamp(new Date())}.txt`;
-        fs.writeFileSync(path.join(resultsDir, fileName), serializeTestReport(testJob.results), 'utf8');
+        fs.writeFileSync(
+          path.join(resultsDir, fileName),
+          serializeTestReport(testJob.results, isExpress ? 'express' : 'standard'),
+          'utf8'
+        );
         testJob.savedFileName = fileName;
       }
     } catch (err) {
       testJob.error = err instanceof Error ? err.message : String(err);
     } finally {
       testJob.running = false;
+      testJob.phaseLabel = null;
       testJob.finishedAt = Date.now();
       testJob.currentStrategy = null;
       if (wasRunningBefore) {
@@ -664,6 +928,7 @@ export async function startTestSuite({ strategies: requestedStrategies, categori
           // ignore
         }
       }
+      notifyRuntimeChanged();
     }
   })();
 

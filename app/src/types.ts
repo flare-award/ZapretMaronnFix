@@ -7,11 +7,13 @@ export interface AppSettings {
   zapretDir: string;
   selectedStrategy: string;
   activeProfileId: string;
+  favoriteStrategies: string[];
   autoStartStrategyOnLaunch: boolean;
   launchOnWindowsStartup: boolean;
   startMinimizedToTray: boolean;
   minimizeToTrayOnClose: boolean;
   autoRestartOnFilterChange: boolean;
+  autoRestartOnCrash: boolean;
   autoCheckUpdates: boolean;
   showWinwsConsole: boolean;
   showBestStrategyCards: boolean;
@@ -41,6 +43,9 @@ export interface RuntimeState {
   appliedGameFilter: string;
   appliedIpsetMode: string;
   expandedCommand: string | null;
+  autoRestartsCount?: number;
+  lastRecoveryAt?: number | null;
+  lastExitReason?: string | null;
   modeNote: string | null;
 }
 
@@ -63,6 +68,7 @@ export interface ZapretInfo {
 export interface StrategyItem {
   fileName: string;
   displayName: string;
+  isCustom?: boolean;
   sizeBytes: number;
   modifiedAt: string;
   engineSummary: string;
@@ -169,6 +175,8 @@ export interface TestHistoryEntry {
 export interface TestJobState {
   running: boolean;
   aborted: boolean;
+  mode?: 'standard' | 'express';
+  phaseLabel?: string | null;
   startedAt: number | null;
   finishedAt: number | null;
   currentStrategy: string | null;
@@ -243,6 +251,7 @@ export interface DiagnosticCheck {
   title: string;
   status: 'ok' | 'warn' | 'error';
   detail: string;
+  fixAction?: 'fix-windivert' | 'clean-lists' | 'enable-timestamps' | null;
 }
 
 export interface HostsCheckReport {
@@ -253,3 +262,78 @@ export interface HostsCheckReport {
   missingLines: string[];
   remoteRaw: string;
 }
+
+export interface QuickProbeItem {
+  category: string;
+  label: string;
+  shortLabel: string;
+  targetId: string;
+  ok: boolean;
+  pingMs: number | null;
+}
+
+export interface QuickProbeResult {
+  checkedAt: string;
+  bypassRunning: boolean;
+  activeStrategy: string | null;
+  items: QuickProbeItem[];
+}
+
+export interface SmartListAddResult {
+  list: ListDocument;
+  added: string[];
+  skippedDuplicates: string[];
+  coveredByBase: string[];
+  invalid: string[];
+  message: string;
+  state: FullAppState;
+}
+
+export interface SiteDiagnosisReport {
+  domain: string;
+  verdictStatus: 'ok' | 'warn' | 'error';
+  summary: string;
+  dns: {
+    ok: boolean;
+    hasStubIp: boolean;
+    systemIps: string[];
+    dohIps: string[];
+  };
+  lists: {
+    inBypassList: boolean;
+    inExcludeList: boolean;
+    inUserBypass: boolean;
+    inUserExclude: boolean;
+    label: string;
+    matchedRule: string | null;
+  };
+  tcp: {
+    ok: boolean;
+    pingMs: number | null;
+  };
+  tls: {
+    ok: boolean;
+    httpOk: boolean;
+  };
+  checkedAt: string;
+}
+
+export interface CustomStrategySource {
+  fileName: string;
+  isCustom: boolean;
+  cleanTitle: string;
+  winwsArgsText: string;
+}
+
+export interface CustomStrategyParams {
+  tcpDesync: string;
+  tcpRepeats: number;
+  fooling: string;
+  autottl: string;
+  tlsFakeBin: string;
+  quicFakeBin: string;
+  quicRepeats: number;
+  includeDiscordVoice: boolean;
+  includeGameFilter: boolean;
+}
+

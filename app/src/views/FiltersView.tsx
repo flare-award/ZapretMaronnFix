@@ -37,10 +37,10 @@ export const FiltersView: React.FC<FiltersViewProps> = ({
     { id: 'udp', title: 'Только UDP' },
   ];
 
-  const ipsetModes: Array<{ id: IpsetFilterMode; title: string }> = [
-    { id: 'none', title: 'None' },
-    { id: 'loaded', title: 'Loaded' },
-    { id: 'any', title: 'Any' },
+  const ipsetModes: Array<{ id: IpsetFilterMode; title: string; hint: string }> = [
+    { id: 'none', title: 'None', hint: 'Выключен' },
+    { id: 'loaded', title: 'Loaded', hint: 'По списку IP' },
+    { id: 'any', title: 'Any', hint: 'Все подсети' },
   ];
 
   const portsDirty = tcpRange.trim() !== gameFilter.tcpRange || udpRange.trim() !== gameFilter.udpRange;
@@ -259,7 +259,12 @@ export const FiltersView: React.FC<FiltersViewProps> = ({
                   transition: 'background-color 140ms var(--ease-m3), border-color 140ms var(--ease-m3)',
                 }}
               >
-                <span style={{ fontSize: '15px', fontWeight: 600 }}>{im.title}</span>
+                <div>
+                  <div style={{ fontSize: '15px', fontWeight: 600 }}>{im.title}</div>
+                  <div style={{ fontSize: '11.5px', color: 'var(--m3-text-secondary)', marginTop: '1px' }}>
+                    {im.hint}
+                  </div>
+                </div>
                 {selected && <Check size={16} color="var(--m3-primary)" strokeWidth={2.3} />}
               </button>
             );
@@ -273,27 +278,24 @@ export const FiltersView: React.FC<FiltersViewProps> = ({
           <div className="brand-mark">
             <Binary size={18} />
           </div>
-          <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Replace Active Fakes</div>
+          <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Пакеты маскировки (Fakes)</div>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '14px' }}>
           <div className="m3-card-compact" style={{ background: 'var(--m3-surface-low)' }}>
-            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Пакет для Discord Voice (ACTIVE_DISCORD_UDP.bin)</div>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '10px' }}>
-              Текущий образец:{' '}
-              <span className="mono" style={{ color: 'var(--m3-text)' }}>
-                {activeFakes.discordCurrent || 'пользовательский / не задан'}
-              </span>
+            <div style={{ fontWeight: 600, marginBottom: '8px' }}>
+              Голосовой чат Discord
+              {state.settings.developerMode ? ' (ACTIVE_DISCORD_UDP.bin)' : ''}
             </div>
             <SeamlessSelect
               fullWidth
               mono
               disabled={busy}
               value={activeFakes.discordCurrent || ''}
-              placeholder="Выберите .bin файл из папки zapret/bin"
+              placeholder="Выберите .bin пакет"
               options={activeFakes.availableBins.map((b) => ({
                 value: b.fileName,
-                label: `${b.fileName} (${b.sizeBytes} байт)`,
+                label: state.settings.developerMode ? `${b.fileName} (${b.sizeBytes} Б)` : b.fileName,
               }))}
               onChange={(val) => {
                 if (val) onSetActiveFake('discord', val);
@@ -302,22 +304,19 @@ export const FiltersView: React.FC<FiltersViewProps> = ({
           </div>
 
           <div className="m3-card-compact" style={{ background: 'var(--m3-surface-low)' }}>
-            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Пакет для Game Filter (ACTIVE_GAME_UDP.bin)</div>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '10px' }}>
-              Текущий образец:{' '}
-              <span className="mono" style={{ color: 'var(--m3-text)' }}>
-                {activeFakes.gameCurrent || 'пользовательский / не задан'}
-              </span>
+            <div style={{ fontWeight: 600, marginBottom: '8px' }}>
+              Игровой трафик UDP
+              {state.settings.developerMode ? ' (ACTIVE_GAME_UDP.bin)' : ''}
             </div>
             <SeamlessSelect
               fullWidth
               mono
               disabled={busy}
               value={activeFakes.gameCurrent || ''}
-              placeholder="Выберите .bin файл из папки zapret/bin"
+              placeholder="Выберите .bin пакет"
               options={activeFakes.availableBins.map((b) => ({
                 value: b.fileName,
-                label: `${b.fileName} (${b.sizeBytes} байт)`,
+                label: state.settings.developerMode ? `${b.fileName} (${b.sizeBytes} Б)` : b.fileName,
               }))}
               onChange={(val) => {
                 if (val) onSetActiveFake('game', val);

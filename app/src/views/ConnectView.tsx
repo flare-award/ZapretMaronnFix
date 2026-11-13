@@ -10,11 +10,24 @@ import {
   X,
   Check,
   Bookmark,
+  Star,
+  Activity,
+  RefreshCw,
+  Plus,
+  Copy,
+  Pencil,
+  Trash2,
+  Save,
+  Sliders,
+  Code2,
 } from 'lucide-react';
+import { api } from '../api';
 import type {
+  CustomStrategyParams,
   FullAppState,
   GameFilterMode,
   IpsetFilterMode,
+  QuickProbeResult,
   StrategyItem,
   TestRunReport,
 } from '../types';
@@ -39,12 +52,27 @@ interface ConnectViewProps {
   busy: boolean;
   onTogglePower: () => void;
   onSelectStrategy: (fileName: string, runImmediately?: boolean) => void;
+  onToggleFavorite: (fileName: string) => void;
   onSelectProfile: (profileId: string) => void;
   onQuickGameMode: (mode: GameFilterMode) => void;
   onQuickIpsetMode: (mode: IpsetFilterMode) => void;
   onRunQuickTest: (strategies?: string[]) => void;
+  onStateUpdated: (next: FullAppState) => void;
+  onNotify: (msg: string, isError?: boolean) => void;
   onNavigate: (tab: string) => void;
 }
+
+const DEFAULT_BUILDER_PARAMS: CustomStrategyParams = {
+  tcpDesync: 'fake,multisplit',
+  tcpRepeats: 6,
+  fooling: 'ts',
+  autottl: 'off',
+  tlsFakeBin: 'tls_clienthello_www_google_com.bin',
+  quicFakeBin: 'quic_initial_www_google_com.bin',
+  quicRepeats: 8,
+  includeDiscordVoice: true,
+  includeGameFilter: true,
+};
 
 export const ConnectView: React.FC<ConnectViewProps> = ({
   state,
@@ -53,20 +81,47 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
   busy,
   onTogglePower,
   onSelectStrategy,
+  onToggleFavorite,
   onSelectProfile,
   onQuickGameMode,
   onQuickIpsetMode,
   onRunQuickTest,
+  onStateUpdated,
+  onNotify,
   onNavigate,
 }) => {
   const [search, setSearch] = useState('');
   const [goal, setGoal] = useState<GoalFilter>('all');
+  const [onlyFavorites, setOnlyFavorites] = useState(false);
   const [sortBy, setSortBy] = useState<SortOption>('name');
   const [inspectStrategy, setInspectStrategy] = useState<StrategyItem | null>(null);
 
+  // Quick Live Availability Probe (#1)
+  const [probing, setProbing] = useState(false);
+  const [probeResult, setProbeResult] = useState<QuickProbeResult | null>(null);
+
+  // Safe Custom Strategy Builder (#12 - Developer Mode)
+  const [builderOpen, setBuilderOpen] = useState(false);
+  const [builderSaving, setBuilderSaving] = useState(false);
+  const [builderEditFile, setBuilderEditFile] = useState<string | null>(null);
+  const [builderTitle, setBuilderTitle] = useState('');
+  const [builderMode, setBuilderMode] = useState<'visual' | 'raw'>('visual');
+  const [builderParams, setBuilderParams] = useState<CustomStrategyParams>(DEFAULT_BUILDER_PARAMS);
+  const [builderRawArgs, setBuilderRawArgs] = useState('');
+
   const { runtime, settings, strategies, profiles, activeProfileId, filters, targetCategories, testJob } = state;
   const devMode = Boolean(settings.developerMode);
+  const favoritesSet = useMemo(
+    () => new Set(settings.favoriteStrategies || []),
+    [settings.favoriteStrategies]
+  );
   const metricsLookup = useMemo(() => buildMetricsLookup(activeReport), [activeReport]);
+
+  useEffect(() => {
+    if (onlyFavorites && favoritesSet.size === 0) {
+      setOnlyFavorites(false);
+    }
+  }, [onlyFavorites, favoritesSet.size]);
 
   const goalOptions = useMemo(() => {
     const serviceCats = targetCategories.filter((c) => c.id !== 'dns');
@@ -101,7 +156,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
 
   const filteredStrategies = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const base = q
+    let base = q
       ? strategies.filter(
           (s) =>
             stripBatExtension(s.fileName).toLowerCase().includes(q) ||
@@ -109,8 +164,103 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
             (devMode && s.engineSummary.toLowerCase().includes(q))
         )
       : strategies;
-    return sortStrategiesWithMetrics(base, metricsLookup, goal, sortBy);
-  }, [strategies, search, metricsLookup, goal, sortBy, devMode]);
+    if (onlyFavorites) {
+      base = base.filter((s) => favoritesSet.has(s.fileName));
+    }
+    return sortStrategiesWithMetrics(base, metricsLookup, goal, sortBy, favoritesSet);
+  }, [strategies, search, metricsLookup, goal, sortBy, devMode, onlyFavorites, favoritesSet]);
+
+  const tlsBinOptions = useMemo(() => {
+    const bins = filters.activeFakes.availableBins.filter((b) =>
+      b.fileName.toLowerCase().startsWith('tls_clienthello')
+    );
+    const source = bins.length > 0 ? bins : filters.activeFakes.availableBins;
+    return source.map((b) => ({ value: b.fileName, label: b.fileName }));
+  }, [filters.activeFakes.availableBins]);
+
+  const quicBinOptions = useMemo(() => {
+    const bins = filters.activeFakes.availableBins.filter((b) =>
+      b.fileName.toLowerCase().startsWith('quic_initial')
+    );
+    const source = bins.length > 0 ? bins : filters.activeFakes.availableBins;
+    return source.map((b) => ({ value: b.fileName, label: b.fileName }));
+  }, [filters.activeFakes.availableBins]);
+
+  const handleQuickProbe = async () => {
+    setProbing(true);
+    try {
+      const res = await api.runQuickProbe();
+      setProbeResult(res);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      setProbing(false);
+    }
+  };
+
+  const openNewBuilder = () => {
+    setBuilderEditFile(null);
+    setBuilderTitle('Моя стратегия');
+    setBuilderMode('visual');
+    setBuilderParams({
+      ...DEFAULT_BUILDER_PARAMS,
+      tlsFakeBin: tlsBinOptions[0]?.value || DEFAULT_BUILDER_PARAMS.tlsFakeBin,
+      quicFakeBin: quicBinOptions[0]?.value || DEFAULT_BUILDER_PARAMS.quicFakeBin,
+    });
+    setBuilderRawArgs('');
+    setBuilderOpen(true);
+  };
+
+  const openCloneOrEditInBuilder = async (strat: StrategyItem) => {
+    try {
+      const src = await api.getCustomStrategySource(strat.fileName);
+      if (strat.isCustom) {
+        setBuilderEditFile(strat.fileName);
+        setBuilderTitle(src.cleanTitle);
+      } else {
+        setBuilderEditFile(null);
+        setBuilderTitle(`${src.cleanTitle} (моя)`.slice(0, 40));
+      }
+      setBuilderMode('raw');
+      setBuilderRawArgs(src.winwsArgsText);
+      setBuilderOpen(true);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    }
+  };
+
+  const handleSaveCustomStrategy = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!builderTitle.trim()) return;
+    setBuilderSaving(true);
+    try {
+      const res = await api.saveCustomStrategy({
+        title: builderTitle.trim(),
+        previousFileName: builderEditFile,
+        mode: builderMode,
+        params: builderMode === 'visual' ? builderParams : undefined,
+        winwsArgsText: builderMode === 'raw' ? builderRawArgs : undefined,
+        selectAfterSave: true,
+      });
+      onStateUpdated(res.state);
+      setBuilderOpen(false);
+      onNotify(`Сохранена стратегия ${stripBatExtension(res.fileName)}`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      setBuilderSaving(false);
+    }
+  };
+
+  const handleDeleteCustomStrategy = async (fileName: string) => {
+    try {
+      const res = await api.deleteCustomStrategy(fileName);
+      onStateUpdated(res.state);
+      onNotify(`Удалена стратегия ${stripBatExtension(res.deleted)}`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    }
+  };
 
   const gameModes: Array<{ value: GameFilterMode; label: string }> = [
     { value: 'disabled', label: 'Выкл' },
@@ -144,7 +294,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
       <div className="power-text-group">
         <div className="power-state-label">
           {testJob.running
-            ? 'Выполняется тест...'
+            ? 'Идёт проверка...'
             : runtime.running
               ? 'Обход активен'
               : 'Обход остановлен'}
@@ -152,11 +302,53 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
         <div className="power-strategy-label mono">
           {currentStrategyObj ? stripBatExtension(currentStrategyObj.fileName) : 'Стратегии не найдены'}
         </div>
+        {runtime.lastExitReason && !runtime.running && (
+          <div style={{ fontSize: '11.5px', color: 'var(--m3-warn)', marginTop: '4px' }}>
+            {runtime.lastExitReason}
+          </div>
+        )}
       </div>
 
-      {runtime.running && (
-        <div className="power-timer">{formatDuration(runtime.startedAt, nowMs)}</div>
-      )}
+      <div className="power-probe-wrap">
+        <div className="power-meta-row">
+          {runtime.running && (
+            <div className="power-timer">{formatDuration(runtime.startedAt, nowMs)}</div>
+          )}
+
+          <button
+            type="button"
+            className="m3-chip"
+            style={{ height: '27px', padding: '0 11px', fontSize: '12px' }}
+            disabled={probing || testJob.running}
+            onClick={handleQuickProbe}
+            title="Быстро проверить доступность основных сервисов прямо сейчас"
+          >
+            {probing ? (
+              <RefreshCw size={12.5} className="spin-icon" />
+            ) : (
+              <Activity size={13} strokeWidth={2} />
+            )}
+            <span>{probing ? 'Проверка...' : 'Проверить связь'}</span>
+          </button>
+        </div>
+
+        {probeResult && probeResult.items.length > 0 && (
+          <div className="power-probe-pills">
+            {probeResult.items.map((item) => (
+              <span
+                key={item.category}
+                className={`probe-pill ${item.ok ? 'ok' : 'fail'}`}
+                title={`${item.label}: ${item.ok ? 'доступен' : 'недоступен'}`}
+              >
+                <span>{item.shortLabel}</span>
+                <span className="probe-pill-ms">
+                  {item.ok && item.pingMs !== null ? `${item.pingMs} мс` : item.ok ? 'OK' : 'Нет'}
+                </span>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 
@@ -175,7 +367,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
             style={{ height: '25px', fontSize: '11.5px', padding: '0 9px' }}
             onClick={() => onNavigate('profiles')}
           >
-            Профили
+            Все
           </button>
         </div>
         <div className="chip-row">
@@ -244,7 +436,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
             style={{ height: '25px', fontSize: '11.5px', padding: '0 9px' }}
             onClick={() => onNavigate('filters')}
           >
-            Настроить
+            База
           </button>
         </div>
         <div className="chip-row">
@@ -269,6 +461,17 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
     <div className="m3-card connect-strategies-card">
       <div className="toolbar-bar">
         <div className="chip-row">
+          {favoritesSet.size > 0 && (
+            <button
+              type="button"
+              className={`m3-chip ${onlyFavorites ? 'selected' : ''}`}
+              onClick={() => setOnlyFavorites((v) => !v)}
+              title="Показать только избранные стратегии"
+            >
+              <Star size={12.5} fill={onlyFavorites ? 'currentColor' : 'none'} />
+              Избранные
+            </button>
+          )}
           {goalOptions.map((g) => (
             <button
               key={g}
@@ -298,12 +501,25 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
             value={sortBy}
             icon={<ArrowUpDown size={14} />}
             options={[
-              { value: 'best', label: 'Сначала лучшее соединение' },
+              { value: 'best', label: 'Лучший результат' },
               { value: 'latency', label: 'По задержке (мс)' },
               { value: 'name', label: 'По названию (А-Я)' },
             ]}
             onChange={(val) => setSortBy(val as SortOption)}
           />
+
+          {devMode && (
+            <button
+              type="button"
+              className="btn btn-tonal"
+              style={{ height: '34px', padding: '0 12px' }}
+              title="Создать свою пользовательскую стратегию"
+              onClick={openNewBuilder}
+            >
+              <Plus size={14} />
+              Своя
+            </button>
+          )}
         </div>
       </div>
 
@@ -320,7 +536,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
             }}
           >
             <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              Проверка:{' '}
+              {testJob.phaseLabel ? `${testJob.phaseLabel} - ` : 'Проверка: '}
               {testJob.currentStrategy ? stripBatExtension(testJob.currentStrategy) : 'подготовка...'}
             </span>
             <span className="mono" style={{ flexShrink: 0 }}>
@@ -339,94 +555,131 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
       <div className="connect-strategy-scroll">
         <div className="strategy-list">
           {filteredStrategies.map((s) => {
-          const isSelected = settings.selectedStrategy === s.fileName;
-          const isRunningThis = runtime.running && runtime.activeStrategy === s.fileName;
-          const m = metricsLookup.get(s.fileName.toLowerCase());
-          const goalStat = getGoalMetrics(m, goal);
-          const fullStrategyName = stripBatExtension(s.fileName);
+            const isSelected = settings.selectedStrategy === s.fileName;
+            const isRunningThis = runtime.running && runtime.activeStrategy === s.fileName;
+            const isFav = favoritesSet.has(s.fileName);
+            const m = metricsLookup.get(s.fileName.toLowerCase());
+            const goalStat = getGoalMetrics(m, goal);
+            const fullStrategyName = stripBatExtension(s.fileName);
 
-          return (
-            <div
-              key={s.fileName}
-              className={`strategy-row ${isRunningThis ? 'running' : isSelected ? 'selected' : ''}`}
-              onClick={() => onSelectStrategy(s.fileName, false)}
-            >
-              <div className="radio-circle">
-                <div className="radio-inner" />
-              </div>
-
-              <div className="strategy-main">
-                <div className="strategy-name-line">
-                  <span className="strategy-title" title={fullStrategyName}>
-                    {fullStrategyName}
-                  </span>
-                  {isRunningThis && (
-                    <span className="score-pill good" style={{ fontSize: '10.5px', flexShrink: 0 }}>
-                      Активна
-                    </span>
-                  )}
-                  {goal !== 'all' && goalStat.scorePct === 100 && (
-                    <span className="score-pill good" style={{ fontSize: '10.5px', flexShrink: 0 }}>
-                      <Check size={11} strokeWidth={2.3} />
-                      {getGoalLabel(goal, targetCategories)}
-                    </span>
-                  )}
+            return (
+              <div
+                key={s.fileName}
+                className={`strategy-row ${isRunningThis ? 'running' : isSelected ? 'selected' : ''}`}
+                onClick={() => onSelectStrategy(s.fileName, false)}
+              >
+                <div className="radio-circle">
+                  <div className="radio-inner" />
                 </div>
-                {devMode && <div className="strategy-engine">{s.engineSummary}</div>}
-              </div>
 
-              {devMode && m && (
-                <div className="category-pills">
-                  {pillCategories.map((cat) => {
-                    const cs = m.categoryScores[cat.id];
-                    if (!cs || cs.total === 0) return null;
-                    return (
-                      <span key={cat.id} className={`score-pill ${classifyScoreTone(cs.pct)}`}>
-                        {cat.shortLabel} {cs.ok}/{cs.total}
+                <div className="strategy-main">
+                  <div className="strategy-name-line">
+                    <span className="strategy-title" title={fullStrategyName}>
+                      {fullStrategyName}
+                    </span>
+                    {s.isCustom && (
+                      <span className="score-pill" style={{ fontSize: '10.5px', flexShrink: 0 }}>
+                        Своя
                       </span>
-                    );
-                  })}
+                    )}
+                    {isRunningThis && (
+                      <span className="score-pill good" style={{ fontSize: '10.5px', flexShrink: 0 }}>
+                        Активна
+                      </span>
+                    )}
+                    {goal !== 'all' && goalStat.scorePct === 100 && (
+                      <span className="score-pill good" style={{ fontSize: '10.5px', flexShrink: 0 }}>
+                        <Check size={11} strokeWidth={2.3} />
+                        {getGoalLabel(goal, targetCategories)}
+                      </span>
+                    )}
+                  </div>
+                  {devMode && <div className="strategy-engine">{s.engineSummary}</div>}
                 </div>
-              )}
 
-              <div className="strategy-right" onClick={(e) => e.stopPropagation()}>
-                {(goalStat.pingMs !== null || devMode) && (
-                  <div
-                    className={`ping-badge ${classifyPingSpeed(goalStat.pingMs)}`}
-                    onClick={() => onSelectStrategy(s.fileName, false)}
-                  >
-                    {goalStat.pingMs !== null ? `${goalStat.pingMs} мс` : '-- мс'}
+                {devMode && m && (
+                  <div className="category-pills">
+                    {pillCategories.map((cat) => {
+                      const cs = m.categoryScores[cat.id];
+                      if (!cs || cs.total === 0) return null;
+                      return (
+                        <span key={cat.id} className={`score-pill ${classifyScoreTone(cs.pct)}`}>
+                          {cat.shortLabel} {cs.ok}/{cs.total}
+                        </span>
+                      );
+                    })}
                   </div>
                 )}
 
-                <button
-                  type="button"
-                  className="btn-icon"
-                  title="Проверить эту стратегию"
-                  disabled={testJob.running}
-                  onClick={() => onRunQuickTest([s.fileName])}
-                >
-                  <Gauge size={14} strokeWidth={1.9} />
-                </button>
+                <div className="strategy-right" onClick={(e) => e.stopPropagation()}>
+                  {(goalStat.pingMs !== null || devMode) && (
+                    <div
+                      className={`ping-badge ${classifyPingSpeed(goalStat.pingMs)}`}
+                      onClick={() => onSelectStrategy(s.fileName, false)}
+                    >
+                      {goalStat.pingMs !== null ? `${goalStat.pingMs} мс` : '-- мс'}
+                    </div>
+                  )}
 
-                {devMode && (
+                  <button
+                    type="button"
+                    className={`btn-icon ${isFav ? 'fav-active' : ''}`}
+                    title={isFav ? 'Убрать из избранного' : 'Закрепить в избранном'}
+                    onClick={() => onToggleFavorite(s.fileName)}
+                  >
+                    <Star size={14} strokeWidth={1.9} fill={isFav ? 'currentColor' : 'none'} />
+                  </button>
+
                   <button
                     type="button"
                     className="btn-icon"
-                    title="Команда запуска .bat"
-                    onClick={() => setInspectStrategy(s)}
+                    title="Проверить эту стратегию"
+                    disabled={testJob.running}
+                    onClick={() => onRunQuickTest([s.fileName])}
                   >
-                    <Terminal size={14} strokeWidth={1.9} />
+                    <Gauge size={14} strokeWidth={1.9} />
                   </button>
-                )}
+
+                  {devMode && (
+                    <>
+                      <button
+                        type="button"
+                        className="btn-icon"
+                        title={s.isCustom ? 'Изменить стратегию' : 'Создать свою копию в конструкторе'}
+                        onClick={() => openCloneOrEditInBuilder(s)}
+                      >
+                        {s.isCustom ? <Pencil size={13.5} /> : <Copy size={13.5} />}
+                      </button>
+
+                      {s.isCustom && (
+                        <button
+                          type="button"
+                          className="btn-icon"
+                          title="Удалить пользовательскую стратегию"
+                          onClick={() => handleDeleteCustomStrategy(s.fileName)}
+                        >
+                          <Trash2 size={13.5} />
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        className="btn-icon"
+                        title="Команда запуска .bat"
+                        onClick={() => setInspectStrategy(s)}
+                      >
+                        <Terminal size={14} strokeWidth={1.9} />
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
 
           {filteredStrategies.length === 0 && (
             <div style={{ padding: '28px', textAlign: 'center', color: 'var(--m3-text-muted)' }}>
-              Ни одной стратегии по запросу не найдено.
+              Стратегии не найдены.
             </div>
           )}
         </div>
@@ -464,7 +717,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
                   {stripBatExtension(inspectStrategy.fileName)}
                 </div>
                 <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '2px' }}>
-                  Развёрнутая команда запуска процесса winws.exe
+                  Команда запуска winws.exe
                 </div>
               </div>
               <button type="button" className="btn-icon" onClick={() => setInspectStrategy(null)}>
@@ -487,6 +740,18 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
               </button>
               <button
                 type="button"
+                className="btn btn-surface"
+                onClick={() => {
+                  const target = inspectStrategy;
+                  setInspectStrategy(null);
+                  openCloneOrEditInBuilder(target);
+                }}
+              >
+                <Copy size={14} />
+                Клонировать в конструктор
+              </button>
+              <button
+                type="button"
                 className="btn btn-primary"
                 onClick={() => {
                   const target = inspectStrategy.fileName;
@@ -494,10 +759,250 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
                   onSelectStrategy(target, false);
                 }}
               >
-                Выбрать стратегию
+                Выбрать
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Developer Mode Modal: Safe Custom Strategy Builder (#12) */}
+      {builderOpen && (
+        <div className="modal-backdrop" onClick={() => setBuilderOpen(false)}>
+          <form
+            className="modal-panel"
+            style={{ maxWidth: '640px' }}
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleSaveCustomStrategy}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+              <div>
+                <div style={{ fontSize: '15.5px', fontWeight: 600 }}>
+                  {builderEditFile ? 'Редактирование своей стратегии' : 'Конструктор своей стратегии'}
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '2px' }}>
+                  Сохраняется отдельно как <span className="mono">custom - {builderTitle || 'имя'}.bat</span> без изменения штатных файлов
+                </div>
+              </div>
+              <button type="button" className="btn-icon" onClick={() => setBuilderOpen(false)}>
+                <X size={16} />
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
+              <div style={{ flex: '1 1 260px' }}>
+                <label style={{ display: 'block', fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '5px' }}>
+                  Название
+                </label>
+                <input
+                  type="text"
+                  required
+                  maxLength={42}
+                  className="m3-input"
+                  style={{ width: '100%' }}
+                  placeholder="Например: Мой провайдер"
+                  value={builderTitle}
+                  onChange={(e) => setBuilderTitle(e.target.value)}
+                />
+              </div>
+
+              <div style={{ alignSelf: 'flex-end' }} className="chip-row">
+                <button
+                  type="button"
+                  className={`m3-chip ${builderMode === 'visual' ? 'selected' : ''}`}
+                  onClick={() => setBuilderMode('visual')}
+                >
+                  <Sliders size={13} />
+                  Параметры
+                </button>
+                <button
+                  type="button"
+                  className={`m3-chip ${builderMode === 'raw' ? 'selected' : ''}`}
+                  onClick={() => setBuilderMode('raw')}
+                >
+                  <Code2 size={13} />
+                  Аргументы winws
+                </button>
+              </div>
+            </div>
+
+            {builderMode === 'visual' ? (
+              <div className="builder-form-grid">
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '5px' }}>
+                    Метод TCP десинка
+                  </label>
+                  <SeamlessSelect
+                    fullWidth
+                    mono
+                    value={builderParams.tcpDesync}
+                    options={[
+                      { value: 'fake,multisplit', label: 'fake,multisplit' },
+                      { value: 'multisplit', label: 'multisplit' },
+                      { value: 'fake,fakedsplit', label: 'fake,fakedsplit' },
+                      { value: 'fake,multidisorder', label: 'fake,multidisorder' },
+                      { value: 'multidisorder', label: 'multidisorder' },
+                      { value: 'hostfakesplit', label: 'hostfakesplit' },
+                      { value: 'fake', label: 'fake' },
+                    ]}
+                    onChange={(val) => setBuilderParams((p) => ({ ...p, tcpDesync: val }))}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '5px' }}>
+                    Fooling (обман DPI)
+                  </label>
+                  <SeamlessSelect
+                    fullWidth
+                    mono
+                    value={builderParams.fooling}
+                    options={[
+                      { value: 'ts', label: 'ts (TCP Timestamps)' },
+                      { value: 'md5sig', label: 'md5sig' },
+                      { value: 'badseq', label: 'badseq' },
+                      { value: 'ts,md5sig', label: 'ts,md5sig' },
+                      { value: 'none', label: 'Выключен' },
+                    ]}
+                    onChange={(val) => setBuilderParams((p) => ({ ...p, fooling: val }))}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '5px' }}>
+                    AutoTTL
+                  </label>
+                  <SeamlessSelect
+                    fullWidth
+                    mono
+                    value={builderParams.autottl}
+                    options={[
+                      { value: 'off', label: 'Выключен' },
+                      { value: '2', label: 'autottl=2' },
+                      { value: '1:3-20', label: 'autottl=1:3-20' },
+                    ]}
+                    onChange={(val) => setBuilderParams((p) => ({ ...p, autottl: val }))}
+                  />
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '5px' }}>
+                      TCP repeats
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={16}
+                      className="m3-input mono"
+                      style={{ width: '100%' }}
+                      value={builderParams.tcpRepeats}
+                      onChange={(e) =>
+                        setBuilderParams((p) => ({ ...p, tcpRepeats: Math.max(1, Math.min(16, Number(e.target.value) || 6)) }))
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '5px' }}>
+                      QUIC repeats
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={16}
+                      className="m3-input mono"
+                      style={{ width: '100%' }}
+                      value={builderParams.quicRepeats}
+                      onChange={(e) =>
+                        setBuilderParams((p) => ({ ...p, quicRepeats: Math.max(1, Math.min(16, Number(e.target.value) || 8)) }))
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '5px' }}>
+                    Пакет TLS ClientHello
+                  </label>
+                  <SeamlessSelect
+                    fullWidth
+                    mono
+                    value={builderParams.tlsFakeBin}
+                    options={tlsBinOptions}
+                    onChange={(val) => setBuilderParams((p) => ({ ...p, tlsFakeBin: val }))}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '5px' }}>
+                    Пакет QUIC Initial
+                  </label>
+                  <SeamlessSelect
+                    fullWidth
+                    mono
+                    value={builderParams.quicFakeBin}
+                    options={quicBinOptions}
+                    onChange={(val) => setBuilderParams((p) => ({ ...p, quicFakeBin: val }))}
+                  />
+                </div>
+
+                <div className="m3-switch-row" style={{ padding: '9px 12px' }}>
+                  <span style={{ fontSize: '12.5px', fontWeight: 500 }}>Discord Voice (UDP)</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={builderParams.includeDiscordVoice}
+                    className={`m3-switch ${builderParams.includeDiscordVoice ? 'checked' : ''}`}
+                    onClick={() =>
+                      setBuilderParams((p) => ({ ...p, includeDiscordVoice: !p.includeDiscordVoice }))
+                    }
+                  >
+                    <span className="m3-switch-thumb" />
+                  </button>
+                </div>
+
+                <div className="m3-switch-row" style={{ padding: '9px 12px' }}>
+                  <span style={{ fontSize: '12.5px', fontWeight: 500 }}>Поддержка Game Filter</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={builderParams.includeGameFilter}
+                    className={`m3-switch ${builderParams.includeGameFilter ? 'checked' : ''}`}
+                    onClick={() =>
+                      setBuilderParams((p) => ({ ...p, includeGameFilter: !p.includeGameFilter }))
+                    }
+                  >
+                    <span className="m3-switch-thumb" />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '6px' }}>
+                  Аргументы после <span className="mono">&quot;%BIN%winws.exe&quot;</span> (по одному правилу на строке)
+                </div>
+                <div className="m3-textarea-shell">
+                  <textarea
+                    className="m3-textarea"
+                    style={{ minHeight: '220px', height: '240px' }}
+                    placeholder="--wf-tcp=80,443 ...&#10;--filter-tcp=443 ..."
+                    value={builderRawArgs}
+                    onChange={(e) => setBuilderRawArgs(e.target.value)}
+                  />
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '4px' }}>
+              <button type="button" className="btn btn-surface" onClick={() => setBuilderOpen(false)}>
+                Отмена
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={builderSaving || !builderTitle.trim()}>
+                <Save size={14} />
+                {builderSaving ? 'Сохранение...' : 'Сохранить стратегию'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>
