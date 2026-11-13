@@ -221,6 +221,7 @@ export interface FullAppState {
   latestTestRun: TestRunReport | null;
   testJob: TestJobState;
   appUpdateState?: LocalAppUpdateState;
+  serverBootId?: string;
   zapretFingerprint: string;
 }
 

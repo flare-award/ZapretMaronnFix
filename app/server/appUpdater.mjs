@@ -13,7 +13,7 @@ const execFileAsync = promisify(execFile);
 const APP_REPO = 'flare-award/ZapretMaronnFix';
 const UPDATE_STATE_PATH = path.join(DATA_DIR, 'app-update-state.json');
 const RESUME_FLAG_PATH = path.join(DATA_DIR, 'resume-after-update.json');
-const STAGING_DIR = path.join(DATA_DIR, 'staging-update');
+const UPDATE_LOG_PATH = path.join(DATA_DIR, 'last-update.log');
 
 const SYSTEM_CA_BUNDLE = (() => {
   try {
@@ -42,6 +42,33 @@ function isProgramFilePath(relPath) {
   return true;
 }
 
+function countMismatchedProgramBlobs(entries) {
+  const programBlobs = entries.filter((e) => e.type === 'blob' && isProgramFilePath(e.path));
+  let changedFilesCount = 0;
+
+  for (const entry of programBlobs) {
+    const localFile = path.join(REPO_ROOT, ...entry.path.split('/'));
+    if (!fs.existsSync(localFile)) {
+      changedFilesCount++;
+      continue;
+    }
+    try {
+      const buf = fs.readFileSync(localFile);
+      const shaRaw = gitBlobSha1(buf);
+      if (shaRaw === entry.sha) continue;
+
+      const shaLf = gitBlobSha1(Buffer.from(buf.toString('latin1').replace(/\r\n/g, '\n'), 'latin1'));
+      if (shaLf === entry.sha) continue;
+
+      changedFilesCount++;
+    } catch {
+      changedFilesCount++;
+    }
+  }
+
+  return changedFilesCount;
+}
+
 export function readLocalAppUpdateState() {
   ensureDataDir();
   if (fs.existsSync(UPDATE_STATE_PATH)) {
@@ -55,7 +82,6 @@ export function readLocalAppUpdateState() {
     }
   }
 
-  // Fallback if running inside a git checkout before first check
   const gitHeadPath = path.join(REPO_ROOT, '.git', 'HEAD');
   if (fs.existsSync(gitHeadPath)) {
     try {
@@ -127,7 +153,6 @@ async function resolveLatestProgramCommit() {
     throw new Error('Не удалось получить список веток репозитория на GitHub');
   }
 
-  // Fetch commit details for candidate branches and pick the newest one that contains Zapret Control app/
   const candidates = await Promise.all(
     branches.slice(0, 8).map(async (b) => {
       try {
@@ -176,29 +201,7 @@ async function resolveLatestProgramCommit() {
 export async function checkProgramUpdate() {
   const localState = readLocalAppUpdateState();
   const latest = await resolveLatestProgramCommit();
-
-  const programBlobs = latest.entries.filter((e) => e.type === 'blob' && isProgramFilePath(e.path));
-  let changedFilesCount = 0;
-
-  for (const entry of programBlobs) {
-    const localFile = path.join(REPO_ROOT, ...entry.path.split('/'));
-    if (!fs.existsSync(localFile)) {
-      changedFilesCount++;
-      continue;
-    }
-    try {
-      const buf = fs.readFileSync(localFile);
-      const shaRaw = gitBlobSha1(buf);
-      if (shaRaw === entry.sha) continue;
-
-      const shaLf = gitBlobSha1(Buffer.from(buf.toString('latin1').replace(/\r\n/g, '\n'), 'latin1'));
-      if (shaLf === entry.sha) continue;
-
-      changedFilesCount++;
-    } catch {
-      changedFilesCount++;
-    }
-  }
+  const changedFilesCount = countMismatchedProgramBlobs(latest.entries);
 
   if (changedFilesCount === 0) {
     const synced = {
@@ -226,10 +229,16 @@ export async function checkProgramUpdate() {
     };
   }
 
+  // If app-update-state.json falsely claimed latest.shortSha from an older broken updater, do not mislead user
+  const reportedLocalSha =
+    localState.installedShortSha && localState.installedShortSha !== latest.shortSha
+      ? localState.installedShortSha
+      : null;
+
   return {
     repo: APP_REPO,
-    currentShortSha: localState.installedShortSha || null,
-    currentDate: localState.commitDate || null,
+    currentShortSha: reportedLocalSha,
+    currentDate: reportedLocalSha ? localState.commitDate || null : null,
     latestSha: latest.sha,
     latestShortSha: latest.shortSha,
     branch: latest.branch,
@@ -253,7 +262,7 @@ function downloadViaHttpsNode(url, destPath, redirectsLeft = 5) {
       {
         ca: SYSTEM_CA_BUNDLE,
         headers: {
-          'User-Agent': 'ZapretControl/1.2',
+          'User-Agent': 'ZapretControl/1.3',
           Accept: '*/*',
         },
         timeout: 25000,
@@ -367,7 +376,6 @@ function mergeTargetsPreservingUserEntries(localTargetsPath, incomingTargetsPath
     if (m) incomingKeys.add(m[1].toLowerCase());
   }
 
-  // Collect custom sections/keys added by the user that are absent from incoming targets.txt
   const customLines = [];
   let pendingHeader = null;
   for (const rawLine of localRaw.split(/\r?\n/)) {
@@ -397,7 +405,6 @@ function stagePreservedUserFiles(extractedRoot, preserveDir) {
   const settings = loadSettings();
   const defaultZapretDir = path.join(REPO_ROOT, 'zapret');
   if (path.resolve(settings.zapretDir) !== path.resolve(defaultZapretDir)) {
-    // User placed zapret/ in an external folder outside repo; repo copy won't touch it at all
     return;
   }
 
@@ -421,7 +428,6 @@ function stagePreservedUserFiles(extractedRoot, preserveDir) {
     }
   }
 
-  // Preserve test results history
   const localResultsDir = path.join(REPO_ROOT, 'zapret', 'utils', 'test results');
   if (fs.existsSync(localResultsDir)) {
     const dstResultsDir = path.join(preserveDir, 'zapret', 'utils', 'test results');
@@ -434,7 +440,6 @@ function stagePreservedUserFiles(extractedRoot, preserveDir) {
     }
   }
 
-  // Merge user's custom targets.txt services with incoming targets.txt
   const localTargets = path.join(REPO_ROOT, 'zapret', 'utils', 'targets.txt');
   const incomingTargets = path.join(extractedRoot, 'zapret', 'utils', 'targets.txt');
   const mergedTargets = mergeTargetsPreservingUserEntries(localTargets, incomingTargets);
@@ -445,7 +450,7 @@ function stagePreservedUserFiles(extractedRoot, preserveDir) {
   }
 }
 
-function copyDirRecursiveSync(srcDir, dstDir, skipRelSet = new Set(), currentRel = '') {
+function copyDirRecursiveFilesOnly(srcDir, dstDir, skipRelSet = new Set(), currentRel = '') {
   fs.mkdirSync(dstDir, { recursive: true });
   for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
     const rel = currentRel ? `${currentRel}/${entry.name}` : entry.name;
@@ -453,36 +458,100 @@ function copyDirRecursiveSync(srcDir, dstDir, skipRelSet = new Set(), currentRel
     const srcFull = path.join(srcDir, entry.name);
     const dstFull = path.join(dstDir, entry.name);
     if (entry.isDirectory()) {
-      copyDirRecursiveSync(srcFull, dstFull, skipRelSet, rel);
+      copyDirRecursiveFilesOnly(srcFull, dstFull, skipRelSet, rel);
     } else if (entry.isFile()) {
-      fs.copyFileSync(srcFull, dstFull);
+      try {
+        fs.mkdirSync(path.dirname(dstFull), { recursive: true });
+        fs.copyFileSync(srcFull, dstFull);
+      } catch {
+        // Locked binaries (e.g. ZapretControl.exe / winws.exe) will be synced by the post-exit script
+      }
     }
   }
 }
 
-function buildWindowsUpdaterPs1({ repoRoot, stagingDir, sourceDir, preserveDir, serverPid }) {
+function cleanAccidentalNestedDirs() {
+  // Clean any accidental nested dirs left by older PowerShell Copy-Item behavior
+  const nestedCandidates = [
+    path.join(APP_DIR, 'server', 'server'),
+    path.join(APP_DIR, 'static', 'static'),
+    path.join(APP_DIR, 'src', 'src'),
+    path.join(APP_DIR, 'host', 'host'),
+    path.join(APP_DIR, 'public', 'public'),
+    path.join(REPO_ROOT, 'zapret', 'zapret'),
+    path.join(DATA_DIR, 'staging-update'),
+  ];
+  for (const p of nestedCandidates) {
+    if (fs.existsSync(p)) {
+      try {
+        fs.rmSync(p, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+function applyFilesInNodeSync(extractedRoot, preserveDir) {
+  cleanAccidentalNestedDirs();
+  const oldAssets = path.join(APP_DIR, 'static', 'assets');
+  if (fs.existsSync(oldAssets)) {
+    try {
+      fs.rmSync(oldAssets, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+  const skipSet = new Set(['.git', 'app/data', 'app/node_modules']);
+  copyDirRecursiveFilesOnly(extractedRoot, REPO_ROOT, skipSet);
+  if (fs.existsSync(preserveDir)) {
+    copyDirRecursiveFilesOnly(preserveDir, REPO_ROOT);
+  }
+}
+
+function buildWindowsRestartPs1({
+  repoRoot,
+  tmpWorkDir,
+  sourceDir,
+  preserveDir,
+  stagedStateFile,
+  logFile,
+  serverPid,
+}) {
   const esc = (p) => String(p).replace(/'/g, "''");
   const lines = [
-    '$ErrorActionPreference = "SilentlyContinue"',
+    '$ErrorActionPreference = "Continue"',
     `$RepoRoot = '${esc(repoRoot)}'`,
-    `$StagingDir = '${esc(stagingDir)}'`,
+    `$TmpWorkDir = '${esc(tmpWorkDir)}'`,
     `$SourceDir = '${esc(sourceDir)}'`,
     `$PreserveDir = '${esc(preserveDir)}'`,
+    `$StagedStateFile = '${esc(stagedStateFile)}'`,
+    `$LogFile = '${esc(logFile)}'`,
     `$ServerPid = ${Number(serverPid) || 0}`,
     '',
-    'Start-Sleep -Milliseconds 700',
-    '',
-    '# Close dedicated --app UI window (ui-window-v2 / window-profile) without touching regular browser tabs',
-    'Get-CimInstance Win32_Process | Where-Object {',
-    '    $_.CommandLine -and ($_.CommandLine -like "*ui-window-v2*" -or $_.CommandLine -like "*window-profile*")',
-    '} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }',
-    '',
-    'Stop-Process -Name "ZapretControl" -Force -ErrorAction SilentlyContinue',
-    'if ($ServerPid -gt 0) {',
-    '    Stop-Process -Id $ServerPid -Force -ErrorAction SilentlyContinue',
+    'function Write-UpdLog([string]$msg) {',
+    '    try { Add-Content -LiteralPath $LogFile -Value ("[" + (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + "] " + $msg) -Encoding UTF8 } catch {}',
     '}',
-    'Stop-Process -Name "winws" -Force -ErrorAction SilentlyContinue',
     '',
+    'Write-UpdLog "Starting detached Windows update script"',
+    'Start-Sleep -Milliseconds 900',
+    '',
+    '# 1. Close dedicated --app UI window (ui-window-v2 / window-profile)',
+    'try {',
+    '    Get-CimInstance Win32_Process | Where-Object {',
+    '        $_.CommandLine -and ($_.CommandLine -like "*ui-window-v2*" -or $_.CommandLine -like "*window-profile*")',
+    '    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }',
+    '} catch {}',
+    '',
+    '# 2. Terminate tray host, old server process tree, and winws',
+    '& taskkill.exe /IM ZapretControl.exe /F 2>&1 | Out-Null',
+    'if ($ServerPid -gt 0) {',
+    '    & taskkill.exe /PID $ServerPid /T /F 2>&1 | Out-Null',
+    '}',
+    '& taskkill.exe /IM winws.exe /F 2>&1 | Out-Null',
+    'Start-Sleep -Milliseconds 400',
+    '',
+    '# 3. Delete old ZapretControl.exe so ZapretControl.bat compiles fresh C# host',
     '$exePath = Join-Path $RepoRoot "ZapretControl.exe"',
     'for ($i = 0; $i -lt 25; $i++) {',
     '    if (-not (Test-Path -LiteralPath $exePath)) { break }',
@@ -494,140 +563,201 @@ function buildWindowsUpdaterPs1({ repoRoot, stagingDir, sourceDir, preserveDir, 
     '    }',
     '}',
     '',
-    '$oldAssets = Join-Path $RepoRoot "app\\static\\assets"',
-    'if (Test-Path -LiteralPath $oldAssets) {',
-    '    Remove-Item -LiteralPath $oldAssets -Recurse -Force -ErrorAction SilentlyContinue',
-    '}',
-    '',
-    'Get-ChildItem -LiteralPath $SourceDir -Force | ForEach-Object {',
-    '    if ($_.Name -eq ".git") { return }',
-    '    if ($_.Name -eq "app") {',
-    '        Get-ChildItem -LiteralPath $_.FullName -Force | Where-Object { $_.Name -ne "data" -and $_.Name -ne "node_modules" } | ForEach-Object {',
-    '            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $RepoRoot "app") -Recurse -Force',
-    '        }',
-    '    } else {',
-    '        Copy-Item -LiteralPath $_.FullName -Destination $RepoRoot -Recurse -Force',
+    '# 4. Mirror program subfolders reliably via robocopy.exe (never suffers from PowerShell Copy-Item folder nesting bug)',
+    'foreach ($sub in @("server", "static", "src", "host", "public")) {',
+    '    $sSub = Join-Path (Join-Path $SourceDir "app") $sub',
+    '    $dSub = Join-Path (Join-Path $RepoRoot "app") $sub',
+    '    if (Test-Path -LiteralPath $sSub) {',
+    '        & robocopy.exe $sSub $dSub /MIR /R:3 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null',
+    '        Write-UpdLog ("Mirrored app\\" + $sub + " (exit=" + $LASTEXITCODE + ")")',
     '    }',
     '}',
     '',
-    'if (Test-Path -LiteralPath $PreserveDir) {',
-    '    Get-ChildItem -LiteralPath $PreserveDir -Force | ForEach-Object {',
-    '        Copy-Item -LiteralPath $_.FullName -Destination $RepoRoot -Recurse -Force',
-    '    }',
+    '# Copy top-level files in app/ and root ZapretControl.bat',
+    'Get-ChildItem -LiteralPath (Join-Path $SourceDir "app") -File -Force -ErrorAction SilentlyContinue | ForEach-Object {',
+    '    $dst = Join-Path (Join-Path $RepoRoot "app") $_.Name',
+    '    [System.IO.File]::Copy($_.FullName, $dst, $true)',
+    '}',
+    '$srcBat = Join-Path $SourceDir "ZapretControl.bat"',
+    'if (Test-Path -LiteralPath $srcBat) {',
+    '    [System.IO.File]::Copy($srcBat, (Join-Path $RepoRoot "ZapretControl.bat"), $true)',
     '}',
     '',
-    'Start-Sleep -Milliseconds 250',
-    'Remove-Item -LiteralPath $StagingDir -Recurse -Force -ErrorAction SilentlyContinue',
+    '# 5. Sync zapret folder and restore preserved user lists/configs/fakes',
+    '$sZap = Join-Path $SourceDir "zapret"',
+    '$dZap = Join-Path $RepoRoot "zapret"',
+    'if (Test-Path -LiteralPath $sZap) {',
+    '    & robocopy.exe $sZap $dZap /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null',
+    '}',
+    '$pZap = Join-Path $PreserveDir "zapret"',
+    'if (Test-Path -LiteralPath $pZap) {',
+    '    & robocopy.exe $pZap $dZap /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null',
+    '}',
     '',
+    '# 6. Clear Chromium --app HTTP/JS cache so the new UI bundle always loads fresh',
+    'foreach ($cacheRel in @("app\\data\\ui-window-v2\\Default\\Cache", "app\\data\\ui-window-v2\\Default\\Code Cache")) {',
+    '    $cp = Join-Path $RepoRoot $cacheRel',
+    '    if (Test-Path -LiteralPath $cp) { Remove-Item -LiteralPath $cp -Recurse -Force -ErrorAction SilentlyContinue }',
+    '}',
+    '',
+    '# 7. Write app-update-state.json ONLY after all files are copied',
+    'if (Test-Path -LiteralPath $StagedStateFile) {',
+    '    $stateDst = Join-Path $RepoRoot "app\\data\\app-update-state.json"',
+    '    [System.IO.File]::Copy($StagedStateFile, $stateDst, $true)',
+    '}',
+    '',
+    '# 8. Launch updated ZapretControl.bat',
     '$batLauncher = Join-Path $RepoRoot "ZapretControl.bat"',
     'if (Test-Path -LiteralPath $batLauncher) {',
+    '    Write-UpdLog "Launching updated ZapretControl.bat"',
     '    Start-Process -FilePath $batLauncher -WorkingDirectory $RepoRoot',
     '}',
+    '',
+    'Start-Sleep -Milliseconds 400',
+    'Remove-Item -LiteralPath $TmpWorkDir -Recurse -Force -ErrorAction SilentlyContinue',
+    'Write-UpdLog "Update completed successfully"',
     '',
   ];
   return '\uFEFF' + lines.join('\r\n');
 }
 
-export async function installProgramUpdate({ zipBase64 = null, activeRunningStrategy = null } = {}) {
+export async function installProgramUpdate({
+  zipBase64 = null,
+  activeRunningStrategy = null,
+  onBeforeApply = null,
+} = {}) {
   ensureDataDir();
-  fs.rmSync(STAGING_DIR, { recursive: true, force: true });
-  fs.mkdirSync(STAGING_DIR, { recursive: true });
 
-  const zipPath = path.join(STAGING_DIR, 'update.zip');
-  const extractDir = path.join(STAGING_DIR, 'extracted');
-  const preserveDir = path.join(STAGING_DIR, 'preserve');
+  // Stage entirely in OS temp directory so we never delete files out from under a running script inside REPO_ROOT
+  const tmpWorkDir = path.join(
+    os.tmpdir(),
+    `zapret-control-upd-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+  );
+  fs.mkdirSync(tmpWorkDir, { recursive: true });
+
+  const zipPath = path.join(tmpWorkDir, 'update.zip');
+  const extractDir = path.join(tmpWorkDir, 'extracted');
+  const preserveDir = path.join(tmpWorkDir, 'preserve');
+  const stagedStateFile = path.join(tmpWorkDir, 'app-update-state.json');
 
   let targetMeta = null;
 
-  if (zipBase64) {
-    const cleaned = String(zipBase64).replace(/^data:[^;]+;base64,/, '');
-    const buf = Buffer.from(cleaned, 'base64');
-    if (buf.length < 100 || buf[0] !== 0x50 || buf[1] !== 0x4b) {
-      fs.rmSync(STAGING_DIR, { recursive: true, force: true });
-      throw new Error('Выбранный файл не является корректным ZIP-архивом');
-    }
-    fs.writeFileSync(zipPath, buf);
-  } else {
-    targetMeta = await resolveLatestProgramCommit();
-    const archiveUrl = `https://codeload.github.com/${APP_REPO}/zip/${targetMeta.sha}`;
-    await downloadFileWithFallback(archiveUrl, zipPath);
-    const stat = fs.existsSync(zipPath) ? fs.statSync(zipPath) : null;
-    if (!stat || stat.size < 100) {
-      fs.rmSync(STAGING_DIR, { recursive: true, force: true });
-      throw new Error('Скачанный архив обновления повреждён или пуст');
-    }
-  }
-
-  await extractZipToDirectory(zipPath, extractDir);
-  const extractedRoot = locateExtractedRoot(extractDir);
-  stagePreservedUserFiles(extractedRoot, preserveDir);
-
-  if (activeRunningStrategy) {
-    fs.writeFileSync(
-      RESUME_FLAG_PATH,
-      JSON.stringify({ strategy: activeRunningStrategy, savedAt: new Date().toISOString() }, null, 2),
-      'utf8'
-    );
-  }
-
-  if (targetMeta) {
-    saveLocalAppUpdateState({
-      installedSha: targetMeta.sha,
-      installedShortSha: targetMeta.shortSha,
-      installedBranch: targetMeta.branch,
-      commitDate: targetMeta.publishedAt,
-      commitMessage: targetMeta.message,
-      installedAt: new Date().toISOString(),
-    });
-  }
-
-  if (os.platform() === 'win32') {
-    const scriptPath = path.join(STAGING_DIR, 'apply-update.ps1');
-    const scriptContent = buildWindowsUpdaterPs1({
-      repoRoot: REPO_ROOT,
-      stagingDir: STAGING_DIR,
-      sourceDir: extractedRoot,
-      preserveDir,
-      serverPid: process.pid,
-    });
-    fs.writeFileSync(scriptPath, scriptContent, 'utf8');
-
-    const child = spawn(
-      'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath],
-      {
-        cwd: REPO_ROOT,
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
+  try {
+    if (zipBase64) {
+      const cleaned = String(zipBase64).replace(/^data:[^;]+;base64,/, '');
+      const buf = Buffer.from(cleaned, 'base64');
+      if (buf.length < 100 || buf[0] !== 0x50 || buf[1] !== 0x4b) {
+        throw new Error('Выбранный файл не является корректным ZIP-архивом');
       }
-    );
-    child.unref();
+      fs.writeFileSync(zipPath, buf);
+    } else {
+      targetMeta = await resolveLatestProgramCommit();
+      const archiveUrl = `https://codeload.github.com/${APP_REPO}/zip/${targetMeta.sha}`;
+      await downloadFileWithFallback(archiveUrl, zipPath);
+      const stat = fs.existsSync(zipPath) ? fs.statSync(zipPath) : null;
+      if (!stat || stat.size < 100) {
+        throw new Error('Скачанный архив обновления повреждён или пуст');
+      }
+    }
+
+    await extractZipToDirectory(zipPath, extractDir);
+    const extractedRoot = locateExtractedRoot(extractDir);
+    stagePreservedUserFiles(extractedRoot, preserveDir);
+
+    if (activeRunningStrategy) {
+      fs.writeFileSync(
+        RESUME_FLAG_PATH,
+        JSON.stringify({ strategy: activeRunningStrategy, savedAt: new Date().toISOString() }, null, 2),
+        'utf8'
+      );
+    }
+
+    if (typeof onBeforeApply === 'function') {
+      try {
+        await onBeforeApply();
+      } catch {
+        // ignore
+      }
+    }
+
+    const nextStateObj = targetMeta
+      ? {
+          installedSha: targetMeta.sha,
+          installedShortSha: targetMeta.shortSha,
+          installedBranch: targetMeta.branch,
+          commitDate: targetMeta.publishedAt,
+          commitMessage: targetMeta.message,
+          installedAt: new Date().toISOString(),
+        }
+      : null;
+
+    if (nextStateObj) {
+      fs.writeFileSync(stagedStateFile, JSON.stringify(nextStateObj, null, 2), 'utf8');
+    }
+
+    // Apply all unlocked program files immediately in Node (UTF-16 safe, zero PowerShell Copy-Item bugs)
+    applyFilesInNodeSync(extractedRoot, preserveDir);
+
+    if (os.platform() === 'win32') {
+      const psScriptPath = path.join(os.tmpdir(), `zapret-control-restart-${Date.now()}.ps1`);
+      const psContent = buildWindowsRestartPs1({
+        repoRoot: REPO_ROOT,
+        tmpWorkDir,
+        sourceDir: extractedRoot,
+        preserveDir,
+        stagedStateFile,
+        logFile: UPDATE_LOG_PATH,
+        serverPid: process.pid,
+      });
+      fs.writeFileSync(psScriptPath, psContent, 'utf8');
+
+      // Spawn detached via cmd.exe "start" so killing ServerPid (/T) never terminates the updater script!
+      const child = spawn(
+        'cmd.exe',
+        [
+          '/d',
+          '/s',
+          '/c',
+          `start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${psScriptPath}"`,
+        ],
+        {
+          cwd: os.tmpdir(),
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        }
+      );
+      child.unref();
+
+      return {
+        ok: true,
+        restarting: true,
+        installedShortSha: targetMeta ? targetMeta.shortSha : 'zip',
+        message: 'Обновление установлено. Выполняется перезапуск программы...',
+      };
+    }
+
+    // Non-Windows: verify blobs and persist update state now
+    if (nextStateObj) {
+      const remaining = countMismatchedProgramBlobs(targetMeta.entries);
+      if (remaining === 0) {
+        saveLocalAppUpdateState(nextStateObj);
+      }
+    }
+    fs.rmSync(tmpWorkDir, { recursive: true, force: true });
 
     return {
       ok: true,
-      restarting: true,
+      restarting: false,
       installedShortSha: targetMeta ? targetMeta.shortSha : 'zip',
-      message: 'Обновление подготовлено. Программа сейчас автоматически перезапустится.',
+      message: 'Файлы программы успешно обновлены.',
     };
+  } catch (err) {
+    try {
+      fs.rmSync(tmpWorkDir, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+    throw err;
   }
-
-  // Non-Windows in-place apply (preserves app/data, app/node_modules, .git, and user zapret files)
-  const oldAssets = path.join(APP_DIR, 'static', 'assets');
-  if (fs.existsSync(oldAssets)) {
-    fs.rmSync(oldAssets, { recursive: true, force: true });
-  }
-  const skipSet = new Set(['.git', 'app/data', 'app/node_modules']);
-  copyDirRecursiveSync(extractedRoot, REPO_ROOT, skipSet);
-  if (fs.existsSync(preserveDir)) {
-    copyDirRecursiveSync(preserveDir, REPO_ROOT);
-  }
-  fs.rmSync(STAGING_DIR, { recursive: true, force: true });
-
-  return {
-    ok: true,
-    restarting: false,
-    installedShortSha: targetMeta ? targetMeta.shortSha : 'zip',
-    message: 'Файлы программы успешно обновлены.',
-  };
 }

@@ -75,37 +75,44 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     api.openExternalUrl(url);
   };
 
-  const waitForRestartAndReload = () => {
+  const waitForRestartAndReload = (previousBootId?: string) => {
     let attempts = 0;
+    let sawServerDown = false;
     const timer = setInterval(async () => {
       attempts++;
-      if (attempts < 2) return;
+      if (attempts < 3) return;
       try {
-        await api.getState();
-        clearInterval(timer);
-        window.location.reload();
+        const nextState = await api.getState();
+        const bootChanged =
+          Boolean(previousBootId && nextState.serverBootId && nextState.serverBootId !== previousBootId);
+        if (bootChanged || sawServerDown || (!previousBootId && attempts >= 6)) {
+          clearInterval(timer);
+          window.location.replace(`${window.location.pathname}?updated=${Date.now()}`);
+        }
       } catch {
-        if (attempts > 45) {
+        sawServerDown = true;
+        if (attempts > 55) {
           clearInterval(timer);
           setInstallingAppUpdate(false);
         }
       }
-    }, 800);
+    }, 850);
   };
 
   const handleInstallFromGitHub = async () => {
+    const prevBootId = state.serverBootId;
     setInstallingAppUpdate(true);
     setInstallPhaseText('Скачивание свежей сборки с GitHub и сохранение ваших профилей и списков...');
     try {
       const res = await api.installAppUpdate();
       if (res.restarting) {
         setInstallPhaseText('Установка файлов и автоматический перезапуск Zapret Control...');
-        waitForRestartAndReload();
+        waitForRestartAndReload(prevBootId);
       } else {
         setInstallPhaseText('Обновление установлено. Перезагрузка интерфейса...');
         setTimeout(() => {
-          window.location.reload();
-        }, 700);
+          window.location.replace(`${window.location.pathname}?updated=${Date.now()}`);
+        }, 600);
       }
     } catch (err) {
       setInstallingAppUpdate(false);
@@ -118,6 +125,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     e.target.value = '';
     if (!file) return;
 
+    const prevBootId = state.serverBootId;
     setInstallingAppUpdate(true);
     setInstallPhaseText(`Чтение архива ${file.name} и сохранение ваших профилей и списков...`);
     try {
@@ -131,12 +139,12 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
       const res = await api.installAppUpdate(base64);
       if (res.restarting) {
         setInstallPhaseText('Установка файлов и автоматический перезапуск Zapret Control...');
-        waitForRestartAndReload();
+        waitForRestartAndReload(prevBootId);
       } else {
         setInstallPhaseText('Обновление из ZIP установлено. Перезагрузка интерфейса...');
         setTimeout(() => {
-          window.location.reload();
-        }, 700);
+          window.location.replace(`${window.location.pathname}?updated=${Date.now()}`);
+        }, 600);
       }
     } catch (err) {
       setInstallingAppUpdate(false);

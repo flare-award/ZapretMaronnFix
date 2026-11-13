@@ -2,6 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import {
   APP_DIR,
@@ -57,6 +58,7 @@ import {
 const STATIC_DIR = path.join(APP_DIR, 'static');
 const PORT = Number(process.env.PORT || 3847);
 const HOST = process.env.HOST || '0.0.0.0';
+const SERVER_BOOT_ID = crypto.randomUUID();
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -173,6 +175,7 @@ function buildFullState() {
     latestTestRun: effectiveLatestRun,
     testJob,
     appUpdateState: readLocalAppUpdateState(),
+    serverBootId: SERVER_BOOT_ID,
     zapretFingerprint: lastZapretFingerprint || computeZapretDirectoryFingerprint(zapretDir),
   };
 }
@@ -505,6 +508,11 @@ async function handleApi(req, res, pathname) {
     const result = await installProgramUpdate({
       zipBase64: body.zipBase64 || null,
       activeRunningStrategy: runtime.running ? runtime.activeStrategy : null,
+      onBeforeApply: async () => {
+        if (runtime.running) {
+          await stopStrategyProcess();
+        }
+      },
     });
     sendJson(res, 200, result);
     return;
@@ -619,7 +627,10 @@ function serveStatic(req, res, pathname) {
   const isAsset = pathname.startsWith('/assets/');
   res.writeHead(200, {
     'Content-Type': mime,
-    'Cache-Control': isAsset ? 'public, max-age=31536000, immutable' : 'no-cache',
+    'Cache-Control': isAsset
+      ? 'public, max-age=31536000, immutable'
+      : 'no-store, no-cache, must-revalidate, max-age=0',
+    ...(isAsset ? {} : { Pragma: 'no-cache', Expires: '0' }),
   });
   fs.createReadStream(targetPath).pipe(res);
 }

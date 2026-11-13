@@ -169,6 +169,7 @@ function Start-WinwsDirect($strategyName) {
 
 $ResumeFlagFile = Join-Path $DataDir "resume-after-update.json"
 $UpdateStateFile = Join-Path $DataDir "app-update-state.json"
+$ServerBootId = [guid]::NewGuid().ToString()
 
 function Get-GitBlobSha1([byte[]]$bytes) {
     $header = [System.Text.Encoding]::UTF8.GetBytes("blob $($bytes.Length)`0")
@@ -237,10 +238,11 @@ function Check-AppUpdatePs {
         } | ConvertTo-Json) | Set-Content -Path $UpdateStateFile -Encoding UTF8
     }
     $localState = if (Test-Path $UpdateStateFile) { Get-Content $UpdateStateFile -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
+    $repLocal = if ($changed -eq 0) { $latest.shortSha } elseif ($localState -and $localState.installedShortSha -ne $latest.shortSha) { $localState.installedShortSha } else { $null }
     return @{
         repo = "flare-award/ZapretMaronnFix"
-        currentShortSha = if ($changed -eq 0) { $latest.shortSha } elseif ($localState) { $localState.installedShortSha } else { $null }
-        currentDate = if ($changed -eq 0) { $latest.publishedAt } elseif ($localState) { $localState.commitDate } else { $null }
+        currentShortSha = $repLocal
+        currentDate = if ($changed -eq 0) { $latest.publishedAt } elseif ($repLocal -and $localState) { $localState.commitDate } else { $null }
         latestSha = $latest.sha
         latestShortSha = $latest.shortSha
         branch = $latest.branch
@@ -307,12 +309,12 @@ while ($listener.IsListening) {
             }
 
             if ($urlPath -eq "/api/app-update/install" -and $req.HttpMethod -eq "POST") {
-                $staging = Join-Path $DataDir "staging-update"
-                if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
-                New-Item -ItemType Directory -Force -Path $staging | Out-Null
-                $zipPath = Join-Path $staging "update.zip"
-                $extractDir = Join-Path $staging "extracted"
-                $preserveDir = Join-Path $staging "preserve"
+                $tmpWork = Join-Path ([System.IO.Path]::GetTempPath()) ("zapret-control-upd-" + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+                New-Item -ItemType Directory -Force -Path $tmpWork | Out-Null
+                $zipPath = Join-Path $tmpWork "update.zip"
+                $extractDir = Join-Path $tmpWork "extracted"
+                $preserveDir = Join-Path $tmpWork "preserve"
+                $stagedState = Join-Path $tmpWork "app-update-state.json"
                 New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
                 New-Item -ItemType Directory -Force -Path $preserveDir | Out-Null
 
@@ -328,7 +330,7 @@ while ($listener.IsListening) {
                         installedBranch = $latest.branch
                         commitDate = $latest.publishedAt
                         commitMessage = $latest.message
-                    } | ConvertTo-Json) | Set-Content -Path $UpdateStateFile -Encoding UTF8
+                    } | ConvertTo-Json) | Set-Content -Path $stagedState -Encoding UTF8
                 }
 
                 Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
@@ -342,42 +344,53 @@ while ($listener.IsListening) {
                     if (Test-Path -LiteralPath $sFile) {
                         $dFile = Join-Path $preserveDir $rel
                         New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($dFile)) | Out-Null
-                        Copy-Item -LiteralPath $sFile -Destination $dFile -Force
+                        [System.IO.File]::Copy($sFile, $dFile, $true)
                     }
                 }
 
                 if ($null -ne $script:ActiveWinws -and -not $script:ActiveWinws.HasExited -and $script:ActiveStrategy) {
                     (@{ strategy = $script:ActiveStrategy } | ConvertTo-Json) | Set-Content -Path $ResumeFlagFile -Encoding UTF8
+                    Stop-WinwsDirect
                 }
 
-                $applyScript = Join-Path $staging "apply-update.ps1"
+                $applyScript = Join-Path ([System.IO.Path]::GetTempPath()) ("zapret-control-restart-" + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + ".ps1")
                 $scriptBody = @"
-Start-Sleep -Milliseconds 700
+Start-Sleep -Milliseconds 900
 Get-CimInstance Win32_Process | Where-Object { `$_.CommandLine -and (`$_.CommandLine -like '*ui-window-v2*' -or `$_.CommandLine -like '*window-profile*') } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }
-Stop-Process -Name 'ZapretControl' -Force -ErrorAction SilentlyContinue
-Stop-Process -Id $PID -Force -ErrorAction SilentlyContinue
-Stop-Process -Name 'winws' -Force -ErrorAction SilentlyContinue
+& taskkill.exe /IM ZapretControl.exe /F 2>&1 | Out-Null
+& taskkill.exe /PID $PID /T /F 2>&1 | Out-Null
+& taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
+Start-Sleep -Milliseconds 400
 `$exePath = Join-Path '$($RepoRoot.Replace("'", "''"))' 'ZapretControl.exe'
 for (`$i = 0; `$i -lt 25; `$i++) { if (-not (Test-Path -LiteralPath `$exePath)) { break }; try { Remove-Item -LiteralPath `$exePath -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 200 } }
-`$oldAssets = Join-Path '$($RepoRoot.Replace("'", "''"))' 'app\static\assets'
-if (Test-Path -LiteralPath `$oldAssets) { Remove-Item -LiteralPath `$oldAssets -Recurse -Force -ErrorAction SilentlyContinue }
-Get-ChildItem -LiteralPath '$($srcRoot.Replace("'", "''"))' -Force | ForEach-Object {
-    if (`$_.Name -eq '.git') { return }
-    if (`$_.Name -eq 'app') {
-        Get-ChildItem -LiteralPath `$_.FullName -Force | Where-Object { `$_.Name -ne 'data' -and `$_.Name -ne 'node_modules' } | ForEach-Object { Copy-Item -LiteralPath `$_.FullName -Destination (Join-Path '$($RepoRoot.Replace("'", "''"))' 'app') -Recurse -Force }
-    } else {
-        Copy-Item -LiteralPath `$_.FullName -Destination '$($RepoRoot.Replace("'", "''"))' -Recurse -Force
-    }
+foreach (`$sub in @('server','static','src','host','public')) {
+    `$sSub = Join-Path (Join-Path '$($srcRoot.Replace("'", "''"))' 'app') `$sub
+    `$dSub = Join-Path (Join-Path '$($RepoRoot.Replace("'", "''"))' 'app') `$sub
+    if (Test-Path -LiteralPath `$sSub) { & robocopy.exe `$sSub `$dSub /MIR /R:3 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null }
 }
-if (Test-Path -LiteralPath '$($preserveDir.Replace("'", "''"))') {
-    Get-ChildItem -LiteralPath '$($preserveDir.Replace("'", "''"))' -Force | ForEach-Object { Copy-Item -LiteralPath `$_.FullName -Destination '$($RepoRoot.Replace("'", "''"))' -Recurse -Force }
+Get-ChildItem -LiteralPath (Join-Path '$($srcRoot.Replace("'", "''"))' 'app') -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    [System.IO.File]::Copy(`$_.FullName, (Join-Path (Join-Path '$($RepoRoot.Replace("'", "''"))' 'app') `$_.Name), `$true)
 }
-Start-Sleep -Milliseconds 250
-Remove-Item -LiteralPath '$($staging.Replace("'", "''"))' -Recurse -Force -ErrorAction SilentlyContinue
+`$sBat = Join-Path '$($srcRoot.Replace("'", "''"))' 'ZapretControl.bat'
+if (Test-Path -LiteralPath `$sBat) { [System.IO.File]::Copy(`$sBat, (Join-Path '$($RepoRoot.Replace("'", "''"))' 'ZapretControl.bat'), `$true) }
+`$sZap = Join-Path '$($srcRoot.Replace("'", "''"))' 'zapret'
+`$dZap = Join-Path '$($RepoRoot.Replace("'", "''"))' 'zapret'
+if (Test-Path -LiteralPath `$sZap) { & robocopy.exe `$sZap `$dZap /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null }
+`$pZap = Join-Path '$($preserveDir.Replace("'", "''"))' 'zapret'
+if (Test-Path -LiteralPath `$pZap) { & robocopy.exe `$pZap `$dZap /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null }
+foreach (`$cRel in @('app\data\ui-window-v2\Default\Cache','app\data\ui-window-v2\Default\Code Cache')) {
+    `$cp = Join-Path '$($RepoRoot.Replace("'", "''"))' `$cRel
+    if (Test-Path -LiteralPath `$cp) { Remove-Item -LiteralPath `$cp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+if (Test-Path -LiteralPath '$($stagedState.Replace("'", "''"))') {
+    [System.IO.File]::Copy('$($stagedState.Replace("'", "''"))', (Join-Path '$($RepoRoot.Replace("'", "''"))' 'app\data\app-update-state.json'), `$true)
+}
 Start-Process -FilePath (Join-Path '$($RepoRoot.Replace("'", "''"))' 'ZapretControl.bat') -WorkingDirectory '$($RepoRoot.Replace("'", "''"))'
+Start-Sleep -Milliseconds 400
+Remove-Item -LiteralPath '$($tmpWork.Replace("'", "''"))' -Recurse -Force -ErrorAction SilentlyContinue
 "@
                 Set-Content -Path $applyScript -Value $scriptBody -Encoding UTF8
-                Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$applyScript`"" -WindowStyle Hidden | Out-Null
+                Start-Process -FilePath "cmd.exe" -ArgumentList "/d /s /c start `"`" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$applyScript`"" -WindowStyle Hidden | Out-Null
 
                 $okBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ ok = $true; restarting = $true; message = "Обновление установлено, выполняется перезапуск..." } | ConvertTo-Json))
                 $res.StatusCode = 200
@@ -487,6 +500,7 @@ Start-Process -FilePath (Join-Path '$($RepoRoot.Replace("'", "''"))' 'ZapretCont
                 listsMeta = @()
                 testHistory = @()
                 latestTestRun = $null
+                serverBootId = $ServerBootId
                 zapretFingerprint = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString())
                 testJob = @{ running = $false; aborted = $false; completedCount = 0; totalCount = 0; progressPct = 0; results = @() }
             }
@@ -506,6 +520,11 @@ Start-Process -FilePath (Join-Path '$($RepoRoot.Replace("'", "''"))' 'ZapretCont
         }
         $ext = [System.IO.Path]::GetExtension($filePath).ToLower()
         $res.ContentType = if ($mimeMap.ContainsKey($ext)) { $mimeMap[$ext] } else { "application/octet-stream" }
+        if ($urlPath.StartsWith("/assets/")) {
+            $res.AddHeader("Cache-Control", "public, max-age=31536000, immutable")
+        } else {
+            $res.AddHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        }
         $bytes = [System.IO.File]::ReadAllBytes($filePath)
         $res.StatusCode = 200
         $res.OutputStream.Write($bytes, 0, $bytes.Length)
