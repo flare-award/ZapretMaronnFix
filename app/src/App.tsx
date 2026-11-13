@@ -425,12 +425,6 @@ export const App: React.FC = () => {
       badge: String(state.strategies.length),
     },
     {
-      id: 'profiles',
-      label: TAB_LABELS.profiles,
-      icon: <Bookmark size={17} strokeWidth={1.9} />,
-      badge: String(state.profiles.length),
-    },
-    {
       id: 'tests',
       label: TAB_LABELS.tests,
       icon: <Gauge size={17} strokeWidth={1.9} />,
@@ -440,6 +434,11 @@ export const App: React.FC = () => {
       id: 'filters',
       label: TAB_LABELS.filters,
       icon: <SlidersHorizontal size={17} strokeWidth={1.9} />,
+    },
+    {
+      id: 'profiles',
+      label: TAB_LABELS.profiles,
+      icon: <Bookmark size={17} strokeWidth={1.9} />,
     },
     {
       id: 'lists',

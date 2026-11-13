@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Gamepad2, Network, Binary, Check, RefreshCw, Save } from 'lucide-react';
+import { Gamepad2, Network, Binary, Check, RefreshCw, Save, ChevronDown } from 'lucide-react';
 import type { FullAppState, GameFilterMode, IpsetFilterMode } from '../types';
 
 interface FiltersViewProps {
@@ -22,35 +22,24 @@ export const FiltersView: React.FC<FiltersViewProps> = ({
   const { gameFilter, ipsetFilter, activeFakes } = state.filters;
   const [tcpRange, setTcpRange] = useState(gameFilter.tcpRange);
   const [udpRange, setUdpRange] = useState(gameFilter.udpRange);
+  const [portsExpanded, setPortsExpanded] = useState(false);
 
   useEffect(() => {
     setTcpRange(gameFilter.tcpRange);
     setUdpRange(gameFilter.udpRange);
   }, [gameFilter.tcpRange, gameFilter.udpRange]);
 
-  const gameModes: Array<{ id: GameFilterMode; title: string; desc: string }> = [
-    { id: 'disabled', title: 'Выключен', desc: 'Обход не затрагивает высокие игровые порты (минимальный пинг в играх)' },
-    { id: 'all', title: 'TCP и UDP', desc: 'Перехватывает как TCP, так и UDP порты из указанного ниже диапазона' },
-    { id: 'tcp', title: 'Только TCP', desc: 'Применяет десинк только к игровым TCP-соединениям (авторизация, лобби)' },
-    { id: 'udp', title: 'Только UDP', desc: 'Отправляет UDP-фейки только на игровые UDP-порты' },
+  const gameModes: Array<{ id: GameFilterMode; title: string }> = [
+    { id: 'disabled', title: 'Выключен' },
+    { id: 'all', title: 'TCP и UDP' },
+    { id: 'tcp', title: 'Только TCP' },
+    { id: 'udp', title: 'Только UDP' },
   ];
 
-  const ipsetModes: Array<{ id: IpsetFilterMode; title: string; desc: string }> = [
-    {
-      id: 'none',
-      title: 'None (Отключён)',
-      desc: 'В ipset-all.txt записана заглушка 203.0.113.113/32. Обход работает строго по доменным спискам без задевания игр на AWS/Cloudflare.',
-    },
-    {
-      id: 'loaded',
-      title: 'Loaded (По базе подсетей)',
-      desc: `Фильтрация по загруженному списку подсетей (${ipsetFilter.entriesCount || ipsetFilter.backupEntriesCount} CIDR записей).`,
-    },
-    {
-      id: 'any',
-      title: 'Any (Все IP-адреса)',
-      desc: 'Файл ipset-all.txt пуст - правила без hostlist применяются ко всем IP-адресам на целевых портах.',
-    },
+  const ipsetModes: Array<{ id: IpsetFilterMode; title: string }> = [
+    { id: 'none', title: 'None' },
+    { id: 'loaded', title: 'Loaded' },
+    { id: 'any', title: 'Any' },
   ];
 
   const portsDirty = tcpRange.trim() !== gameFilter.tcpRange || udpRange.trim() !== gameFilter.udpRange;
@@ -59,24 +48,51 @@ export const FiltersView: React.FC<FiltersViewProps> = ({
     <div className="content-container">
       {/* Game Filter Card */}
       <div className="m3-card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '14px' }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+            marginBottom: '14px',
+          }}
+        >
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <div className="brand-mark">
               <Gamepad2 size={18} />
             </div>
-            <div>
-              <div style={{ fontSize: '15px', fontWeight: 600 }}>Game Filter (Игровой фильтр портов)</div>
-              <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
-                Управляет файлом zapret/utils/game_filter.enabled и переменными GameFilterTCP / GameFilterUDP
-              </div>
-            </div>
+            <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Game Filter</div>
           </div>
-          <span className={`score-pill ${gameFilter.mode !== 'disabled' ? 'good' : ''}`}>
-            Режим: {gameFilter.mode.toUpperCase()}
-          </span>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span className={`score-pill ${gameFilter.mode !== 'disabled' ? 'good' : ''}`}>
+              Режим: {gameFilter.mode.toUpperCase()}
+            </span>
+            <button
+              type="button"
+              className="btn-icon"
+              title={portsExpanded ? 'Скрыть диапазоны портов' : 'Раскрыть диапазоны портов'}
+              aria-expanded={portsExpanded}
+              onClick={() => setPortsExpanded((v) => !v)}
+            >
+              <ChevronDown
+                size={16}
+                style={{
+                  transform: portsExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
+                  transition: 'transform 160ms var(--ease-m3)',
+                }}
+              />
+            </button>
+          </div>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '10px', marginBottom: '16px' }}>
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
+            gap: '10px',
+          }}
+        >
           {gameModes.map((gm) => {
             const selected = gameFilter.mode === gm.id;
             return (
@@ -87,88 +103,105 @@ export const FiltersView: React.FC<FiltersViewProps> = ({
                 onClick={() => onSaveGameFilter({ mode: gm.id })}
                 style={{
                   textAlign: 'left',
-                  padding: '13px 15px',
+                  padding: '14px 16px',
                   borderRadius: '14px',
                   border: selected ? '1px solid rgba(168, 199, 250, 0.45)' : '1px solid var(--m3-outline)',
                   background: selected ? 'rgba(29, 52, 88, 0.45)' : 'var(--m3-surface-low)',
                   cursor: 'pointer',
                   display: 'flex',
-                  flexDirection: 'column',
-                  gap: '5px',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '8px',
+                  transition: 'background-color 140ms var(--ease-m3), border-color 140ms var(--ease-m3)',
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 600 }}>
-                  <span>{gm.title}</span>
-                  {selected && <Check size={15} color="var(--m3-primary)" />}
-                </div>
-                <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', lineHeight: 1.4 }}>{gm.desc}</div>
+                <span style={{ fontSize: '15px', fontWeight: 600 }}>{gm.title}</span>
+                {selected && <Check size={16} color="var(--m3-primary)" strokeWidth={2.3} />}
               </button>
             );
           })}
         </div>
 
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))',
-            gap: '12px',
-            alignItems: 'end',
-            padding: '14px 16px',
-            borderRadius: '14px',
-            background: 'var(--m3-surface-low)',
-            border: '1px solid var(--m3-outline)',
-          }}
-        >
-          <div>
-            <label style={{ display: 'block', fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '6px' }}>
-              Диапазон портов TCP (например, 1024-65535)
-            </label>
-            <input
-              type="text"
-              className="m3-input mono"
-              style={{ width: '100%' }}
-              value={tcpRange}
-              onChange={(e) => setTcpRange(e.target.value)}
-            />
-          </div>
+        {portsExpanded && (
+          <div
+            style={{
+              marginTop: '14px',
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+              gap: '12px',
+              alignItems: 'end',
+              padding: '14px 16px',
+              borderRadius: '14px',
+              background: 'var(--m3-surface-low)',
+              border: '1px solid var(--m3-outline)',
+              animation: 'fadeSlideIn 160ms var(--ease-m3)',
+            }}
+          >
+            <div>
+              <label
+                style={{
+                  display: 'block',
+                  fontSize: '12px',
+                  color: 'var(--m3-text-secondary)',
+                  marginBottom: '6px',
+                }}
+              >
+                Диапазон портов TCP (например, 1024-65535)
+              </label>
+              <input
+                type="text"
+                className="m3-input mono"
+                style={{ width: '100%' }}
+                value={tcpRange}
+                onChange={(e) => setTcpRange(e.target.value)}
+              />
+            </div>
 
-          <div>
-            <label style={{ display: 'block', fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '6px' }}>
-              Диапазон портов UDP (например, 1024-65535)
-            </label>
-            <input
-              type="text"
-              className="m3-input mono"
-              style={{ width: '100%' }}
-              value={udpRange}
-              onChange={(e) => setUdpRange(e.target.value)}
-            />
-          </div>
+            <div>
+              <label
+                style={{
+                  display: 'block',
+                  fontSize: '12px',
+                  color: 'var(--m3-text-secondary)',
+                  marginBottom: '6px',
+                }}
+              >
+                Диапазон портов UDP (например, 1024-65535)
+              </label>
+              <input
+                type="text"
+                className="m3-input mono"
+                style={{ width: '100%' }}
+                value={udpRange}
+                onChange={(e) => setUdpRange(e.target.value)}
+              />
+            </div>
 
-          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={busy || !portsDirty}
-              onClick={() => onSaveGameFilter({ tcpRange, udpRange })}
-            >
-              <Save size={14} />
-              Сохранить порты
-            </button>
-            <button
-              type="button"
-              className="btn btn-surface"
-              disabled={busy}
-              onClick={() => {
-                setTcpRange('1024-65535');
-                setUdpRange('1024-65535');
-                onSaveGameFilter({ tcpRange: '1024-65535', udpRange: '1024-65535' });
-              }}
-            >
-              Сбросить 1024-65535
-            </button>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="btn btn-surface"
+                disabled={busy}
+                onClick={() => {
+                  setTcpRange('1024-65535');
+                  setUdpRange('1024-65535');
+                  onSaveGameFilter({ tcpRange: '1024-65535', udpRange: '1024-65535' });
+                }}
+              >
+                Сбросить
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={busy || !portsDirty}
+                onClick={() => onSaveGameFilter({ tcpRange, udpRange })}
+              >
+                <Save size={14} />
+                Сохранить порты
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* IPSet Filter Card */}
@@ -187,12 +220,7 @@ export const FiltersView: React.FC<FiltersViewProps> = ({
             <div className="brand-mark">
               <Network size={18} />
             </div>
-            <div>
-              <div style={{ fontSize: '15px', fontWeight: 600 }}>IPSet Filter (Фильтрация по IP-подсетям)</div>
-              <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
-                Управляет режимом zapret/lists/ipset-all.txt и резервной базой ipset-all.txt.backup
-              </div>
-            </div>
+            <div style={{ fontSize: '15.5px', fontWeight: 600 }}>IPSet Filter</div>
           </div>
 
           <button type="button" className="btn btn-tonal" disabled={busy} onClick={onUpdateRemoteIpset}>
@@ -201,7 +229,13 @@ export const FiltersView: React.FC<FiltersViewProps> = ({
           </button>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '10px' }}>
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+            gap: '10px',
+          }}
+        >
           {ipsetModes.map((im) => {
             const selected = ipsetFilter.mode === im.id;
             return (
@@ -212,39 +246,33 @@ export const FiltersView: React.FC<FiltersViewProps> = ({
                 onClick={() => onSetIpsetMode(im.id)}
                 style={{
                   textAlign: 'left',
-                  padding: '13px 15px',
+                  padding: '14px 16px',
                   borderRadius: '14px',
                   border: selected ? '1px solid rgba(168, 199, 250, 0.45)' : '1px solid var(--m3-outline)',
                   background: selected ? 'rgba(29, 52, 88, 0.45)' : 'var(--m3-surface-low)',
                   cursor: 'pointer',
                   display: 'flex',
-                  flexDirection: 'column',
-                  gap: '5px',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '8px',
+                  transition: 'background-color 140ms var(--ease-m3), border-color 140ms var(--ease-m3)',
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 600 }}>
-                  <span>{im.title}</span>
-                  {selected && <Check size={15} color="var(--m3-primary)" />}
-                </div>
-                <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', lineHeight: 1.4 }}>{im.desc}</div>
+                <span style={{ fontSize: '15px', fontWeight: 600 }}>{im.title}</span>
+                {selected && <Check size={16} color="var(--m3-primary)" strokeWidth={2.3} />}
               </button>
             );
           })}
         </div>
       </div>
 
-      {/* Active UDP Fake Payloads Replacement */}
+      {/* Replace Active Fakes Card */}
       <div className="m3-card">
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
           <div className="brand-mark">
             <Binary size={18} />
           </div>
-          <div>
-            <div style={{ fontSize: '15px', fontWeight: 600 }}>Активные UDP-фейки (Replace Active Fakes)</div>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
-              Подмена бинарных пакетов ACTIVE_DISCORD_UDP.bin и ACTIVE_GAME_UDP.bin для голосовых каналов и игр
-            </div>
-          </div>
+          <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Replace Active Fakes</div>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '14px' }}>

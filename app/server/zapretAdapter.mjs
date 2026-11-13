@@ -507,45 +507,192 @@ export function readZapretInfo(zapretDir) {
   };
 }
 
-export function classifyTargetCategory(targetId) {
-  const low = targetId.toLowerCase();
-  if (low.includes('discord')) return 'discord';
-  if (low.includes('youtube') || low.startsWith('yt')) return 'youtube';
-  if (low.includes('google') && !low.includes('dns')) return 'google';
-  if (low.includes('cloudflare') && !low.includes('dns')) return 'cloudflare';
-  if (low.includes('github')) return 'github';
-  if (low.includes('dns')) return 'dns';
-  return 'custom';
+const STANDARD_CATEGORIES = {
+  discord: { id: 'discord', label: 'Discord', shortLabel: 'Discord' },
+  youtube: { id: 'youtube', label: 'YouTube', shortLabel: 'YT' },
+  google: { id: 'google', label: 'Google', shortLabel: 'Google' },
+  cloudflare: { id: 'cloudflare', label: 'Cloudflare', shortLabel: 'CF' },
+  github: { id: 'github', label: 'GitHub', shortLabel: 'GH' },
+  dns: { id: 'dns', label: 'DNS Ping', shortLabel: 'DNS' },
+};
+
+function normalizeSectionHeader(rawHeader) {
+  const cleaned = rawHeader
+    .replace(/^#+\s*/, '')
+    .replace(/\([^)]*\)/g, '')
+    .trim();
+  if (!cleaned) return null;
+  const low = cleaned.toLowerCase();
+  if (low.includes('discord')) return STANDARD_CATEGORIES.discord;
+  if (low.includes('youtube') || low === 'yt') return STANDARD_CATEGORIES.youtube;
+  if (low === 'google') return STANDARD_CATEGORIES.google;
+  if (low.includes('cloudflare') && !low.includes('dns')) return STANDARD_CATEGORIES.cloudflare;
+  if (low.includes('github')) return STANDARD_CATEGORIES.github;
+  if (low.includes('dns')) return STANDARD_CATEGORIES.dns;
+
+  const slug =
+    cleaned
+      .toLowerCase()
+      .replace(/[^a-z0-9а-яё]+/gi, '-')
+      .replace(/^-+|-+$/g, '') || 'custom';
+  const shortLabel = cleaned.length > 12 ? cleaned.slice(0, 12).trim() : cleaned;
+  return { id: slug, label: cleaned, shortLabel, isCustomSection: true };
+}
+
+function deriveCustomServiceFromTarget(targetId, rawValue) {
+  // Derive a clean human-readable service name from KeyName (e.g. "TwitchMain" -> "Twitch") or URL hostname
+  const strippedKey = String(targetId || '')
+    .replace(/(?:Main|Web|Short|Image|VideoRedirect|Video|Gateway|CDN|API|Updates|Auth|Login|Voice|Server|\d+)$/i, '')
+    .trim();
+  const baseLabel = strippedKey.length >= 2 ? strippedKey : String(targetId || '').trim();
+  if (baseLabel) {
+    const slug =
+      baseLabel
+        .toLowerCase()
+        .replace(/[^a-z0-9а-яё]+/gi, '-')
+        .replace(/^-+|-+$/g, '') || 'custom';
+    const pretty = baseLabel.charAt(0).toUpperCase() + baseLabel.slice(1);
+    return {
+      id: slug,
+      label: pretty,
+      shortLabel: pretty.length > 12 ? pretty.slice(0, 12) : pretty,
+    };
+  }
+
+  try {
+    if (rawValue && !rawValue.toUpperCase().startsWith('PING:')) {
+      const host = new URL(rawValue).hostname.replace(/^www\./i, '');
+      const domainPart = host.split('.')[0] || host;
+      const pretty = domainPart.charAt(0).toUpperCase() + domainPart.slice(1);
+      return { id: domainPart.toLowerCase(), label: pretty, shortLabel: pretty.slice(0, 12) };
+    }
+  } catch {
+    // ignore
+  }
+  return { id: 'custom', label: 'Другие', shortLabel: 'Другие' };
+}
+
+export function classifyTargetCategory(targetId, rawValue = '', currentSection = null) {
+  const low = String(targetId || '').toLowerCase();
+  const valLow = String(rawValue || '').toLowerCase();
+
+  if (low.includes('discord') || valLow.includes('discord.gg') || valLow.includes('discord.com') || valLow.includes('discordapp.')) {
+    return STANDARD_CATEGORIES.discord;
+  }
+  if (
+    low.includes('youtube') ||
+    low.startsWith('yt') ||
+    valLow.includes('youtube.com') ||
+    valLow.includes('youtu.be') ||
+    valLow.includes('ytimg.com') ||
+    valLow.includes('googlevideo.com')
+  ) {
+    return STANDARD_CATEGORIES.youtube;
+  }
+  if ((low.includes('google') || valLow.includes('google.com') || valLow.includes('gstatic.com')) && !low.includes('dns')) {
+    return STANDARD_CATEGORIES.google;
+  }
+  if ((low.includes('cloudflare') || valLow.includes('cloudflare.com') || valLow.includes('cdnjs.cloudflare.com')) && !low.includes('dns')) {
+    return STANDARD_CATEGORIES.cloudflare;
+  }
+  if (low.includes('github') || valLow.includes('github.com')) {
+    return STANDARD_CATEGORIES.github;
+  }
+  if (low.includes('dns')) {
+    return STANDARD_CATEGORIES.dns;
+  }
+
+  // If placed under an explicit custom "### SectionName", group all entries under that section
+  if (currentSection && currentSection.isCustomSection) {
+    return currentSection;
+  }
+
+  // Otherwise derive a dedicated service category from the entry itself (e.g. appended at bottom of targets.txt)
+  return deriveCustomServiceFromTarget(targetId, rawValue);
 }
 
 export function parseTargetsFile(zapretDir) {
   const targetsPath = path.join(zapretDir, 'utils', 'targets.txt');
   const targets = [];
   if (!fs.existsSync(targetsPath)) return targets;
+
+  let currentSection = null;
   for (const raw of fs.readFileSync(targetsPath, 'utf8').split(/\r?\n/)) {
     const s = raw.trim();
-    if (!s || s.startsWith('#')) continue;
-    const m = s.match(/^(\w+)\s*=\s*"(.+)"$/);
+    if (!s) continue;
+    if (/^#{2,}\s*\S+/.test(s)) {
+      currentSection = normalizeSectionHeader(s);
+      continue;
+    }
+    if (s.startsWith('#')) continue;
+
+    const m = s.match(/^([A-Za-z0-9_.-]+)\s*=\s*"?([^"]+)"?$/);
     if (m) {
-      const id = m[1];
-      const value = m[2];
+      const id = m[1].trim();
+      const value = m[2].trim();
       const isPingOnly = value.toUpperCase().startsWith('PING:');
+      let pingHost = '';
+      try {
+        pingHost = isPingOnly ? value.slice(5).trim() : new URL(value).hostname;
+      } catch {
+        pingHost = value.replace(/^https?:\/\//i, '').split('/')[0].trim();
+      }
+      const catMeta = classifyTargetCategory(id, value, currentSection);
       targets.push({
         id,
         value,
         isPingOnly,
-        pingHost: isPingOnly ? value.slice(5).trim() : new URL(value).hostname,
-        category: classifyTargetCategory(id),
+        pingHost,
+        category: catMeta.id,
+        categoryLabel: catMeta.label,
+        categoryShortLabel: catMeta.shortLabel || catMeta.label,
       });
     }
   }
   return targets;
 }
 
-export function parseTestResultContent(fileName, content) {
+export function readTargetCategories(zapretDir) {
+  const targets = parseTargetsFile(zapretDir);
+  const map = new Map();
+  for (const t of targets) {
+    const existing = map.get(t.category);
+    if (!existing) {
+      map.set(t.category, {
+        id: t.category,
+        label: t.categoryLabel || t.category,
+        shortLabel: t.categoryShortLabel || t.categoryLabel || t.category,
+        count: 1,
+        pingOnlyCount: t.isPingOnly ? 1 : 0,
+      });
+    } else {
+      existing.count += 1;
+      if (t.isPingOnly) existing.pingOnlyCount += 1;
+    }
+  }
+  return Array.from(map.values()).map(({ pingOnlyCount, ...rest }) => ({
+    ...rest,
+    isPingOnlyGroup: pingOnlyCount === rest.count,
+  }));
+}
+
+export function parseTestResultContent(fileName, content, zapretDir = null) {
   // Extract timestamp from test_results_YYYY-MM-DD_HH-MM-SS.txt
   const tsMatch = fileName.match(/(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})/);
   const timestamp = tsMatch ? `${tsMatch[1]}T${tsMatch[2]}:${tsMatch[3]}:${tsMatch[4]}` : null;
+
+  const targetCatLookup = new Map();
+  if (zapretDir) {
+    for (const t of parseTargetsFile(zapretDir)) {
+      targetCatLookup.set(t.id.toLowerCase(), t.category);
+    }
+  }
+
+  const resolveCategory = (id) => {
+    const fromFile = targetCatLookup.get(String(id || '').toLowerCase());
+    if (fromFile) return fromFile;
+    return classifyTargetCategory(id).id;
+  };
 
   const mainSection = content.split(/===\s*ANALYTICS\s*===/i)[0];
   const strategies = [];
@@ -584,7 +731,7 @@ export function parseTestResultContent(fileName, content) {
       const pingNum = parseInt(pingRaw, 10);
       currentTargets.push({
         id,
-        category: classifyTargetCategory(id),
+        category: resolveCategory(id),
         isPingOnly: false,
         http: http.toUpperCase(),
         tls12: tls12.toUpperCase(),
@@ -601,7 +748,7 @@ export function parseTestResultContent(fileName, content) {
       const pingNum = parseInt(pingRaw, 10);
       currentTargets.push({
         id,
-        category: classifyTargetCategory(id),
+        category: resolveCategory(id),
         isPingOnly: true,
         http: 'NA',
         tls12: 'NA',
@@ -627,7 +774,7 @@ export function computeStrategyMetrics(strategyFile, testType, targets) {
 
   for (const t of targets) {
     if (!categoryMap[t.category]) {
-      categoryMap[t.category] = { ok: 0, total: 0, pings: [] };
+      categoryMap[t.category] = { ok: 0, total: 0, pingOk: 0, pingTotal: 0, pings: [] };
     }
     const cat = categoryMap[t.category];
 
@@ -636,7 +783,12 @@ export function computeStrategyMetrics(strategyFile, testType, targets) {
       cat.pings.push(t.pingMs);
     }
 
-    if (!t.isPingOnly) {
+    if (t.isPingOnly) {
+      cat.pingTotal++;
+      if (t.pingMs !== null && t.pingMs > 0) {
+        cat.pingOk++;
+      }
+    } else {
       // Evaluate HTTP and TLS1.2; include TLS1.3 only if OS curl supports TLS1.3 (not global UNSUP)
       const checks = [t.http, t.tls12];
       if (t.tls13 === 'OK' || t.tls13 === 'ERROR') {
@@ -655,11 +807,13 @@ export function computeStrategyMetrics(strategyFile, testType, targets) {
 
   const categoryScores = {};
   for (const [catName, data] of Object.entries(categoryMap)) {
-    const pct = data.total > 0 ? Math.round((data.ok / data.total) * 100) : 100;
+    const effOk = data.total > 0 ? data.ok : data.pingOk;
+    const effTotal = data.total > 0 ? data.total : data.pingTotal;
+    const pct = effTotal > 0 ? Math.round((effOk / effTotal) * 100) : 100;
     const avgPing = data.pings.length > 0 ? Math.round(data.pings.reduce((a, b) => a + b, 0) / data.pings.length) : null;
     categoryScores[catName] = {
-      ok: data.ok,
-      total: data.total,
+      ok: effOk,
+      total: effTotal,
       pct,
       avgPingMs: avgPing,
     };
@@ -708,7 +862,7 @@ export function readTestHistory(zapretDir) {
   for (const item of history) {
     try {
       const content = fs.readFileSync(path.join(resultsDir, item.fileName), 'utf8');
-      const parsed = parseTestResultContent(item.fileName, content);
+      const parsed = parseTestResultContent(item.fileName, content, zapretDir);
       if (parsed.strategies.length > 0) {
         latestRun = parsed;
         break;
@@ -1132,7 +1286,7 @@ export function readProfiles(zapretDir) {
     defaultProf = {
       id: 'default',
       name: 'Основной',
-      description: 'Профиль по умолчанию',
+      description: '',
       isDefault: true,
       ...snap,
     };
@@ -1141,6 +1295,10 @@ export function readProfiles(zapretDir) {
   } else {
     defaultProf.isDefault = true;
     if (!defaultProf.name) defaultProf.name = 'Основной';
+    if (defaultProf.description === 'Профиль по умолчанию') {
+      defaultProf.description = '';
+      writeProfilesRaw(profiles);
+    }
   }
 
   // Ensure Default profile is always first

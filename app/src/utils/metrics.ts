@@ -1,16 +1,34 @@
-import type { StrategyItem, StrategyTestMetrics, TargetCategory, TestRunReport } from '../types';
+import type {
+  StrategyItem,
+  StrategyTestMetrics,
+  TargetCategoryMeta,
+  TestRunReport,
+} from '../types';
 
 export type SortOption = 'best' | 'latency' | 'name';
-export type GoalFilter = 'all' | 'discord' | 'youtube' | 'google' | 'cloudflare' | 'github';
+export type GoalFilter = string;
 
-export const GOAL_LABELS: Record<GoalFilter, string> = {
+export const GOAL_LABELS: Record<string, string> = {
   all: 'Все цели',
   discord: 'Discord',
   youtube: 'YouTube',
   google: 'Google',
   cloudflare: 'Cloudflare',
   github: 'GitHub',
+  dns: 'DNS Ping',
 };
+
+export function getGoalLabel(goal: string, categories?: TargetCategoryMeta[]): string {
+  if (goal === 'all') return 'Все цели';
+  const found = categories?.find((c) => c.id === goal);
+  if (found) return found.label;
+  if (GOAL_LABELS[goal]) return GOAL_LABELS[goal];
+  return goal.charAt(0).toUpperCase() + goal.slice(1);
+}
+
+export function stripBatExtension(fileName: string): string {
+  return fileName.replace(/\.bat$/i, '');
+}
 
 export function formatDuration(startedAt: number | null, nowMs: number): string {
   if (!startedAt) return '00:00:00';
@@ -59,7 +77,7 @@ export function getGoalMetrics(
       okText: `${metrics.passedChecks}/${metrics.totalChecks}`,
     };
   }
-  const cat = metrics.categoryScores[goal as TargetCategory];
+  const cat = metrics.categoryScores[goal];
   if (!cat || cat.total === 0) {
     return { scorePct: null, pingMs: metrics.avgPingMs, okText: null };
   }
@@ -84,34 +102,32 @@ export function sortStrategiesWithMetrics(
     const gb = getGoalMetrics(mb, goal);
 
     if (sortBy === 'name') {
-      return a.displayName.localeCompare(b.displayName, undefined, { numeric: true, sensitivity: 'base' });
+      return a.fileName.localeCompare(b.fileName, undefined, { numeric: true, sensitivity: 'base' });
     }
 
     if (sortBy === 'latency') {
-      // Tested working strategies with lowest ping first, untested/broken last
       const pa = ga.pingMs !== null && (ga.scorePct === null || ga.scorePct > 0) ? ga.pingMs : 99999;
       const pb = gb.pingMs !== null && (gb.scorePct === null || gb.scorePct > 0) ? gb.pingMs : 99999;
       if (pa !== pb) return pa - pb;
       const sa = ga.scorePct ?? -1;
       const sb = gb.scorePct ?? -1;
       if (sa !== sb) return sb - sa;
-      return a.displayName.localeCompare(b.displayName, undefined, { numeric: true, sensitivity: 'base' });
+      return a.fileName.localeCompare(b.fileName, undefined, { numeric: true, sensitivity: 'base' });
     }
 
-    // sortBy === 'best': highest pass score for the selected goal, tie-break by overall score then lowest ping
     const sa = ga.scorePct ?? -1;
     const sb = gb.scorePct ?? -1;
     if (sa !== sb) return sb - sa;
 
     const oa = ma?.overallScore ?? -1;
     const ob = mb?.overallScore ?? -1;
-    if (oa !== ob) return ob - oa;
+    if (oa !== ob) return oa - ob ? ob - oa : 0;
 
     const pa = ga.pingMs ?? 99999;
     const pb = gb.pingMs ?? 99999;
     if (pa !== pb) return pa - pb;
 
-    return a.displayName.localeCompare(b.displayName, undefined, { numeric: true, sensitivity: 'base' });
+    return a.fileName.localeCompare(b.fileName, undefined, { numeric: true, sensitivity: 'base' });
   });
   return copy;
 }

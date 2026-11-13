@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Gauge,
   Square,
@@ -7,6 +7,7 @@ import {
   Tv,
   Cloud,
   GitBranch,
+  Globe,
   ArrowUpDown,
   ChevronDown,
   ChevronUp,
@@ -14,17 +15,18 @@ import {
   Play,
   History,
 } from 'lucide-react';
-import type { FullAppState, TargetCategory, TestRunReport } from '../types';
+import type { FullAppState, TestRunReport } from '../types';
 import {
   buildMetricsLookup,
   classifyPingSpeed,
   classifyScoreTone,
   findBestStrategyForGoal,
+  getGoalLabel,
   getGoalMetrics,
-  GOAL_LABELS,
   GoalFilter,
   SortOption,
   sortStrategiesWithMetrics,
+  stripBatExtension,
 } from '../utils/metrics';
 
 interface TestsViewProps {
@@ -38,16 +40,7 @@ interface TestsViewProps {
   onApplyStrategy: (fileName: string, runNow: boolean) => void;
 }
 
-const GOALS: GoalFilter[] = ['all', 'discord', 'youtube', 'google', 'cloudflare', 'github'];
-
-const TARGET_CATEGORY_OPTIONS: Array<{ id: TargetCategory; label: string }> = [
-  { id: 'discord', label: 'Discord' },
-  { id: 'youtube', label: 'YouTube' },
-  { id: 'google', label: 'Google' },
-  { id: 'cloudflare', label: 'Cloudflare' },
-  { id: 'github', label: 'GitHub' },
-  { id: 'dns', label: 'DNS Ping' },
-];
+const DEFAULT_CAT_IDS = ['discord', 'youtube', 'google', 'cloudflare', 'github', 'dns'];
 
 export const TestsView: React.FC<TestsViewProps> = ({
   state,
@@ -59,16 +52,39 @@ export const TestsView: React.FC<TestsViewProps> = ({
   onStopTests,
   onApplyStrategy,
 }) => {
-  const { strategies, testHistory, testJob, settings, runtime } = state;
+  const { strategies, targetCategories, testHistory, testJob, settings, runtime } = state;
 
-  const [selectedCategories, setSelectedCategories] = useState<string[]>([
-    'discord',
-    'youtube',
-    'google',
-    'cloudflare',
-    'github',
-    'dns',
-  ]);
+  const availableCategories = useMemo(() => {
+    if (targetCategories && targetCategories.length > 0) {
+      return targetCategories;
+    }
+    return [
+      { id: 'discord', label: 'Discord', shortLabel: 'Discord', count: 0, isPingOnlyGroup: false },
+      { id: 'youtube', label: 'YouTube', shortLabel: 'YT', count: 0, isPingOnlyGroup: false },
+      { id: 'google', label: 'Google', shortLabel: 'Google', count: 0, isPingOnlyGroup: false },
+      { id: 'cloudflare', label: 'Cloudflare', shortLabel: 'CF', count: 0, isPingOnlyGroup: false },
+      { id: 'github', label: 'GitHub', shortLabel: 'GH', count: 0, isPingOnlyGroup: false },
+      { id: 'dns', label: 'DNS Ping', shortLabel: 'DNS', count: 0, isPingOnlyGroup: true },
+    ];
+  }, [targetCategories]);
+
+  const [selectedCategories, setSelectedCategories] = useState<string[]>(() =>
+    availableCategories.length > 0 ? availableCategories.map((c) => c.id) : DEFAULT_CAT_IDS
+  );
+  const knownCatsRef = useRef<Set<string>>(new Set(availableCategories.map((c) => c.id)));
+
+  // Automatically enable newly added services from targets.txt and prune removed ones
+  useEffect(() => {
+    const currentIds = availableCategories.map((c) => c.id);
+    setSelectedCategories((prev) => {
+      const added = currentIds.filter((id) => !knownCatsRef.current.has(id));
+      knownCatsRef.current = new Set(currentIds);
+      const kept = prev.filter((id) => currentIds.includes(id));
+      const merged = [...kept, ...added.filter((id) => !kept.includes(id))];
+      return merged.length > 0 ? merged : currentIds;
+    });
+  }, [availableCategories]);
+
   const [goalFilter, setGoalFilter] = useState<GoalFilter>('all');
   const [sortBy, setSortBy] = useState<SortOption>('best');
   const [onlyPassing, setOnlyPassing] = useState(false);
@@ -76,17 +92,35 @@ export const TestsView: React.FC<TestsViewProps> = ({
 
   const lookup = useMemo(() => buildMetricsLookup(activeReport), [activeReport]);
 
+  // Dynamic goal chips: 'all' + every service category in targets.txt (excluding pure DNS unless custom)
+  const goalOptions = useMemo(() => {
+    const serviceCats = availableCategories.filter((c) => c.id !== 'dns');
+    return ['all', ...serviceCats.map((c) => c.id)];
+  }, [availableCategories]);
+
+  useEffect(() => {
+    if (goalFilter !== 'all' && !goalOptions.includes(goalFilter)) {
+      setGoalFilter('all');
+    }
+  }, [goalFilter, goalOptions]);
+
+  // Pill categories shown per strategy row
+  const rowPillCategories = useMemo(
+    () => availableCategories.filter((c) => c.id !== 'dns'),
+    [availableCategories]
+  );
+
   const toggleCategoryForRun = (catId: string) => {
     setSelectedCategories((prev) =>
       prev.includes(catId) ? (prev.length > 1 ? prev.filter((c) => c !== catId) : prev) : [...prev, catId]
     );
   };
 
-  const leaderCards = useMemo(
-    () => [
+  const leaderCards = useMemo(() => {
+    const baseCards = [
       {
         key: 'all' as GoalFilter,
-        title: 'Лучшая универсальная',
+        title: 'Лучшая для всего',
         icon: <Trophy size={15} strokeWidth={1.9} />,
         winner: findBestStrategyForGoal(strategies, lookup, 'all'),
       },
@@ -114,9 +148,20 @@ export const TestsView: React.FC<TestsViewProps> = ({
         icon: <GitBranch size={15} strokeWidth={1.9} />,
         winner: findBestStrategyForGoal(strategies, lookup, 'github'),
       },
-    ],
-    [strategies, lookup]
-  );
+    ];
+
+    const builtinSet = new Set(['discord', 'youtube', 'google', 'cloudflare', 'github', 'dns']);
+    const customCards = availableCategories
+      .filter((c) => !builtinSet.has(c.id))
+      .map((c) => ({
+        key: c.id,
+        title: `Лучшая для ${c.label}`,
+        icon: <Globe size={15} strokeWidth={1.9} />,
+        winner: findBestStrategyForGoal(strategies, lookup, c.id),
+      }));
+
+    return [...baseCards, ...customCards];
+  }, [strategies, lookup, availableCategories]);
 
   const sortedStrategies = useMemo(() => {
     const ordered = sortStrategiesWithMetrics(strategies, lookup, goalFilter, sortBy);
@@ -141,11 +186,8 @@ export const TestsView: React.FC<TestsViewProps> = ({
             gap: '12px',
           }}
         >
-          <div>
-            <div style={{ fontSize: '15px', fontWeight: 600 }}>Проверка задержки и доступности целей</div>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '2px' }}>
-              Выберите сервисы для проверки и запустите замер соединения по стратегиям из папки zapret
-            </div>
+          <div style={{ fontSize: '15.5px', fontWeight: 600 }}>
+            Проверка задержки и доступности сервисов
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -192,10 +234,10 @@ export const TestsView: React.FC<TestsViewProps> = ({
         </div>
 
         <div style={{ marginTop: '14px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '12px', color: 'var(--m3-text-muted)', marginRight: '4px' }}>
-            Проверяемые категории:
+          <span style={{ fontSize: '12.5px', color: 'var(--m3-text-muted)', marginRight: '2px' }}>
+            Категории:
           </span>
-          {TARGET_CATEGORY_OPTIONS.map((cat) => {
+          {availableCategories.map((cat) => {
             const active = selectedCategories.includes(cat.id);
             return (
               <button
@@ -223,7 +265,10 @@ export const TestsView: React.FC<TestsViewProps> = ({
                 marginBottom: '6px',
               }}
             >
-              <span>Тестируется стратегия: {testJob.currentStrategy || 'запуск...'}</span>
+              <span>
+                Тестируется стратегия:{' '}
+                {testJob.currentStrategy ? stripBatExtension(testJob.currentStrategy) : 'запуск...'}
+              </span>
               <span className="mono">{testJob.progressPct}%</span>
             </div>
             <div className="progress-track">
@@ -254,7 +299,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
               </div>
 
               <div className="leader-strat-name">
-                {card.winner ? card.winner.strategy.displayName : 'Нет данных'}
+                {card.winner ? stripBatExtension(card.winner.strategy.fileName) : 'Нет данных'}
               </div>
 
               <div className="leader-meta">
@@ -284,14 +329,14 @@ export const TestsView: React.FC<TestsViewProps> = ({
       <div className="m3-card">
         <div className="toolbar-bar">
           <div className="chip-row">
-            {GOALS.map((g) => (
+            {goalOptions.map((g) => (
               <button
                 key={g}
                 type="button"
                 className={`m3-chip ${goalFilter === g ? 'selected' : ''}`}
                 onClick={() => setGoalFilter(g)}
               >
-                {GOAL_LABELS[g]}
+                {getGoalLabel(g, availableCategories)}
               </button>
             ))}
           </div>
@@ -314,7 +359,9 @@ export const TestsView: React.FC<TestsViewProps> = ({
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value as SortOption)}
               >
-                <option value="best">По качеству соединения ({GOAL_LABELS[goalFilter]})</option>
+                <option value="best">
+                  По качеству соединения ({getGoalLabel(goalFilter, availableCategories)})
+                </option>
                 <option value="latency">По минимальной задержке (мс)</option>
                 <option value="name">По названию (А-Я)</option>
               </select>
@@ -329,6 +376,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
             const isExpanded = expandedRow === s.fileName;
             const isSelected = settings.selectedStrategy === s.fileName;
             const isRunningThis = runtime.running && runtime.activeStrategy === s.fileName;
+            const fullStrategyName = stripBatExtension(s.fileName);
 
             const filteredTargets = m
               ? goalFilter === 'all'
@@ -353,7 +401,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
                 <div
                   style={{
                     display: 'grid',
-                    gridTemplateColumns: 'minmax(170px, 1.2fr) minmax(210px, 1.7fr) 96px auto',
+                    gridTemplateColumns: 'minmax(175px, 1.25fr) minmax(210px, 1.7fr) 96px auto',
                     alignItems: 'center',
                     gap: '12px',
                     cursor: 'pointer',
@@ -362,7 +410,9 @@ export const TestsView: React.FC<TestsViewProps> = ({
                 >
                   <div style={{ minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
-                      <span className="strategy-title">{s.displayName}</span>
+                      <span className="strategy-title" title={fullStrategyName}>
+                        {fullStrategyName}
+                      </span>
                       {gStat.scorePct !== null && (
                         <span className={`score-pill ${classifyScoreTone(gStat.scorePct)}`}>
                           {gStat.scorePct}% ({gStat.okText})
@@ -374,19 +424,12 @@ export const TestsView: React.FC<TestsViewProps> = ({
 
                   <div className="category-pills">
                     {m ? (
-                      (['discord', 'youtube', 'google', 'cloudflare', 'github'] as const).map((catKey) => {
-                        const cs = m.categoryScores[catKey];
+                      rowPillCategories.map((cat) => {
+                        const cs = m.categoryScores[cat.id];
                         if (!cs || cs.total === 0) return null;
-                        const labelMap: Record<string, string> = {
-                          discord: 'Discord',
-                          youtube: 'YouTube',
-                          google: 'Google',
-                          cloudflare: 'CF',
-                          github: 'GitHub',
-                        };
                         return (
-                          <span key={catKey} className={`score-pill ${classifyScoreTone(cs.pct)}`}>
-                            {labelMap[catKey]} {cs.ok}/{cs.total}
+                          <span key={cat.id} className={`score-pill ${classifyScoreTone(cs.pct)}`}>
+                            {cat.shortLabel} {cs.ok}/{cs.total}
                           </span>
                         );
                       })

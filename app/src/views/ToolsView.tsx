@@ -169,12 +169,14 @@ export const ToolsView: React.FC<ToolsViewProps> = ({ onNotify }) => {
             </button>
           </div>
           {hostsReport.missingLines.length > 0 && (
-            <textarea
-              readOnly
-              className="m3-textarea"
-              style={{ minHeight: '150px' }}
-              value={hostsReport.missingLines.join('\n')}
-            />
+            <div className="m3-textarea-shell">
+              <textarea
+                readOnly
+                className="m3-textarea"
+                style={{ minHeight: '150px', height: '180px' }}
+                value={hostsReport.missingLines.join('\n')}
+              />
+            </div>
           )}
         </div>
       )}

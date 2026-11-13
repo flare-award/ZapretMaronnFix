@@ -89,6 +89,7 @@ pre,
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+  margin-block: 6px;
 }
 ::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.12);
@@ -312,12 +313,16 @@ pre,
 }
 
 .content-container {
-  max-width: 1120px;
+  max-width: 1280px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 16px;
   animation: fadeSlideIn 190ms var(--ease-m3);
+}
+
+.content-container.connect-container {
+  max-width: 1360px;
 }
 
 @keyframes fadeSlideIn {
@@ -351,7 +356,7 @@ pre,
 /* Happ-style Connection Hero Card */
 .connect-hero {
   display: grid;
-  grid-template-columns: minmax(250px, 310px) minmax(0, 1fr);
+  grid-template-columns: minmax(290px, 368px) minmax(0, 1fr);
   gap: 20px;
   align-items: stretch;
 }
@@ -1025,13 +1030,42 @@ pre,
   color: var(--m3-on-primary-container);
 }
 
+.m3-textarea-shell {
+  width: 100%;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--m3-outline-strong);
+  background: var(--m3-surface-lowest);
+  overflow: hidden;
+  padding: 4px 5px 4px 0;
+  transition: border-color 150ms var(--ease-m3);
+}
+
+.m3-textarea-shell:focus-within {
+  border-color: var(--m3-primary);
+}
+
+.m3-textarea-shell .m3-textarea {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  resize: none;
+  display: block;
+  min-height: 270px;
+  height: clamp(270px, calc(100vh - 305px), 520px);
+}
+
+.domain-items-viewport {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
 .domain-items-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
   gap: 7px;
-  max-height: 410px;
+  max-height: clamp(260px, calc(100vh - 315px), 460px);
   overflow-y: auto;
-  padding-right: 4px;
+  padding: 2px 6px 2px 0;
 }
 
 .domain-chip-item {
@@ -1141,11 +1175,11 @@ pre,
   flex-shrink: 0;
 }
 
-/* New Default Split Connect Layout: Left (Power + 4 Tiles) | Right (Strategies List) */
+/* New Default Split Connect Layout: Left (Power + Tiles) | Right (Strategies List) */
 .connect-split-layout {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: 368px minmax(0, 1fr);
+  gap: 18px;
   align-items: start;
 }
 
@@ -1168,9 +1202,9 @@ pre,
 }
 
 .connect-split-layout .strategy-row {
-  grid-template-columns: 20px minmax(130px, 1.15fr) minmax(135px, 1.25fr) 78px auto;
-  gap: 10px;
-  padding: 10px 12px;
+  grid-template-columns: 20px minmax(165px, 1.3fr) minmax(145px, 1.3fr) 80px auto;
+  gap: 11px;
+  padding: 10px 13px;
 }
 
 /* Profiles Grid & Cards */
@@ -1178,6 +1212,7 @@ pre,
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 12px;
+  align-items: stretch;
 }
 
 .profile-card {
@@ -1196,6 +1231,50 @@ pre,
 .profile-card.active {
   background: linear-gradient(180deg, rgba(29, 52, 88, 0.36) 0%, var(--m3-surface) 100%);
   border-color: rgba(168, 199, 250, 0.42);
+}
+
+.profile-add-card {
+  background: var(--m3-surface-low);
+  border: 1px dashed var(--m3-outline-strong);
+  border-radius: var(--radius-xl);
+  padding: 16px 18px;
+  min-height: 126px;
+  align-self: center;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--m3-text-secondary);
+  transition: background-color 150ms var(--ease-m3), border-color 150ms var(--ease-m3), color 150ms var(--ease-m3), transform 120ms var(--ease-m3);
+}
+
+.profile-add-card:hover:not(:disabled) {
+  background: rgba(29, 52, 88, 0.28);
+  border-color: rgba(168, 199, 250, 0.45);
+  color: var(--m3-text);
+}
+
+.profile-add-card:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.profile-add-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  background: var(--m3-surface-high);
+  color: var(--m3-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 150ms var(--ease-m3);
+}
+
+.profile-add-card:hover:not(:disabled) .profile-add-icon {
+  background: var(--m3-primary-container);
 }
 
 @media (max-width: 1140px) {

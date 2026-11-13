@@ -162,7 +162,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
                 Показывать плашки лучших стратегий во вкладке «Тесты и цели»
               </div>
               <div className="m3-switch-desc">
-                Отображает карточки «Лучшая универсальная», «Лучшая для Discord», «Лучшая для YouTube», «Лучшая для Cloudflare» и «Лучшая для GitHub».
+                Отображает карточки «Лучшая для всего», «Лучшая для Discord», «Лучшая для YouTube», «Лучшая для Cloudflare» и «Лучшая для GitHub».
               </div>
             </div>
             <button

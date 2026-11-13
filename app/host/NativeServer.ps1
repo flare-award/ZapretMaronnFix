@@ -93,7 +93,7 @@ function Get-ProfilesList($settings) {
     $defaultProf = [ordered]@{
         id = "default"
         name = "Основной"
-        description = "Профиль по умолчанию"
+        description = ""
         isDefault = $true
         strategy = $settings.selectedStrategy
         gameFilterMode = $gf.mode

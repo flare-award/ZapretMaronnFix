@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Power,
   Search,
@@ -6,13 +6,10 @@ import {
   ArrowUpDown,
   Gamepad2,
   Network,
-  Layers,
   Terminal,
   Play,
-  RotateCw,
   X,
   Check,
-  Activity,
   Bookmark,
 } from 'lucide-react';
 import type {
@@ -27,11 +24,12 @@ import {
   classifyPingSpeed,
   classifyScoreTone,
   formatDuration,
+  getGoalLabel,
   getGoalMetrics,
-  GOAL_LABELS,
   GoalFilter,
   SortOption,
   sortStrategiesWithMetrics,
+  stripBatExtension,
 } from '../utils/metrics';
 
 interface ConnectViewProps {
@@ -47,8 +45,6 @@ interface ConnectViewProps {
   onRunQuickTest: (strategies?: string[]) => void;
   onNavigate: (tab: string) => void;
 }
-
-const GOALS: GoalFilter[] = ['all', 'discord', 'youtube', 'google', 'cloudflare', 'github'];
 
 export const ConnectView: React.FC<ConnectViewProps> = ({
   state,
@@ -68,8 +64,33 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
   const [sortBy, setSortBy] = useState<SortOption>('best');
   const [inspectStrategy, setInspectStrategy] = useState<StrategyItem | null>(null);
 
-  const { runtime, settings, strategies, profiles, activeProfileId, filters, zapretInfo, testJob } = state;
+  const { runtime, settings, strategies, profiles, activeProfileId, filters, targetCategories, testJob } = state;
   const metricsLookup = useMemo(() => buildMetricsLookup(activeReport), [activeReport]);
+
+  // Dynamic goals from targets.txt (excluding pure DNS ping group unless user explicitly added custom service)
+  const goalOptions = useMemo(() => {
+    const serviceCats = targetCategories.filter((c) => c.id !== 'dns');
+    return ['all', ...serviceCats.map((c) => c.id)];
+  }, [targetCategories]);
+
+  useEffect(() => {
+    if (goal !== 'all' && !goalOptions.includes(goal)) {
+      setGoal('all');
+    }
+  }, [goal, goalOptions]);
+
+  // Pill categories shown on each strategy row (includes any custom services added to targets.txt)
+  const pillCategories = useMemo(() => {
+    const base = targetCategories.filter((c) => c.id !== 'dns' && c.id !== 'google');
+    return base.length > 0
+      ? base
+      : [
+          { id: 'discord', label: 'Discord', shortLabel: 'Discord', count: 0, isPingOnlyGroup: false },
+          { id: 'youtube', label: 'YouTube', shortLabel: 'YT', count: 0, isPingOnlyGroup: false },
+          { id: 'cloudflare', label: 'Cloudflare', shortLabel: 'CF', count: 0, isPingOnlyGroup: false },
+          { id: 'github', label: 'GitHub', shortLabel: 'GH', count: 0, isPingOnlyGroup: false },
+        ];
+  }, [targetCategories]);
 
   const currentStrategyObj = useMemo(
     () =>
@@ -84,8 +105,8 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
     const base = q
       ? strategies.filter(
           (s) =>
+            stripBatExtension(s.fileName).toLowerCase().includes(q) ||
             s.displayName.toLowerCase().includes(q) ||
-            s.fileName.toLowerCase().includes(q) ||
             s.engineSummary.toLowerCase().includes(q)
         )
       : strategies;
@@ -105,52 +126,10 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
     { value: 'any', label: 'Any' },
   ];
 
-  const selectedMetrics = currentStrategyObj
-    ? metricsLookup.get(currentStrategyObj.fileName.toLowerCase())
-    : undefined;
-
   const isSplitLayout = settings.connectLayout !== 'stacked';
 
   const powerPanelEl = (
     <div className={`power-panel ${runtime.running ? 'connected' : ''}`}>
-      {/* Quick Profile Selector inside Power Card */}
-      <div
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '8px',
-          marginBottom: '2px',
-        }}
-      >
-        <div className="input-wrap" style={{ flex: 1 }}>
-          <Bookmark size={13} className="input-icon" />
-          <select
-            className="m3-select"
-            style={{ width: '100%', height: '31px', paddingLeft: '30px', fontSize: '12.5px' }}
-            disabled={busy}
-            value={activeProfileId}
-            onChange={(e) => onSelectProfile(e.target.value)}
-            title="Быстрое переключение профиля настроек"
-          >
-            {profiles.map((p) => (
-              <option key={p.id} value={p.id}>
-                Профиль: {p.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <button
-          type="button"
-          className="m3-chip"
-          style={{ height: '31px', padding: '0 10px', fontSize: '12px' }}
-          onClick={() => onNavigate('profiles')}
-        >
-          Профили
-        </button>
-      </div>
-
       <div className="power-button-ring">
         <button
           type="button"
@@ -171,58 +150,51 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
               ? 'Обход активен'
               : 'Обход остановлен'}
         </div>
-        <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '3px' }}>
-          {currentStrategyObj ? currentStrategyObj.displayName : 'Стратегии не найдены'}
+        <div
+          className="mono"
+          style={{ fontSize: '12.5px', color: 'var(--m3-text-secondary)', marginTop: '4px' }}
+        >
+          {currentStrategyObj ? stripBatExtension(currentStrategyObj.fileName) : 'Стратегии не найдены'}
         </div>
       </div>
 
-      <div className="power-timer">
-        {runtime.running ? formatDuration(runtime.startedAt, nowMs) : 'Прямой запуск без службы'}
-      </div>
+      {runtime.running && (
+        <div className="power-timer">{formatDuration(runtime.startedAt, nowMs)}</div>
+      )}
     </div>
   );
 
-  const fourTilesEl = (
+  const quickTilesEl = (
     <div className={isSplitLayout ? 'quick-tiles-stack' : 'quick-tiles-grid'}>
-      {/* 1. Selected Strategy Tile */}
+      {/* 1. Profile Switcher Tile */}
       <div className="quick-tile">
         <div className="tile-head">
           <span className="tile-label">
-            <Layers size={15} strokeWidth={1.85} />
-            Выбранная стратегия
+            <Bookmark size={15} strokeWidth={1.85} />
+            Профиль
           </span>
-          {currentStrategyObj && (
+          <button
+            type="button"
+            className="m3-chip"
+            style={{ height: '25px', fontSize: '11.5px', padding: '0 9px' }}
+            onClick={() => onNavigate('profiles')}
+          >
+            Профили
+          </button>
+        </div>
+        <div className="chip-row">
+          {profiles.map((p) => (
             <button
+              key={p.id}
               type="button"
-              className="btn-icon"
-              title="Просмотреть параметры запуска winws.exe"
-              onClick={() => setInspectStrategy(currentStrategyObj)}
+              disabled={busy}
+              className={`m3-chip ${activeProfileId === p.id ? 'selected' : ''}`}
+              style={{ height: '29px', padding: '0 11px', fontSize: '12.5px' }}
+              onClick={() => onSelectProfile(p.id)}
             >
-              <Terminal size={14} strokeWidth={1.85} />
+              {p.name}
             </button>
-          )}
-        </div>
-        <div>
-          <div className="tile-value">
-            {currentStrategyObj ? currentStrategyObj.displayName : 'Не выбрана'}
-          </div>
-          <div className="tile-sub mono">
-            {currentStrategyObj ? currentStrategyObj.engineSummary : 'Проверьте путь к папке zapret'}
-          </div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-          {selectedMetrics ? (
-            <>
-              <span className={`score-pill ${classifyScoreTone(selectedMetrics.overallScore)}`}>
-                Соединение {selectedMetrics.overallScore}%
-              </span>
-              {selectedMetrics.avgPingMs !== null && (
-                <span className="score-pill">Средний пинг {selectedMetrics.avgPingMs} мс</span>
-              )}
-            </>
-          ) : (
-            <span className="tile-sub">Нажмите "Проверить все" для замера задержки</span>
-          )}
+          ))}
         </div>
       </div>
 
@@ -249,7 +221,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
               type="button"
               disabled={busy}
               className={`m3-chip ${filters.gameFilter.mode === gm.value ? 'selected' : ''}`}
-              style={{ height: '28px', padding: '0 10px', fontSize: '12px' }}
+              style={{ height: '29px', padding: '0 11px', fontSize: '12.5px' }}
               onClick={() => onQuickGameMode(gm.value)}
             >
               {gm.label}
@@ -284,45 +256,12 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
               type="button"
               disabled={busy}
               className={`m3-chip ${filters.ipsetFilter.mode === im.value ? 'selected' : ''}`}
-              style={{ height: '28px', padding: '0 11px', fontSize: '12px' }}
+              style={{ height: '29px', padding: '0 12px', fontSize: '12.5px' }}
               onClick={() => onQuickIpsetMode(im.value)}
             >
               {im.label}
             </button>
           ))}
-        </div>
-        <div className="tile-sub">
-          {filters.ipsetFilter.mode === 'none' && 'Только по спискам доменов (рекомендуется для игр)'}
-          {filters.ipsetFilter.mode === 'loaded' &&
-            `Активна база подсетей (${filters.ipsetFilter.entriesCount} CIDR)`}
-          {filters.ipsetFilter.mode === 'any' && 'Перехват всех IP-адресов по целевым портам'}
-        </div>
-      </div>
-
-      {/* 4. Isolated Zapret Tile */}
-      <div className="quick-tile">
-        <div className="tile-head">
-          <span className="tile-label">
-            <Activity size={15} strokeWidth={1.85} />
-            Zapret (изолированная папка)
-          </span>
-          <button
-            type="button"
-            className="m3-chip"
-            style={{ height: '25px', fontSize: '11.5px', padding: '0 9px' }}
-            onClick={() => onNavigate('settings')}
-          >
-            Настройки
-          </button>
-        </div>
-        <div>
-          <div className="tile-value mono">v{zapretInfo.localVersion}</div>
-          <div className="tile-sub">
-            {zapretInfo.strategyCount} стратегий / {zapretInfo.binCount} бинарных фейков
-          </div>
-        </div>
-        <div className="tile-sub mono" title={zapretInfo.zapretPath}>
-          Папка: {zapretInfo.zapretPath}
         </div>
       </div>
     </div>
@@ -332,14 +271,14 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
     <div className="m3-card">
       <div className="toolbar-bar">
         <div className="chip-row">
-          {GOALS.map((g) => (
+          {goalOptions.map((g) => (
             <button
               key={g}
               type="button"
               className={`m3-chip ${goal === g ? 'selected' : ''}`}
               onClick={() => setGoal(g)}
             >
-              {GOAL_LABELS[g]}
+              {getGoalLabel(g, targetCategories)}
             </button>
           ))}
         </div>
@@ -353,7 +292,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
               placeholder="Поиск стратегии..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              style={{ width: '175px' }}
+              style={{ width: '185px' }}
             />
           </div>
 
@@ -370,16 +309,6 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
               <option value="name">По названию (А-Я)</option>
             </select>
           </div>
-
-          <button
-            type="button"
-            className="btn btn-tonal"
-            disabled={testJob.running || strategies.length === 0}
-            onClick={() => onRunQuickTest()}
-          >
-            {testJob.running ? <RotateCw size={15} /> : <Gauge size={15} />}
-            {testJob.running ? `Тест ${testJob.progressPct}%` : 'Проверить все'}
-          </button>
         </div>
       </div>
 
@@ -394,7 +323,10 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
               marginBottom: '6px',
             }}
           >
-            <span>Проверка стратегии: {testJob.currentStrategy || 'подготовка...'}</span>
+            <span>
+              Проверка стратегии:{' '}
+              {testJob.currentStrategy ? stripBatExtension(testJob.currentStrategy) : 'подготовка...'}
+            </span>
             <span className="mono">
               {testJob.completedCount} / {testJob.totalCount}
             </span>
@@ -414,13 +346,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
           const isRunningThis = runtime.running && runtime.activeStrategy === s.fileName;
           const m = metricsLookup.get(s.fileName.toLowerCase());
           const goalStat = getGoalMetrics(m, goal);
-
-          const catOrder: Array<{ key: 'discord' | 'youtube' | 'cloudflare' | 'github'; short: string }> = [
-            { key: 'discord', short: 'Discord' },
-            { key: 'youtube', short: 'YT' },
-            { key: 'cloudflare', short: 'CF' },
-            { key: 'github', short: 'GH' },
-          ];
+          const fullStrategyName = stripBatExtension(s.fileName);
 
           return (
             <div
@@ -434,7 +360,9 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
 
               <div className="strategy-main">
                 <div className="strategy-name-line">
-                  <span className="strategy-title">{s.displayName}</span>
+                  <span className="strategy-title" title={fullStrategyName}>
+                    {fullStrategyName}
+                  </span>
                   {isRunningThis && (
                     <span className="score-pill good" style={{ fontSize: '10.5px' }}>
                       Активна
@@ -443,7 +371,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
                   {goal !== 'all' && goalStat.scorePct === 100 && (
                     <span className="score-pill good" style={{ fontSize: '10.5px' }}>
                       <Check size={11} strokeWidth={2.3} />
-                      {GOAL_LABELS[goal]}
+                      {getGoalLabel(goal, targetCategories)}
                     </span>
                   )}
                 </div>
@@ -452,12 +380,12 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
 
               <div className="category-pills">
                 {m ? (
-                  catOrder.map(({ key, short }) => {
-                    const cs = m.categoryScores[key];
+                  pillCategories.map((cat) => {
+                    const cs = m.categoryScores[cat.id];
                     if (!cs || cs.total === 0) return null;
                     return (
-                      <span key={key} className={`score-pill ${classifyScoreTone(cs.pct)}`}>
-                        {short} {cs.ok}/{cs.total}
+                      <span key={cat.id} className={`score-pill ${classifyScoreTone(cs.pct)}`}>
+                        {cat.shortLabel} {cs.ok}/{cs.total}
                       </span>
                     );
                   })
@@ -512,12 +440,12 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
   );
 
   return (
-    <div className="content-container">
+    <div className="content-container connect-container">
       {isSplitLayout ? (
         <div className="connect-split-layout">
           <div className="connect-left-col">
             {powerPanelEl}
-            {fourTilesEl}
+            {quickTilesEl}
           </div>
           <div className="connect-right-col">{strategiesCardEl}</div>
         </div>
@@ -525,7 +453,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
         <>
           <div className="connect-hero">
             {powerPanelEl}
-            {fourTilesEl}
+            {quickTilesEl}
           </div>
           {strategiesCardEl}
         </>
@@ -537,9 +465,11 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
           <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
               <div>
-                <div style={{ fontSize: '15.5px', fontWeight: 600 }}>{inspectStrategy.fileName}</div>
+                <div style={{ fontSize: '15.5px', fontWeight: 600 }}>
+                  {stripBatExtension(inspectStrategy.fileName)}
+                </div>
                 <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '2px' }}>
-                  Развёрнутая команда прямого запуска процесса winws.exe (без установки системной службы)
+                  Развёрнутая команда запуска процесса winws.exe
                 </div>
               </div>
               <button type="button" className="btn-icon" onClick={() => setInspectStrategy(null)}>
@@ -547,12 +477,14 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
               </button>
             </div>
 
-            <textarea
-              readOnly
-              className="m3-textarea"
-              style={{ minHeight: '220px' }}
-              value={inspectStrategy.commandPreview}
-            />
+            <div className="m3-textarea-shell">
+              <textarea
+                readOnly
+                className="m3-textarea"
+                style={{ minHeight: '220px', height: '240px' }}
+                value={inspectStrategy.commandPreview}
+              />
+            </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
               <button type="button" className="btn btn-surface" onClick={() => setInspectStrategy(null)}>

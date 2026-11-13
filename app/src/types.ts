@@ -1,6 +1,6 @@
 export type GameFilterMode = 'disabled' | 'all' | 'tcp' | 'udp';
 export type IpsetFilterMode = 'none' | 'loaded' | 'any';
-export type TargetCategory = 'discord' | 'youtube' | 'google' | 'cloudflare' | 'github' | 'dns' | 'custom';
+export type TargetCategory = string;
 export type ConnectLayoutMode = 'split' | 'stacked';
 
 export interface AppSettings {
@@ -115,6 +115,14 @@ export interface ListDocument extends ListMeta {
   content: string;
 }
 
+export interface TargetCategoryMeta {
+  id: string;
+  label: string;
+  shortLabel: string;
+  count: number;
+  isPingOnlyGroup: boolean;
+}
+
 export interface TargetTestItem {
   id: string;
   category: TargetCategory;
@@ -140,7 +148,7 @@ export interface StrategyTestMetrics {
   passedChecks: number;
   totalChecks: number;
   avgPingMs: number | null;
-  categoryScores: Partial<Record<TargetCategory, CategoryScore>>;
+  categoryScores: Record<string, CategoryScore | undefined>;
   targets: TargetTestItem[];
 }
 
@@ -184,6 +192,7 @@ export interface FullAppState {
   activeProfileId: string;
   filters: FiltersState;
   listsMeta: ListMeta[];
+  targetCategories: TargetCategoryMeta[];
   testHistory: TestHistoryEntry[];
   latestTestRun: TestRunReport | null;
   testJob: TestJobState;

@@ -22,6 +22,7 @@ import {
   restoreUserLists,
   readTestHistory,
   parseTestResultContent,
+  readTargetCategories,
   checkZapretUpdates,
   updateRemoteIpsetList,
   checkRemoteHostsDiff,
@@ -125,6 +126,7 @@ function buildFullState() {
     ? readActiveFakes(zapretDir)
     : { discordCurrent: null, gameCurrent: null, availableBins: [] };
   const listsMeta = zapretInfo.valid ? readListsMeta(zapretDir) : [];
+  const targetCategories = zapretInfo.valid ? readTargetCategories(zapretDir) : [];
   const { history: testHistory, latestRun } = zapretInfo.valid
     ? readTestHistory(zapretDir)
     : { history: [], latestRun: null };
@@ -160,6 +162,7 @@ function buildFullState() {
       activeFakes,
     },
     listsMeta,
+    targetCategories,
     testHistory,
     latestTestRun: effectiveLatestRun,
     testJob,
@@ -407,6 +410,7 @@ async function handleApi(req, res, pathname) {
   if (method === 'POST' && pathname === '/api/filters/ipset-update') {
     const settings = loadSettings();
     const result = await updateRemoteIpsetList(settings.zapretDir);
+    syncCurrentStateToActiveProfile(settings.zapretDir);
     if (settings.autoRestartOnFilterChange) {
       await restartIfRunning();
     }
@@ -489,7 +493,7 @@ async function handleApi(req, res, pathname) {
       return;
     }
     const content = fs.readFileSync(fullPath, 'utf8');
-    sendJson(res, 200, parseTestResultContent(fileName, content));
+    sendJson(res, 200, parseTestResultContent(fileName, content, settings.zapretDir));
     return;
   }
 

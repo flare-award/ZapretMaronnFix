@@ -212,7 +212,7 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                       onClick={() => handleSave(rawText, true)}
                     >
                       <Sparkles size={14} />
-                      Очистить формат
+                      Очистить мусор
                     </button>
                   )}
 
@@ -263,24 +263,26 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                     </div>
                   </div>
 
-                  <div className="domain-items-grid">
-                    {visibleEntries.slice(0, 300).map((entry) => (
-                      <div key={entry} className="domain-chip-item">
-                        <span className="domain-chip-text" title={entry}>
-                          {entry}
-                        </span>
-                        <button
-                          type="button"
-                          className="btn-icon"
-                          style={{ width: '25px', height: '25px', borderRadius: '7px' }}
-                          title="Удалить запись"
-                          disabled={saving}
-                          onClick={() => handleRemoveEntry(entry)}
-                        >
-                          <Trash2 size={13} />
-                        </button>
-                      </div>
-                    ))}
+                  <div className="domain-items-viewport">
+                    <div className="domain-items-grid">
+                      {visibleEntries.slice(0, 300).map((entry) => (
+                        <div key={entry} className="domain-chip-item">
+                          <span className="domain-chip-text" title={entry}>
+                            {entry}
+                          </span>
+                          <button
+                            type="button"
+                            className="btn-icon"
+                            style={{ width: '25px', height: '25px', borderRadius: '7px' }}
+                            title="Удалить запись"
+                            disabled={saving}
+                            onClick={() => handleRemoveEntry(entry)}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
 
                   {visibleEntries.length > 300 && (
@@ -297,12 +299,14 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                 </>
               ) : (
                 <div>
-                  <textarea
-                    className="m3-textarea"
-                    value={rawText}
-                    onChange={(e) => setRawText(e.target.value)}
-                    spellCheck={false}
-                  />
+                  <div className="m3-textarea-shell">
+                    <textarea
+                      className="m3-textarea"
+                      value={rawText}
+                      onChange={(e) => setRawText(e.target.value)}
+                      spellCheck={false}
+                    />
+                  </div>
                   <div
                     style={{
                       marginTop: '8px',
