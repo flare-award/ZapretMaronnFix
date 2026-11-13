@@ -653,6 +653,7 @@ export const App: React.FC = () => {
               appUpdateInfo={appUpdateInfo}
               checkingAppUpdate={checkingAppUpdate}
               onCheckAppUpdate={() => handleCheckAppUpdate(false)}
+              onUpdateInfoLoaded={setUpdateInfo}
               onUpdateSettings={handleUpdateSettings}
               onStateUpdated={setState}
               onNotify={notify}

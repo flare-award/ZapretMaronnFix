@@ -30,6 +30,7 @@ interface UpdatesSettingsViewProps {
   appUpdateInfo: AppProgramUpdateResult | null;
   checkingAppUpdate: boolean;
   onCheckAppUpdate: () => void;
+  onUpdateInfoLoaded: (info: UpdateCheckResult) => void;
   onUpdateSettings: (patch: Partial<AppSettings>) => void;
   onStateUpdated: (nextState: FullAppState) => void;
   onNotify: (msg: string, isError?: boolean) => void;
@@ -56,6 +57,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
   appUpdateInfo,
   checkingAppUpdate,
   onCheckAppUpdate,
+  onUpdateInfoLoaded,
   onUpdateSettings,
   onStateUpdated,
   onNotify,
@@ -63,6 +65,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
   const { settings, zapretInfo, appUpdateState } = state;
   const [customDir, setCustomDir] = useState<string>(settings.zapretDir);
   const [backupBusy, setBackupBusy] = useState<boolean>(false);
+  const [downloadingZapretZip, setDownloadingZapretZip] = useState<boolean>(false);
   const [installingAppUpdate, setInstallingAppUpdate] = useState<boolean>(false);
   const [installPhaseText, setInstallPhaseText] = useState<string>('');
   const zipInputRef = useRef<HTMLInputElement | null>(null);
@@ -73,6 +76,24 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
 
   const handleOpenExternal = (url: string) => {
     api.openExternalUrl(url);
+  };
+
+  const handleDownloadLatestZapret = async () => {
+    if (state.platform.os !== 'win32') {
+      window.open('/api/updates/download-latest', '_blank', 'noopener,noreferrer');
+    }
+    setDownloadingZapretZip(true);
+    try {
+      const res = await api.downloadLatestZapretZip();
+      if (res.updateInfo) {
+        onUpdateInfoLoaded(res.updateInfo);
+      }
+      onNotify(`Запущено скачивание архива ${res.assetName || 'Zapret (.zip)'}`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      setDownloadingZapretZip(false);
+    }
   };
 
   const waitForRestartAndReload = (previousBootId?: string) => {
@@ -287,7 +308,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
               onClick={onCheckAppUpdate}
             >
               <RefreshCw size={14} className={checkingAppUpdate ? 'spin-icon' : ''} />
-              {checkingAppUpdate ? 'Проверка GitHub...' : 'Проверить обновление программы'}
+              {checkingAppUpdate ? 'Проверка...' : 'Проверить обновление'}
             </button>
           </div>
         </div>
@@ -329,12 +350,21 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             >
               {appUpdateInfo ? `#${appUpdateInfo.latestShortSha}` : 'Нажмите проверить'}
             </div>
-            <div style={{ fontSize: '11.5px', color: 'var(--m3-text-muted)', marginTop: '4px' }}>
+            <div
+              style={{
+                fontSize: '11.5px',
+                color: 'var(--m3-text-muted)',
+                marginTop: '4px',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
               {appUpdateInfo
                 ? appUpdateInfo.updateAvailable
                   ? `Доступно обновление (файлов: ${appUpdateInfo.changedFilesCount})`
                   : 'Установлена последняя версия программы'
-                : `Источник: ${zapretInfo.links.userRepo.replace('https://github.com/', '')}`}
+                : 'Источник: flare-award/ZapretMaronnFix'}
             </div>
           </div>
 
@@ -409,7 +439,11 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
           <button
             type="button"
             className="btn btn-surface"
-            onClick={() => handleOpenExternal(appUpdateInfo?.htmlUrl || zapretInfo.links.userRepo)}
+            onClick={() =>
+              handleOpenExternal(
+                'https://github.com/flare-award/ZapretMaronnFix/tree/arena/9383b414-zapretmaronnfix'
+              )
+            }
           >
             <ExternalLink size={14} />
             Репозиторий программы на GitHub
@@ -550,17 +584,12 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             <div className="brand-mark">
               {updateInfo?.updateAvailable ? <ArrowUpCircle size={19} /> : <CheckCircle2 size={19} />}
             </div>
-            <div>
-              <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Версия Zapret и проверка обновлений</div>
-              <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
-                Все файлы Zapret вынесены в отдельную папку zapret для обновления простой заменой файлов
-              </div>
-            </div>
+            <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Версия Zapret и проверка обновлений</div>
           </div>
 
           <button type="button" className="btn btn-tonal" disabled={checkingUpdate} onClick={onCheckUpdate}>
             <RefreshCw size={14} className={checkingUpdate ? 'spin-icon' : ''} />
-            {checkingUpdate ? 'Проверка релизов...' : 'Проверить релизы Zapret'}
+            {checkingUpdate ? 'Проверка...' : 'Проверить обновление'}
           </button>
         </div>
 
@@ -573,7 +602,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
           }}
         >
           <div className="m3-card-compact" style={{ background: 'var(--m3-surface-low)' }}>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>Текущая локальная версия</div>
+            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>Текущая версия</div>
             <div className="mono" style={{ fontSize: '20px', fontWeight: 700, marginTop: '4px' }}>
               v{zapretInfo.localVersion}
             </div>
@@ -583,7 +612,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
           </div>
 
           <div className="m3-card-compact" style={{ background: 'var(--m3-surface-low)' }}>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>Последний релиз на GitHub</div>
+            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>Последняя версия</div>
             <div
               className="mono"
               style={{
@@ -634,42 +663,23 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             marginBottom: updateInfo?.releaseNotes ? '12px' : 0,
           }}
         >
-          {updateInfo?.downloadUrl && (
-            <button
-              type="button"
-              className="btn btn-tonal"
-              onClick={() => handleOpenExternal(updateInfo.downloadUrl!)}
-            >
-              <Download size={14} />
-              Скачать архив релиза {updateInfo.assetName || ''}
-            </button>
-          )}
+          <button
+            type="button"
+            className="btn btn-tonal"
+            disabled={downloadingZapretZip}
+            onClick={handleDownloadLatestZapret}
+          >
+            <Download size={14} />
+            {downloadingZapretZip ? 'Получение архива...' : 'Скачать релиз Zapret'}
+          </button>
 
           <button
             type="button"
             className="btn btn-surface"
-            onClick={() => handleOpenExternal(updateInfo?.htmlUrl || zapretInfo.links.latestRelease)}
+            onClick={() => handleOpenExternal('https://github.com/Flowseal/zapret-discord-youtube/releases')}
           >
             <ExternalLink size={14} />
             Страница релиза GitHub
-          </button>
-
-          <button
-            type="button"
-            className="btn btn-surface"
-            onClick={() => handleOpenExternal(zapretInfo.links.upstreamRepo)}
-          >
-            <ExternalLink size={14} />
-            Репозиторий Flowseal
-          </button>
-
-          <button
-            type="button"
-            className="btn btn-surface"
-            onClick={() => handleOpenExternal(zapretInfo.links.coreRepo)}
-          >
-            <ExternalLink size={14} />
-            Репозиторий bol-van/zapret
           </button>
         </div>
 

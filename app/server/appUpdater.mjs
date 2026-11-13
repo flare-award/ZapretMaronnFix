@@ -3,17 +3,42 @@ import path from 'node:path';
 import os from 'node:os';
 import https from 'node:https';
 import tls from 'node:tls';
+import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { APP_DIR, DATA_DIR, REPO_ROOT, httpsGetJsonOrText, loadSettings } from './zapretAdapter.mjs';
+import { APP_DIR, DATA_DIR, REPO_ROOT } from './zapretAdapter.mjs';
 
 const execFileAsync = promisify(execFile);
+const isWin = os.platform() === 'win32';
 
-const APP_REPO = 'flare-award/ZapretMaronnFix';
-const UPDATE_STATE_PATH = path.join(DATA_DIR, 'app-update-state.json');
-const RESUME_FLAG_PATH = path.join(DATA_DIR, 'resume-after-update.json');
-const UPDATE_LOG_PATH = path.join(DATA_DIR, 'last-update.log');
+export const APP_REPO = 'flare-award/ZapretMaronnFix';
+export const PRIMARY_BRANCH = 'arena/9383b414-zapretmaronnfix';
+export const APP_REPO_TREE_URL = `https://github.com/${APP_REPO}/tree/${PRIMARY_BRANCH}`;
+
+const CANDIDATE_BRANCHES = [PRIMARY_BRANCH, 'main'];
+const APP_UPDATE_STATE_FILE = path.join(DATA_DIR, 'app-update-state.json');
+const RESUME_AFTER_UPDATE_FILE = path.join(DATA_DIR, 'resume-after-update.json');
+const UPDATE_LOG_FILE = path.join(DATA_DIR, 'last-update.log');
+
+// Files inside zapret/ and app/data/ that belong to the user and must never be overwritten
+const PRESERVED_ZAPRET_REL_PATHS = [
+  'zapret/lists/list-general-user.txt',
+  'zapret/lists/list-exclude-user.txt',
+  'zapret/lists/ipset-exclude-user.txt',
+  'zapret/lists/ipset-all.txt',
+  'zapret/lists/ipset-all.txt.backup',
+  'zapret/utils/game_filter.enabled',
+  'zapret/utils/check_updates.enabled',
+  'zapret/utils/targets.txt',
+  'zapret/bin/ACTIVE_DISCORD_UDP.bin',
+  'zapret/bin/ACTIVE_GAME_UDP.bin',
+];
+
+const APP_SUBDIRS_TO_SYNC = ['server', 'static', 'src', 'host', 'public'];
+
+let inFlightCheckPromise = null;
+let lastCheckCache = { ts: 0, result: null };
 
 const SYSTEM_CA_BUNDLE = (() => {
   try {
@@ -26,400 +51,717 @@ const SYSTEM_CA_BUNDLE = (() => {
   return undefined;
 })();
 
-function ensureDataDir() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+function httpsGetBufferViaNode(url, extraHeaders = {}, maxRedirects = 6) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      url,
+      {
+        ca: SYSTEM_CA_BUNDLE,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZapretControl/1.3',
+          Accept: '*/*',
+          'Cache-Control': 'no-cache',
+          ...extraHeaders,
+        },
+        timeout: 30000,
+      },
+      (res) => {
+        if (
+          res.statusCode &&
+          res.statusCode >= 300 &&
+          res.statusCode < 400 &&
+          res.headers.location &&
+          maxRedirects > 0
+        ) {
+          const nextUrl = new URL(res.headers.location, url).toString();
+          res.resume();
+          httpsGetBufferViaNode(nextUrl, extraHeaders, maxRedirects - 1).then(resolve, reject);
+          return;
+        }
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        res.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            resolve(buf);
+          } else {
+            reject(new Error(`HTTP ${res.statusCode} при обращении к ${new URL(url).hostname}`));
+          }
+        });
+      }
+    );
+    req.on('timeout', () => req.destroy(new Error('Превышено время ожидания ответа от GitHub')));
+    req.on('error', reject);
+  });
 }
 
-function gitBlobSha1(buf) {
-  const header = Buffer.from(`blob ${buf.length}\0`, 'utf8');
-  return crypto.createHash('sha1').update(header).update(buf).digest('hex');
-}
-
-function isProgramFilePath(relPath) {
-  if (relPath === 'ZapretControl.bat') return true;
-  if (!relPath.startsWith('app/')) return false;
-  if (relPath.startsWith('app/data/') || relPath.startsWith('app/node_modules/')) return false;
-  return true;
-}
-
-function countMismatchedProgramBlobs(entries) {
-  const programBlobs = entries.filter((e) => e.type === 'blob' && isProgramFilePath(e.path));
-  let changedFilesCount = 0;
-
-  for (const entry of programBlobs) {
-    const localFile = path.join(REPO_ROOT, ...entry.path.split('/'));
-    if (!fs.existsSync(localFile)) {
-      changedFilesCount++;
-      continue;
+async function fetchBufferWithFallback(url, extraHeaders = {}) {
+  try {
+    return await httpsGetBufferViaNode(url, extraHeaders);
+  } catch (nodeErr) {
+    const curlBin = isWin ? 'curl.exe' : 'curl';
+    const tmpOut = path.join(
+      os.tmpdir(),
+      `zapret-dl-${Date.now()}-${Math.random().toString(36).slice(2)}.bin`
+    );
+    const args = ['-fsSL', '-m', '35', '-H', 'User-Agent: Mozilla/5.0 ZapretControl/1.3', '-o', tmpOut];
+    for (const [k, v] of Object.entries(extraHeaders)) {
+      args.push('-H', `${k}: ${v}`);
     }
+    args.push(url);
     try {
-      const buf = fs.readFileSync(localFile);
-      const shaRaw = gitBlobSha1(buf);
-      if (shaRaw === entry.sha) continue;
-
-      const shaLf = gitBlobSha1(Buffer.from(buf.toString('latin1').replace(/\r\n/g, '\n'), 'latin1'));
-      if (shaLf === entry.sha) continue;
-
-      changedFilesCount++;
+      await execFileAsync(curlBin, args);
+      const buf = fs.readFileSync(tmpOut);
+      fs.rmSync(tmpOut, { force: true });
+      return buf;
     } catch {
-      changedFilesCount++;
+      try {
+        fs.rmSync(tmpOut, { force: true });
+      } catch {
+        // ignore
+      }
+      throw nodeErr;
     }
   }
+}
 
-  return changedFilesCount;
+async function fetchText(url, extraHeaders = {}) {
+  const buf = await fetchBufferWithFallback(url, extraHeaders);
+  return buf.toString('utf8');
+}
+
+function decodeXmlEntities(str) {
+  if (!str) return '';
+  return str
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function gitBlobSha1(buffer) {
+  const header = Buffer.from(`blob ${buffer.length}\0`, 'utf8');
+  return crypto.createHash('sha1').update(header).update(buffer).digest('hex');
+}
+
+function isProtectedPath(relPosix) {
+  if (!relPosix) return true;
+  if (relPosix.startsWith('.git/') || relPosix === '.git') return true;
+  if (relPosix.startsWith('app/node_modules/') || relPosix.startsWith('node_modules/')) return true;
+  if (relPosix.startsWith('app/data/')) return true;
+  if (relPosix.startsWith('zapret/utils/test results/')) return true;
+  if (relPosix === 'ZapretControl.exe') return true;
+  if (PRESERVED_ZAPRET_REL_PATHS.includes(relPosix)) return true;
+  return false;
+}
+
+function matchesRemoteBlob(localPath, expectedBlobSha) {
+  if (!fs.existsSync(localPath)) return false;
+  try {
+    const stat = fs.statSync(localPath);
+    if (!stat.isFile()) return false;
+    const raw = fs.readFileSync(localPath);
+    if (gitBlobSha1(raw) === expectedBlobSha) return true;
+
+    // Git checkout on Windows converts LF -> CRLF; normalize CRLF -> LF for accurate comparison
+    if (!raw.includes(0x00) && raw.includes(0x0d)) {
+      const lfBuf = Buffer.from(raw.toString('latin1').replace(/\r\n/g, '\n'), 'latin1');
+      if (gitBlobSha1(lfBuf) === expectedBlobSha) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Computes a fast deterministic SHA-256 digest of local program files so repeat update checks
+ * do not need to re-download or re-compare archives when nothing on disk or GitHub changed.
+ */
+function computeLocalProgramDigest() {
+  const hash = crypto.createHash('sha256');
+  const walk = (dirRel) => {
+    const absDir = path.join(REPO_ROOT, dirRel);
+    if (!fs.existsSync(absDir)) return;
+    const entries = fs.readdirSync(absDir, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+    for (const ent of entries) {
+      const relPosix = `${dirRel}/${ent.name}`.replace(/\\/g, '/');
+      if (isProtectedPath(relPosix)) continue;
+      const full = path.join(absDir, ent.name);
+      if (ent.isDirectory()) {
+        walk(relPosix);
+      } else if (ent.isFile()) {
+        const st = fs.statSync(full);
+        hash.update(`${relPosix}:${st.size}:${Math.floor(st.mtimeMs)}\n`);
+      }
+    }
+  };
+
+  const launcherPath = path.join(REPO_ROOT, 'ZapretControl.bat');
+  if (fs.existsSync(launcherPath)) {
+    const st = fs.statSync(launcherPath);
+    hash.update(`ZapretControl.bat:${st.size}:${Math.floor(st.mtimeMs)}\n`);
+  }
+  for (const sub of APP_SUBDIRS_TO_SYNC) {
+    walk(`app/${sub}`);
+  }
+  return hash.digest('hex');
 }
 
 export function readLocalAppUpdateState() {
-  ensureDataDir();
-  if (fs.existsSync(UPDATE_STATE_PATH)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(UPDATE_STATE_PATH, 'utf8'));
-      if (parsed && parsed.installedSha) {
-        return parsed;
-      }
-    } catch {
-      // ignore corrupted file
+  try {
+    if (fs.existsSync(APP_UPDATE_STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(APP_UPDATE_STATE_FILE, 'utf8'));
     }
+  } catch {
+    // ignore
   }
-
-  const gitHeadPath = path.join(REPO_ROOT, '.git', 'HEAD');
-  if (fs.existsSync(gitHeadPath)) {
-    try {
-      const headRaw = fs.readFileSync(gitHeadPath, 'utf8').trim();
-      let sha = null;
-      let branch = null;
-      if (headRaw.startsWith('ref: ')) {
-        const refRel = headRaw.slice(5).trim();
-        branch = refRel.replace(/^refs\/heads\//, '');
-        const refFile = path.join(REPO_ROOT, '.git', refRel);
-        if (fs.existsSync(refFile)) {
-          sha = fs.readFileSync(refFile, 'utf8').trim();
-        }
-      } else if (/^[0-9a-f]{40}$/i.test(headRaw)) {
-        sha = headRaw;
-      }
-      if (sha) {
-        return {
-          installedSha: sha,
-          installedShortSha: sha.slice(0, 7),
-          installedBranch: branch || 'main',
-          commitDate: null,
-          commitMessage: '',
-        };
-      }
-    } catch {
-      // ignore
-    }
-  }
-
   return {
     installedSha: null,
     installedShortSha: null,
     installedBranch: null,
     commitDate: null,
-    commitMessage: '',
+    commitMessage: null,
+    verifiedDigest: null,
+    updatedAt: null,
   };
 }
 
-function saveLocalAppUpdateState(stateObj) {
-  ensureDataDir();
-  fs.writeFileSync(UPDATE_STATE_PATH, JSON.stringify(stateObj, null, 2), 'utf8');
+export function writeLocalAppUpdateState(patch) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const next = {
+    ...readLocalAppUpdateState(),
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(APP_UPDATE_STATE_FILE, JSON.stringify(next, null, 2), 'utf8');
+  return next;
 }
 
 export function consumeResumeAfterUpdateFlag() {
-  if (!fs.existsSync(RESUME_FLAG_PATH)) return null;
   try {
-    const data = JSON.parse(fs.readFileSync(RESUME_FLAG_PATH, 'utf8'));
-    fs.rmSync(RESUME_FLAG_PATH, { force: true });
-    return data && data.strategy ? String(data.strategy) : null;
+    if (fs.existsSync(RESUME_AFTER_UPDATE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(RESUME_AFTER_UPDATE_FILE, 'utf8'));
+      fs.rmSync(RESUME_AFTER_UPDATE_FILE, { force: true });
+      return data && typeof data.strategy === 'string' ? data.strategy : null;
+    }
   } catch {
     try {
-      fs.rmSync(RESUME_FLAG_PATH, { force: true });
+      fs.rmSync(RESUME_AFTER_UPDATE_FILE, { force: true });
     } catch {
       // ignore
     }
+  }
+  return null;
+}
+
+/**
+ * Pure Node.js ZIP reader using Central Directory + zlib.inflateRawSync.
+ * Eliminates PowerShell Expand-Archive slowness/quirks and works identically on Windows & Linux.
+ */
+function iterateZipBuffer(zipBuf) {
+  let eocdPos = -1;
+  const minPos = Math.max(0, zipBuf.length - 65558);
+  for (let i = zipBuf.length - 22; i >= minPos; i--) {
+    if (zipBuf.readUInt32LE(i) === 0x06054b50) {
+      eocdPos = i;
+      break;
+    }
+  }
+  if (eocdPos === -1) {
+    throw new Error('Повреждённый ZIP-архив обновления (не найден каталог EOCD)');
+  }
+
+  const cdSize = zipBuf.readUInt32LE(eocdPos + 12);
+  const cdOffset = zipBuf.readUInt32LE(eocdPos + 16);
+  const cdEnd = cdOffset + cdSize;
+  const files = [];
+
+  let pos = cdOffset;
+  while (pos < cdEnd && pos + 46 <= zipBuf.length) {
+    if (zipBuf.readUInt32LE(pos) !== 0x02014b50) break;
+    const method = zipBuf.readUInt16LE(pos + 10);
+    const compSize = zipBuf.readUInt32LE(pos + 20);
+    const nameLen = zipBuf.readUInt16LE(pos + 28);
+    const extraLen = zipBuf.readUInt16LE(pos + 30);
+    const commentLen = zipBuf.readUInt16LE(pos + 32);
+    const localHeaderOffset = zipBuf.readUInt32LE(pos + 42);
+    const rawName = zipBuf.subarray(pos + 46, pos + 46 + nameLen).toString('utf8').replace(/\\/g, '/');
+    pos += 46 + nameLen + extraLen + commentLen;
+
+    if (!rawName || rawName.endsWith('/')) continue;
+    if (localHeaderOffset + 30 > zipBuf.length) continue;
+    if (zipBuf.readUInt32LE(localHeaderOffset) !== 0x04034b50) continue;
+
+    const lhNameLen = zipBuf.readUInt16LE(localHeaderOffset + 26);
+    const lhExtraLen = zipBuf.readUInt16LE(localHeaderOffset + 28);
+    const dataStart = localHeaderOffset + 30 + lhNameLen + lhExtraLen;
+    const compSlice = zipBuf.subarray(dataStart, dataStart + compSize);
+
+    let data;
+    if (method === 0) {
+      data = Buffer.from(compSlice);
+    } else if (method === 8) {
+      data = zlib.inflateRawSync(compSlice);
+    } else {
+      throw new Error(`Неподдерживаемый метод сжатия ZIP (${method}) для ${rawName}`);
+    }
+
+    files.push({ rawName, data });
+  }
+
+  // Strip common top-level folder prefix if GitHub zip wraps everything in Repo-sha/
+  let commonPrefix = '';
+  const firstSlash = files[0]?.rawName.indexOf('/') ?? -1;
+  if (firstSlash > 0) {
+    const candidate = files[0].rawName.slice(0, firstSlash + 1);
+    if (files.every((f) => f.rawName.startsWith(candidate))) {
+      commonPrefix = candidate;
+    }
+  }
+
+  return files
+    .map((f) => ({
+      relPath: commonPrefix ? f.rawName.slice(commonPrefix.length) : f.rawName,
+      data: f.data,
+    }))
+    .filter((f) => f.relPath && !f.relPath.includes('..'));
+}
+
+function extractZipBufferToDir(zipBuf, destDir) {
+  const entries = iterateZipBuffer(zipBuf);
+  for (const entry of entries) {
+    const fullPath = path.join(destDir, ...entry.relPath.split('/'));
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    fs.writeFileSync(fullPath, entry.data);
+  }
+  return destDir;
+}
+
+/**
+ * Fetches latest commit info WITHOUT touching api.github.com (no 60 req/hr rate limit / HTTP 403).
+ * Uses GitHub Atom feed + Git Smart HTTP info/refs on github.com.
+ */
+async function fetchBranchCommitViaAtom(branch) {
+  const encodedBranch = branch.split('/').map(encodeURIComponent).join('/');
+  const atomUrl = `https://github.com/${APP_REPO}/commits/${encodedBranch}.atom`;
+  const xml = await fetchText(atomUrl, { Accept: 'application/atom+xml, text/xml, */*' });
+
+  const entryMatch = xml.match(/<entry>([\s\S]*?)<\/entry>/i);
+  if (!entryMatch) return null;
+  const entry = entryMatch[1];
+
+  const shaMatch =
+    entry.match(/Commit\/([0-9a-f]{40})/i) || entry.match(/\/commit\/([0-9a-f]{40})/i);
+  if (!shaMatch) return null;
+  const sha = shaMatch[1].toLowerCase();
+
+  const updatedMatch = entry.match(/<updated>([^<]+)<\/updated>/i);
+  const publishedAt = updatedMatch ? updatedMatch[1].trim() : null;
+
+  let message = '';
+  const preMatch = entry.match(/<content[^>]*>([\s\S]*?)<\/content>/i);
+  if (preMatch) {
+    const decodedHtml = decodeXmlEntities(preMatch[1]);
+    const cleanText = decodedHtml.replace(/<[^>]+>/g, '').trim();
+    message = cleanText.split(/\r?\n/)[0].trim();
+  }
+  if (!message) {
+    const titleMatch = entry.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (titleMatch) {
+      message = decodeXmlEntities(titleMatch[1]).replace(/\s+/g, ' ').trim();
+    }
+  }
+
+  return {
+    branch,
+    sha,
+    shortSha: sha.slice(0, 7),
+    publishedAt,
+    message: message || 'Обновление Zapret Control',
+    htmlUrl: APP_REPO_TREE_URL,
+  };
+}
+
+async function fetchRefsViaSmartHttp() {
+  const refsUrl = `https://github.com/${APP_REPO}.git/info/refs?service=git-upload-pack`;
+  const raw = await fetchText(refsUrl);
+  const refs = new Map();
+  const re = /([0-9a-f]{40})\s+refs\/heads\/([^\s\0\r\n]+)/g;
+  let m;
+  while ((m = re.exec(raw)) !== null) {
+    refs.set(m[2], m[1].toLowerCase());
+  }
+  return refs;
+}
+
+export async function fetchLatestCommitInfo() {
+  // 1. Primary: Atom feeds on github.com (fast, rich metadata, no REST API 60/hr limit)
+  const atomCandidates = [];
+  for (const branch of CANDIDATE_BRANCHES) {
+    try {
+      const info = await fetchBranchCommitViaAtom(branch);
+      if (info) atomCandidates.push(info);
+    } catch {
+      // try next branch or smart-http fallback
+    }
+  }
+
+  if (atomCandidates.length > 0) {
+    // Prefer PRIMARY_BRANCH unless another candidate has a strictly newer timestamp and includes app/
+    const primary = atomCandidates.find((c) => c.branch === PRIMARY_BRANCH);
+    if (primary) return primary;
+    atomCandidates.sort((a, b) => Date.parse(b.publishedAt || '') - Date.parse(a.publishedAt || ''));
+    return atomCandidates[0];
+  }
+
+  // 2. Secondary: Git Smart HTTP info/refs (ultra-lightweight git protocol on github.com)
+  const refs = await fetchRefsViaSmartHttp();
+  for (const branch of CANDIDATE_BRANCHES) {
+    const sha = refs.get(branch);
+    if (sha) {
+      return {
+        branch,
+        sha,
+        shortSha: sha.slice(0, 7),
+        publishedAt: null,
+        message: 'Актуальная сборка репозитория',
+        htmlUrl: APP_REPO_TREE_URL,
+      };
+    }
+  }
+
+  throw new Error('Не удалось получить сведения о коммитах с GitHub');
+}
+
+function getCachedArchivePath(sha) {
+  return path.join(os.tmpdir(), `zapret-control-pkg-${sha}.zip`);
+}
+
+function getCachedManifestPath(sha) {
+  return path.join(os.tmpdir(), `zapret-control-manifest-${sha}.json`);
+}
+
+async function getOrFetchRemoteManifest(sha) {
+  const manifestPath = getCachedManifestPath(sha);
+  if (fs.existsSync(manifestPath)) {
+    try {
+      return JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    } catch {
+      // ignore corrupt cache
+    }
+  }
+
+  const archivePath = getCachedArchivePath(sha);
+  let zipBuf = null;
+  if (fs.existsSync(archivePath)) {
+    try {
+      zipBuf = fs.readFileSync(archivePath);
+    } catch {
+      zipBuf = null;
+    }
+  }
+
+  if (!zipBuf || zipBuf.length < 200) {
+    const zipUrl = `https://codeload.github.com/${APP_REPO}/zip/${sha}`;
+    zipBuf = await fetchBufferWithFallback(zipUrl);
+    try {
+      fs.writeFileSync(archivePath, zipBuf);
+    } catch {
+      // ignore temp cache write errors
+    }
+  }
+
+  const entries = iterateZipBuffer(zipBuf);
+  const manifest = entries.map((e) => ({
+    path: e.relPath,
+    sha: gitBlobSha1(e.data),
+  }));
+
+  try {
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest), 'utf8');
+  } catch {
+    // ignore
+  }
+  return manifest;
+}
+
+async function detectLocalGitHead() {
+  try {
+    const gitDir = path.join(REPO_ROOT, '.git');
+    if (!fs.existsSync(gitDir)) return null;
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT });
+    const sha = stdout.trim();
+    return /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
+  } catch {
     return null;
   }
 }
 
-async function resolveLatestProgramCommit() {
-  const headers = { Accept: 'application/vnd.github+json' };
-  const branchesRaw = await httpsGetJsonOrText(
-    `https://api.github.com/repos/${APP_REPO}/branches?per_page=20`,
-    headers
-  );
-  const branches = JSON.parse(branchesRaw);
-  if (!Array.isArray(branches) || branches.length === 0) {
-    throw new Error('Не удалось получить список веток репозитория на GitHub');
-  }
-
-  const candidates = await Promise.all(
-    branches.slice(0, 8).map(async (b) => {
-      try {
-        const cRaw = await httpsGetJsonOrText(
-          `https://api.github.com/repos/${APP_REPO}/commits/${encodeURIComponent(b.commit.sha)}`,
-          headers
-        );
-        const commitObj = JSON.parse(cRaw);
-        const treeSha = commitObj?.commit?.tree?.sha;
-        if (!treeSha) return null;
-
-        const treeRaw = await httpsGetJsonOrText(
-          `https://api.github.com/repos/${APP_REPO}/git/trees/${treeSha}?recursive=1`,
-          headers
-        );
-        const treeObj = JSON.parse(treeRaw);
-        const entries = Array.isArray(treeObj?.tree) ? treeObj.tree : [];
-        const hasAppServer = entries.some((e) => e.path === 'app/server/index.mjs');
-        if (!hasAppServer) return null;
-
-        const dateStr = commitObj?.commit?.committer?.date || commitObj?.commit?.author?.date || null;
-        const ts = dateStr ? Date.parse(dateStr) : 0;
-        return {
-          branch: b.name,
-          sha: commitObj.sha,
-          shortSha: String(commitObj.sha).slice(0, 7),
-          publishedAt: dateStr,
-          timestamp: Number.isFinite(ts) ? ts : 0,
-          message: String(commitObj?.commit?.message || '').split(/\r?\n/)[0].trim(),
-          htmlUrl: commitObj?.html_url || `https://github.com/${APP_REPO}/commit/${commitObj.sha}`,
-          entries,
-        };
-      } catch {
-        return null;
-      }
-    })
-  );
-
-  const valid = candidates.filter(Boolean).sort((a, b) => b.timestamp - a.timestamp);
-  if (valid.length === 0) {
-    throw new Error('В репозитории на GitHub не найдена сборка Zapret Control');
-  }
-  return valid[0];
-}
-
-export async function checkProgramUpdate() {
+async function performProgramUpdateCheck() {
+  const latest = await fetchLatestCommitInfo();
+  const localDigest = computeLocalProgramDigest();
   const localState = readLocalAppUpdateState();
-  const latest = await resolveLatestProgramCommit();
-  const changedFilesCount = countMismatchedProgramBlobs(latest.entries);
+  const gitHead = await detectLocalGitHead();
 
-  if (changedFilesCount === 0) {
-    const synced = {
-      installedSha: latest.sha,
-      installedShortSha: latest.shortSha,
-      installedBranch: latest.branch,
-      commitDate: latest.publishedAt,
-      commitMessage: latest.message,
-      syncedAt: new Date().toISOString(),
-    };
-    saveLocalAppUpdateState(synced);
+  // Fast-path: already verified this exact commit SHA against unchanged local files (0 extra downloads!)
+  if (localState.installedSha === latest.sha && localState.verifiedDigest === localDigest) {
     return {
       repo: APP_REPO,
+      currentSha: latest.sha,
       currentShortSha: latest.shortSha,
-      currentDate: latest.publishedAt,
+      currentDate: latest.publishedAt || localState.commitDate || null,
       latestSha: latest.sha,
       latestShortSha: latest.shortSha,
       branch: latest.branch,
       publishedAt: latest.publishedAt,
       commitMessage: latest.message,
       changedFilesCount: 0,
+      changedSample: [],
       updateAvailable: false,
-      htmlUrl: latest.htmlUrl,
+      htmlUrl: APP_REPO_TREE_URL,
       checkedAt: new Date().toISOString(),
     };
   }
 
-  // If app-update-state.json falsely claimed latest.shortSha from an older broken updater, do not mislead user
-  const reportedLocalSha =
-    localState.installedShortSha && localState.installedShortSha !== latest.shortSha
-      ? localState.installedShortSha
-      : null;
+  const manifest = await getOrFetchRemoteManifest(latest.sha);
+  let changedFilesCount = 0;
+  const changedSample = [];
+
+  for (const item of manifest) {
+    if (isProtectedPath(item.path)) continue;
+    const localPath = path.join(REPO_ROOT, ...item.path.split('/'));
+    if (!matchesRemoteBlob(localPath, item.sha)) {
+      changedFilesCount++;
+      if (changedSample.length < 12) {
+        changedSample.push(item.path);
+      }
+    }
+  }
+
+  const updateAvailable = changedFilesCount > 0;
+  let updatedState = localState;
+  if (!updateAvailable) {
+    updatedState = writeLocalAppUpdateState({
+      installedSha: latest.sha,
+      installedShortSha: latest.shortSha,
+      installedBranch: latest.branch,
+      commitDate: latest.publishedAt,
+      commitMessage: latest.message,
+      verifiedDigest: localDigest,
+    });
+  }
+
+  const verifiedCurrentSha = !updateAvailable
+    ? latest.sha
+    : gitHead && gitHead !== latest.sha
+      ? gitHead
+      : updatedState.installedSha && updatedState.installedSha !== latest.sha
+        ? updatedState.installedSha
+        : null;
 
   return {
     repo: APP_REPO,
-    currentShortSha: reportedLocalSha,
-    currentDate: reportedLocalSha ? localState.commitDate || null : null,
+    currentSha: verifiedCurrentSha,
+    currentShortSha: verifiedCurrentSha ? verifiedCurrentSha.slice(0, 7) : null,
+    currentDate: !updateAvailable
+      ? latest.publishedAt
+      : verifiedCurrentSha
+        ? updatedState.commitDate
+        : null,
     latestSha: latest.sha,
     latestShortSha: latest.shortSha,
     branch: latest.branch,
     publishedAt: latest.publishedAt,
     commitMessage: latest.message,
     changedFilesCount,
-    updateAvailable: true,
-    htmlUrl: latest.htmlUrl,
+    changedSample,
+    updateAvailable,
+    htmlUrl: APP_REPO_TREE_URL,
     checkedAt: new Date().toISOString(),
   };
 }
 
-function downloadViaHttpsNode(url, destPath, redirectsLeft = 5) {
-  return new Promise((resolve, reject) => {
-    if (redirectsLeft < 0) {
-      reject(new Error('Слишком много перенаправлений при скачивании обновления'));
-      return;
-    }
-    const req = https.get(
-      url,
-      {
-        ca: SYSTEM_CA_BUNDLE,
-        headers: {
-          'User-Agent': 'ZapretControl/1.3',
-          Accept: '*/*',
-        },
-        timeout: 25000,
-      },
-      (res) => {
-        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          const nextUrl = new URL(res.headers.location, url).toString();
-          res.resume();
-          downloadViaHttpsNode(nextUrl, destPath, redirectsLeft - 1).then(resolve, reject);
-          return;
-        }
-        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-          res.resume();
-          reject(new Error(`Ошибка скачивания архива (HTTP ${res.statusCode})`));
-          return;
-        }
-        const out = fs.createWriteStream(destPath);
-        res.pipe(out);
-        out.on('finish', () => {
-          out.close(() => resolve(destPath));
-        });
-        out.on('error', (err) => {
-          try {
-            out.close();
-          } catch {
-            // ignore
-          }
-          reject(err);
-        });
-      }
-    );
-    req.on('timeout', () => {
-      req.destroy(new Error('Превышено время ожидания при скачивании архива обновления с GitHub'));
+export async function checkProgramUpdate() {
+  if (inFlightCheckPromise) {
+    return inFlightCheckPromise;
+  }
+  const now = Date.now();
+  if (lastCheckCache.result && now - lastCheckCache.ts < 8000) {
+    return lastCheckCache.result;
+  }
+
+  inFlightCheckPromise = performProgramUpdateCheck()
+    .then((res) => {
+      lastCheckCache = { ts: Date.now(), result: res };
+      return res;
+    })
+    .finally(() => {
+      inFlightCheckPromise = null;
     });
-    req.on('error', reject);
-  });
+
+  return inFlightCheckPromise;
 }
 
-async function downloadFileWithFallback(url, destPath) {
-  try {
-    await downloadViaHttpsNode(url, destPath);
-    return;
-  } catch (nodeErr) {
-    const curlBin = os.platform() === 'win32' ? 'curl.exe' : 'curl';
-    try {
-      await execFileAsync(curlBin, ['-fsSL', '-L', '-m', '45', '-o', destPath, url]);
-      return;
-    } catch {
-      throw nodeErr;
-    }
-  }
-}
-
-async function extractZipToDirectory(zipPath, extractDir) {
-  fs.mkdirSync(extractDir, { recursive: true });
-  if (os.platform() === 'win32') {
-    try {
-      await execFileAsync('tar.exe', ['-xf', zipPath, '-C', extractDir]);
-      return;
-    } catch {
-      const psZip = zipPath.replace(/'/g, "''");
-      const psDst = extractDir.replace(/'/g, "''");
-      await execFileAsync('powershell.exe', [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        `Expand-Archive -LiteralPath '${psZip}' -DestinationPath '${psDst}' -Force`,
-      ]);
-      return;
-    }
-  }
-
-  try {
-    await execFileAsync('python3', ['-m', 'zipfile', '-e', zipPath, extractDir]);
-  } catch {
-    await execFileAsync('unzip', ['-q', '-o', zipPath, '-d', extractDir]);
-  }
-}
-
-function locateExtractedRoot(extractDir) {
-  if (
-    fs.existsSync(path.join(extractDir, 'ZapretControl.bat')) &&
-    fs.existsSync(path.join(extractDir, 'app', 'server', 'index.mjs'))
-  ) {
-    return extractDir;
-  }
-
-  const children = fs.readdirSync(extractDir, { withFileTypes: true }).filter((d) => d.isDirectory());
-  for (const dir of children) {
-    const candidate = path.join(extractDir, dir.name);
-    if (
-      fs.existsSync(path.join(candidate, 'ZapretControl.bat')) &&
-      fs.existsSync(path.join(candidate, 'app', 'server', 'index.mjs'))
-    ) {
-      return candidate;
-    }
-  }
-  throw new Error('В скачанном архиве не найдены файлы программы Zapret Control');
-}
-
-function mergeTargetsPreservingUserEntries(localTargetsPath, incomingTargetsPath) {
-  if (!fs.existsSync(localTargetsPath)) return null;
-  const localRaw = fs.readFileSync(localTargetsPath, 'utf8');
-  if (!fs.existsSync(incomingTargetsPath)) return localRaw;
-
-  const incomingRaw = fs.readFileSync(incomingTargetsPath, 'utf8');
-  const incomingKeys = new Set();
-  for (const line of incomingRaw.split(/\r?\n/)) {
-    const m = line.trim().match(/^([A-Za-z0-9_.-]+)\s*=/);
-    if (m) incomingKeys.add(m[1].toLowerCase());
-  }
-
-  const customLines = [];
-  let pendingHeader = null;
-  for (const rawLine of localRaw.split(/\r?\n/)) {
-    const trimmed = rawLine.trim();
-    if (/^#{2,}\s*\S+/.test(trimmed)) {
-      pendingHeader = trimmed;
-      continue;
-    }
-    const m = trimmed.match(/^([A-Za-z0-9_.-]+)\s*=\s*.+$/);
-    if (m && !incomingKeys.has(m[1].toLowerCase())) {
-      if (pendingHeader) {
-        customLines.push('', pendingHeader);
-        pendingHeader = null;
+function cleanAccidentalNestedDirs() {
+  for (const sub of APP_SUBDIRS_TO_SYNC) {
+    const accidentalNested = path.join(APP_DIR, sub, sub);
+    if (fs.existsSync(accidentalNested)) {
+      try {
+        fs.rmSync(accidentalNested, { recursive: true, force: true });
+      } catch {
+        // ignore
       }
-      customLines.push(trimmed);
+    }
+  }
+}
+
+function copyTreeFilesRecursive(srcDir, dstDir, { mirrorDelete = false } = {}) {
+  if (!fs.existsSync(srcDir)) return;
+  fs.mkdirSync(dstDir, { recursive: true });
+
+  const srcEntries = fs.readdirSync(srcDir, { withFileTypes: true });
+  const srcNames = new Set(srcEntries.map((e) => e.name));
+
+  if (mirrorDelete && fs.existsSync(dstDir)) {
+    for (const existing of fs.readdirSync(dstDir, { withFileTypes: true })) {
+      if (!srcNames.has(existing.name)) {
+        try {
+          fs.rmSync(path.join(dstDir, existing.name), { recursive: true, force: true });
+        } catch {
+          // ignore locked file
+        }
+      }
     }
   }
 
-  if (customLines.length === 0) {
-    return incomingRaw;
+  for (const entry of srcEntries) {
+    const srcPath = path.join(srcDir, entry.name);
+    const dstPath = path.join(dstDir, entry.name);
+    if (entry.isDirectory()) {
+      copyTreeFilesRecursive(srcPath, dstPath, { mirrorDelete });
+    } else if (entry.isFile()) {
+      fs.mkdirSync(path.dirname(dstPath), { recursive: true });
+      fs.copyFileSync(srcPath, dstPath);
+    }
   }
-  return incomingRaw.replace(/\s*$/, '\r\n') + customLines.join('\r\n') + '\r\n';
 }
 
-function stagePreservedUserFiles(extractedRoot, preserveDir) {
-  fs.mkdirSync(preserveDir, { recursive: true });
-  const settings = loadSettings();
-  const defaultZapretDir = path.join(REPO_ROOT, 'zapret');
-  if (path.resolve(settings.zapretDir) !== path.resolve(defaultZapretDir)) {
-    return;
+function applyExtractedFilesInNode(sourceRoot, preserveDir) {
+  cleanAccidentalNestedDirs();
+
+  for (const entry of fs.readdirSync(sourceRoot, { withFileTypes: true })) {
+    if (entry.name === '.git' || entry.name === 'app' || entry.name === 'zapret') continue;
+    if (entry.name === 'ZapretControl.exe') continue;
+    const sPath = path.join(sourceRoot, entry.name);
+    const dPath = path.join(REPO_ROOT, entry.name);
+    try {
+      if (entry.isDirectory()) {
+        copyTreeFilesRecursive(sPath, dPath, { mirrorDelete: false });
+      } else if (entry.isFile()) {
+        fs.copyFileSync(sPath, dPath);
+      }
+    } catch {
+      // fallback PS script handles any locked root file
+    }
   }
 
-  const preserveRelPaths = [
-    'zapret/lists/list-general-user.txt',
-    'zapret/lists/list-exclude-user.txt',
-    'zapret/lists/ipset-exclude-user.txt',
-    'zapret/lists/ipset-all.txt',
-    'zapret/lists/ipset-all.txt.backup',
-    'zapret/utils/game_filter.enabled',
-    'zapret/bin/ACTIVE_DISCORD_UDP.bin',
-    'zapret/bin/ACTIVE_GAME_UDP.bin',
-  ];
+  const srcApp = path.join(sourceRoot, 'app');
+  if (fs.existsSync(srcApp)) {
+    for (const sub of APP_SUBDIRS_TO_SYNC) {
+      const sSub = path.join(srcApp, sub);
+      const dSub = path.join(APP_DIR, sub);
+      if (fs.existsSync(sSub)) {
+        copyTreeFilesRecursive(sSub, dSub, { mirrorDelete: true });
+      }
+    }
+    for (const entry of fs.readdirSync(srcApp, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      try {
+        fs.copyFileSync(path.join(srcApp, entry.name), path.join(APP_DIR, entry.name));
+      } catch {
+        // ignore
+      }
+    }
+  }
 
-  for (const rel of preserveRelPaths) {
+  const srcZapret = path.join(sourceRoot, 'zapret');
+  const dstZapret = path.join(REPO_ROOT, 'zapret');
+  if (fs.existsSync(srcZapret)) {
+    copyTreeFilesRecursive(srcZapret, dstZapret, { mirrorDelete: false });
+  }
+
+  const preservedZapret = path.join(preserveDir, 'zapret');
+  if (fs.existsSync(preservedZapret)) {
+    copyTreeFilesRecursive(preservedZapret, dstZapret, { mirrorDelete: false });
+  }
+}
+
+function escapePsSingleQuoted(str) {
+  return String(str).replace(/'/g, "''");
+}
+
+function writeUtf8BomCrlf(filePath, content) {
+  const crlf = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n');
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  fs.writeFileSync(filePath, Buffer.concat([bom, Buffer.from(crlf, 'utf8')]));
+}
+
+export async function installProgramUpdate({
+  zipBase64 = null,
+  activeRunningStrategy = null,
+  onBeforeApply = null,
+} = {}) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+
+  const tempWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zapret-control-upd-'));
+  const extractDir = path.join(tempWorkDir, 'extracted');
+  const preserveDir = path.join(tempWorkDir, 'preserve');
+  const stagedStateFile = path.join(tempWorkDir, 'app-update-state.json');
+
+  fs.mkdirSync(extractDir, { recursive: true });
+  fs.mkdirSync(preserveDir, { recursive: true });
+
+  let commitMeta = null;
+  let zipBuf;
+
+  if (zipBase64 && typeof zipBase64 === 'string') {
+    const cleaned = zipBase64.replace(/^data:[^;]+;base64,/, '');
+    zipBuf = Buffer.from(cleaned, 'base64');
+    if (zipBuf.length < 200) {
+      throw new Error('Загруженный ZIP-файл пуст или повреждён');
+    }
+  } else {
+    commitMeta = await fetchLatestCommitInfo();
+    const cachedArchive = getCachedArchivePath(commitMeta.sha);
+    if (fs.existsSync(cachedArchive)) {
+      zipBuf = fs.readFileSync(cachedArchive);
+    } else {
+      const zipUrl = `https://codeload.github.com/${APP_REPO}/zip/${commitMeta.sha}`;
+      zipBuf = await fetchBufferWithFallback(zipUrl);
+      try {
+        fs.writeFileSync(cachedArchive, zipBuf);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  const sourceRoot = extractZipBufferToDir(zipBuf, extractDir);
+  if (
+    !fs.existsSync(path.join(sourceRoot, 'app')) &&
+    !fs.existsSync(path.join(sourceRoot, 'ZapretControl.bat'))
+  ) {
+    throw new Error('Выбранный архив не содержит файлов программы Zapret Control');
+  }
+
+  for (const rel of PRESERVED_ZAPRET_REL_PATHS) {
     const src = path.join(REPO_ROOT, ...rel.split('/'));
     if (fs.existsSync(src)) {
       const dst = path.join(preserveDir, ...rel.split('/'));
@@ -428,336 +770,198 @@ function stagePreservedUserFiles(extractedRoot, preserveDir) {
     }
   }
 
-  const localResultsDir = path.join(REPO_ROOT, 'zapret', 'utils', 'test results');
-  if (fs.existsSync(localResultsDir)) {
-    const dstResultsDir = path.join(preserveDir, 'zapret', 'utils', 'test results');
-    fs.mkdirSync(dstResultsDir, { recursive: true });
-    for (const f of fs.readdirSync(localResultsDir)) {
-      const fullSrc = path.join(localResultsDir, f);
-      if (fs.statSync(fullSrc).isFile()) {
-        fs.copyFileSync(fullSrc, path.join(dstResultsDir, f));
-      }
-    }
+  if (activeRunningStrategy) {
+    fs.writeFileSync(
+      RESUME_AFTER_UPDATE_FILE,
+      JSON.stringify({ strategy: activeRunningStrategy, savedAt: Date.now() }, null, 2),
+      'utf8'
+    );
   }
 
-  const localTargets = path.join(REPO_ROOT, 'zapret', 'utils', 'targets.txt');
-  const incomingTargets = path.join(extractedRoot, 'zapret', 'utils', 'targets.txt');
-  const mergedTargets = mergeTargetsPreservingUserEntries(localTargets, incomingTargets);
-  if (mergedTargets !== null) {
-    const dstTargets = path.join(preserveDir, 'zapret', 'utils', 'targets.txt');
-    fs.mkdirSync(path.dirname(dstTargets), { recursive: true });
-    fs.writeFileSync(dstTargets, mergedTargets, 'utf8');
-  }
-}
-
-function copyDirRecursiveFilesOnly(srcDir, dstDir, skipRelSet = new Set(), currentRel = '') {
-  fs.mkdirSync(dstDir, { recursive: true });
-  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
-    const rel = currentRel ? `${currentRel}/${entry.name}` : entry.name;
-    if (skipRelSet.has(rel)) continue;
-    const srcFull = path.join(srcDir, entry.name);
-    const dstFull = path.join(dstDir, entry.name);
-    if (entry.isDirectory()) {
-      copyDirRecursiveFilesOnly(srcFull, dstFull, skipRelSet, rel);
-    } else if (entry.isFile()) {
-      try {
-        fs.mkdirSync(path.dirname(dstFull), { recursive: true });
-        fs.copyFileSync(srcFull, dstFull);
-      } catch {
-        // Locked binaries (e.g. ZapretControl.exe / winws.exe) will be synced by the post-exit script
-      }
-    }
-  }
-}
-
-function cleanAccidentalNestedDirs() {
-  // Clean any accidental nested dirs left by older PowerShell Copy-Item behavior
-  const nestedCandidates = [
-    path.join(APP_DIR, 'server', 'server'),
-    path.join(APP_DIR, 'static', 'static'),
-    path.join(APP_DIR, 'src', 'src'),
-    path.join(APP_DIR, 'host', 'host'),
-    path.join(APP_DIR, 'public', 'public'),
-    path.join(REPO_ROOT, 'zapret', 'zapret'),
-    path.join(DATA_DIR, 'staging-update'),
-  ];
-  for (const p of nestedCandidates) {
-    if (fs.existsSync(p)) {
-      try {
-        fs.rmSync(p, { recursive: true, force: true });
-      } catch {
-        // ignore
-      }
-    }
-  }
-}
-
-function applyFilesInNodeSync(extractedRoot, preserveDir) {
-  cleanAccidentalNestedDirs();
-  const oldAssets = path.join(APP_DIR, 'static', 'assets');
-  if (fs.existsSync(oldAssets)) {
+  if (typeof onBeforeApply === 'function') {
     try {
-      fs.rmSync(oldAssets, { recursive: true, force: true });
+      await onBeforeApply();
     } catch {
       // ignore
     }
   }
-  const skipSet = new Set(['.git', 'app/data', 'app/node_modules']);
-  copyDirRecursiveFilesOnly(extractedRoot, REPO_ROOT, skipSet);
-  if (fs.existsSync(preserveDir)) {
-    copyDirRecursiveFilesOnly(preserveDir, REPO_ROOT);
-  }
-}
 
-function buildWindowsRestartPs1({
-  repoRoot,
-  tmpWorkDir,
-  sourceDir,
-  preserveDir,
-  stagedStateFile,
-  logFile,
-  serverPid,
-}) {
-  const esc = (p) => String(p).replace(/'/g, "''");
-  const lines = [
-    '$ErrorActionPreference = "Continue"',
-    `$RepoRoot = '${esc(repoRoot)}'`,
-    `$TmpWorkDir = '${esc(tmpWorkDir)}'`,
-    `$SourceDir = '${esc(sourceDir)}'`,
-    `$PreserveDir = '${esc(preserveDir)}'`,
-    `$StagedStateFile = '${esc(stagedStateFile)}'`,
-    `$LogFile = '${esc(logFile)}'`,
-    `$ServerPid = ${Number(serverPid) || 0}`,
-    '',
-    'function Write-UpdLog([string]$msg) {',
-    '    try { Add-Content -LiteralPath $LogFile -Value ("[" + (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + "] " + $msg) -Encoding UTF8 } catch {}',
-    '}',
-    '',
-    'Write-UpdLog "Starting detached Windows update script"',
-    'Start-Sleep -Milliseconds 900',
-    '',
-    '# 1. Close dedicated --app UI window (ui-window-v2 / window-profile)',
-    'try {',
-    '    Get-CimInstance Win32_Process | Where-Object {',
-    '        $_.CommandLine -and ($_.CommandLine -like "*ui-window-v2*" -or $_.CommandLine -like "*window-profile*")',
-    '    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }',
-    '} catch {}',
-    '',
-    '# 2. Terminate tray host, old server process tree, and winws',
-    '& taskkill.exe /IM ZapretControl.exe /F 2>&1 | Out-Null',
-    'if ($ServerPid -gt 0) {',
-    '    & taskkill.exe /PID $ServerPid /T /F 2>&1 | Out-Null',
-    '}',
-    '& taskkill.exe /IM winws.exe /F 2>&1 | Out-Null',
-    'Start-Sleep -Milliseconds 400',
-    '',
-    '# 3. Delete old ZapretControl.exe so ZapretControl.bat compiles fresh C# host',
-    '$exePath = Join-Path $RepoRoot "ZapretControl.exe"',
-    'for ($i = 0; $i -lt 25; $i++) {',
-    '    if (-not (Test-Path -LiteralPath $exePath)) { break }',
-    '    try {',
-    '        Remove-Item -LiteralPath $exePath -Force -ErrorAction Stop',
-    '        break',
-    '    } catch {',
-    '        Start-Sleep -Milliseconds 200',
-    '    }',
-    '}',
-    '',
-    '# 4. Mirror program subfolders reliably via robocopy.exe (never suffers from PowerShell Copy-Item folder nesting bug)',
-    'foreach ($sub in @("server", "static", "src", "host", "public")) {',
-    '    $sSub = Join-Path (Join-Path $SourceDir "app") $sub',
-    '    $dSub = Join-Path (Join-Path $RepoRoot "app") $sub',
-    '    if (Test-Path -LiteralPath $sSub) {',
-    '        & robocopy.exe $sSub $dSub /MIR /R:3 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null',
-    '        Write-UpdLog ("Mirrored app\\" + $sub + " (exit=" + $LASTEXITCODE + ")")',
-    '    }',
-    '}',
-    '',
-    '# Copy top-level files in app/ and root ZapretControl.bat',
-    'Get-ChildItem -LiteralPath (Join-Path $SourceDir "app") -File -Force -ErrorAction SilentlyContinue | ForEach-Object {',
-    '    $dst = Join-Path (Join-Path $RepoRoot "app") $_.Name',
-    '    [System.IO.File]::Copy($_.FullName, $dst, $true)',
-    '}',
-    '$srcBat = Join-Path $SourceDir "ZapretControl.bat"',
-    'if (Test-Path -LiteralPath $srcBat) {',
-    '    [System.IO.File]::Copy($srcBat, (Join-Path $RepoRoot "ZapretControl.bat"), $true)',
-    '}',
-    '',
-    '# 5. Sync zapret folder and restore preserved user lists/configs/fakes',
-    '$sZap = Join-Path $SourceDir "zapret"',
-    '$dZap = Join-Path $RepoRoot "zapret"',
-    'if (Test-Path -LiteralPath $sZap) {',
-    '    & robocopy.exe $sZap $dZap /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null',
-    '}',
-    '$pZap = Join-Path $PreserveDir "zapret"',
-    'if (Test-Path -LiteralPath $pZap) {',
-    '    & robocopy.exe $pZap $dZap /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null',
-    '}',
-    '',
-    '# 6. Clear Chromium --app HTTP/JS cache so the new UI bundle always loads fresh',
-    'foreach ($cacheRel in @("app\\data\\ui-window-v2\\Default\\Cache", "app\\data\\ui-window-v2\\Default\\Code Cache")) {',
-    '    $cp = Join-Path $RepoRoot $cacheRel',
-    '    if (Test-Path -LiteralPath $cp) { Remove-Item -LiteralPath $cp -Recurse -Force -ErrorAction SilentlyContinue }',
-    '}',
-    '',
-    '# 7. Write app-update-state.json ONLY after all files are copied',
-    'if (Test-Path -LiteralPath $StagedStateFile) {',
-    '    $stateDst = Join-Path $RepoRoot "app\\data\\app-update-state.json"',
-    '    [System.IO.File]::Copy($StagedStateFile, $stateDst, $true)',
-    '}',
-    '',
-    '# 8. Launch updated ZapretControl.bat',
-    '$batLauncher = Join-Path $RepoRoot "ZapretControl.bat"',
-    'if (Test-Path -LiteralPath $batLauncher) {',
-    '    Write-UpdLog "Launching updated ZapretControl.bat"',
-    '    Start-Process -FilePath $batLauncher -WorkingDirectory $RepoRoot',
-    '}',
-    '',
-    'Start-Sleep -Milliseconds 400',
-    'Remove-Item -LiteralPath $TmpWorkDir -Recurse -Force -ErrorAction SilentlyContinue',
-    'Write-UpdLog "Update completed successfully"',
-    '',
-  ];
-  return '\uFEFF' + lines.join('\r\n');
-}
+  applyExtractedFilesInNode(sourceRoot, preserveDir);
+  const newDigest = computeLocalProgramDigest();
 
-export async function installProgramUpdate({
-  zipBase64 = null,
-  activeRunningStrategy = null,
-  onBeforeApply = null,
-} = {}) {
-  ensureDataDir();
-
-  // Stage entirely in OS temp directory so we never delete files out from under a running script inside REPO_ROOT
-  const tmpWorkDir = path.join(
-    os.tmpdir(),
-    `zapret-control-upd-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
-  );
-  fs.mkdirSync(tmpWorkDir, { recursive: true });
-
-  const zipPath = path.join(tmpWorkDir, 'update.zip');
-  const extractDir = path.join(tmpWorkDir, 'extracted');
-  const preserveDir = path.join(tmpWorkDir, 'preserve');
-  const stagedStateFile = path.join(tmpWorkDir, 'app-update-state.json');
-
-  let targetMeta = null;
-
-  try {
-    if (zipBase64) {
-      const cleaned = String(zipBase64).replace(/^data:[^;]+;base64,/, '');
-      const buf = Buffer.from(cleaned, 'base64');
-      if (buf.length < 100 || buf[0] !== 0x50 || buf[1] !== 0x4b) {
-        throw new Error('Выбранный файл не является корректным ZIP-архивом');
+  const nextUpdateState = commitMeta
+    ? {
+        installedSha: commitMeta.sha,
+        installedShortSha: commitMeta.shortSha,
+        installedBranch: commitMeta.branch,
+        commitDate: commitMeta.publishedAt,
+        commitMessage: commitMeta.message,
+        verifiedDigest: newDigest,
+        updatedAt: new Date().toISOString(),
       }
-      fs.writeFileSync(zipPath, buf);
-    } else {
-      targetMeta = await resolveLatestProgramCommit();
-      const archiveUrl = `https://codeload.github.com/${APP_REPO}/zip/${targetMeta.sha}`;
-      await downloadFileWithFallback(archiveUrl, zipPath);
-      const stat = fs.existsSync(zipPath) ? fs.statSync(zipPath) : null;
-      if (!stat || stat.size < 100) {
-        throw new Error('Скачанный архив обновления повреждён или пуст');
-      }
-    }
-
-    await extractZipToDirectory(zipPath, extractDir);
-    const extractedRoot = locateExtractedRoot(extractDir);
-    stagePreservedUserFiles(extractedRoot, preserveDir);
-
-    if (activeRunningStrategy) {
-      fs.writeFileSync(
-        RESUME_FLAG_PATH,
-        JSON.stringify({ strategy: activeRunningStrategy, savedAt: new Date().toISOString() }, null, 2),
-        'utf8'
-      );
-    }
-
-    if (typeof onBeforeApply === 'function') {
-      try {
-        await onBeforeApply();
-      } catch {
-        // ignore
-      }
-    }
-
-    const nextStateObj = targetMeta
-      ? {
-          installedSha: targetMeta.sha,
-          installedShortSha: targetMeta.shortSha,
-          installedBranch: targetMeta.branch,
-          commitDate: targetMeta.publishedAt,
-          commitMessage: targetMeta.message,
-          installedAt: new Date().toISOString(),
-        }
-      : null;
-
-    if (nextStateObj) {
-      fs.writeFileSync(stagedStateFile, JSON.stringify(nextStateObj, null, 2), 'utf8');
-    }
-
-    // Apply all unlocked program files immediately in Node (UTF-16 safe, zero PowerShell Copy-Item bugs)
-    applyFilesInNodeSync(extractedRoot, preserveDir);
-
-    if (os.platform() === 'win32') {
-      const psScriptPath = path.join(os.tmpdir(), `zapret-control-restart-${Date.now()}.ps1`);
-      const psContent = buildWindowsRestartPs1({
-        repoRoot: REPO_ROOT,
-        tmpWorkDir,
-        sourceDir: extractedRoot,
-        preserveDir,
-        stagedStateFile,
-        logFile: UPDATE_LOG_PATH,
-        serverPid: process.pid,
-      });
-      fs.writeFileSync(psScriptPath, psContent, 'utf8');
-
-      // Spawn detached via cmd.exe "start" so killing ServerPid (/T) never terminates the updater script!
-      const child = spawn(
-        'cmd.exe',
-        [
-          '/d',
-          '/s',
-          '/c',
-          `start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${psScriptPath}"`,
-        ],
-        {
-          cwd: os.tmpdir(),
-          detached: true,
-          stdio: 'ignore',
-          windowsHide: true,
-        }
-      );
-      child.unref();
-
-      return {
-        ok: true,
-        restarting: true,
-        installedShortSha: targetMeta ? targetMeta.shortSha : 'zip',
-        message: 'Обновление установлено. Выполняется перезапуск программы...',
+    : {
+        ...readLocalAppUpdateState(),
+        installedShortSha: 'zip',
+        commitDate: new Date().toISOString(),
+        commitMessage: 'Обновлено вручную из ZIP-архива',
+        verifiedDigest: newDigest,
+        updatedAt: new Date().toISOString(),
       };
-    }
 
-    // Non-Windows: verify blobs and persist update state now
-    if (nextStateObj) {
-      const remaining = countMismatchedProgramBlobs(targetMeta.entries);
-      if (remaining === 0) {
-        saveLocalAppUpdateState(nextStateObj);
-      }
+  fs.writeFileSync(stagedStateFile, JSON.stringify(nextUpdateState, null, 2), 'utf8');
+  lastCheckCache = { ts: 0, result: null };
+
+  if (isWin) {
+    const applyScriptPath = path.join(os.tmpdir(), `zapret-control-restart-${Date.now()}.ps1`);
+    const psRepo = escapePsSingleQuoted(REPO_ROOT);
+    const psSrc = escapePsSingleQuoted(sourceRoot);
+    const psPreserve = escapePsSingleQuoted(preserveDir);
+    const psStateSrc = escapePsSingleQuoted(stagedStateFile);
+    const psStateDst = escapePsSingleQuoted(APP_UPDATE_STATE_FILE);
+    const psTempWork = escapePsSingleQuoted(tempWorkDir);
+    const psLog = escapePsSingleQuoted(UPDATE_LOG_FILE);
+    const currentServerPid = process.pid;
+
+    const psScript = `
+$ErrorActionPreference = 'Continue'
+$repoRoot = '${psRepo}'
+$srcRoot = '${psSrc}'
+$preserveDir = '${psPreserve}'
+$stateSrc = '${psStateSrc}'
+$stateDst = '${psStateDst}'
+$tempWork = '${psTempWork}'
+$logFile = '${psLog}'
+
+function Write-UpdLog([string]$msg) {
+    try {
+        $line = ('[{0}] {1}' -f [DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss.fff'), $msg)
+        Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+Write-UpdLog 'Starting self-update finalizer'
+Start-Sleep -Milliseconds 900
+
+try {
+    Get-CimInstance Win32_Process | Where-Object {
+        $_.CommandLine -and ($_.CommandLine -like '*ui-window-v2*' -or $_.CommandLine -like '*window-profile*')
+    } | ForEach-Object {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
     }
-    fs.rmSync(tmpWorkDir, { recursive: true, force: true });
+} catch {}
+
+& taskkill.exe /IM ZapretControl.exe /F 2>&1 | Out-Null
+& taskkill.exe /PID ${currentServerPid} /T /F 2>&1 | Out-Null
+& taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
+Start-Sleep -Milliseconds 450
+
+$exePath = Join-Path $repoRoot 'ZapretControl.exe'
+for ($i = 0; $i -lt 30; $i++) {
+    if (-not (Test-Path -LiteralPath $exePath)) { break }
+    try {
+        Remove-Item -LiteralPath $exePath -Force -ErrorAction Stop
+        break
+    } catch {
+        & taskkill.exe /IM ZapretControl.exe /F 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 250
+    }
+}
+
+foreach ($sub in @('server', 'static', 'src', 'host', 'public')) {
+    $nested = Join-Path (Join-Path (Join-Path $repoRoot 'app') $sub) $sub
+    if (Test-Path -LiteralPath $nested) {
+        Remove-Item -LiteralPath $nested -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $sSub = Join-Path (Join-Path $srcRoot 'app') $sub
+    $dSub = Join-Path (Join-Path $repoRoot 'app') $sub
+    if (Test-Path -LiteralPath $sSub) {
+        & robocopy.exe $sSub $dSub /MIR /R:3 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+        Write-UpdLog ('Mirrored app\\' + $sub + ' exit=' + $LASTEXITCODE)
+    }
+}
+
+Get-ChildItem -LiteralPath (Join-Path $srcRoot 'app') -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    [System.IO.File]::Copy($_.FullName, (Join-Path (Join-Path $repoRoot 'app') $_.Name), $true)
+}
+
+$srcLauncher = Join-Path $srcRoot 'ZapretControl.bat'
+if (Test-Path -LiteralPath $srcLauncher) {
+    [System.IO.File]::Copy($srcLauncher, (Join-Path $repoRoot 'ZapretControl.bat'), $true)
+}
+
+$srcZapret = Join-Path $srcRoot 'zapret'
+$dstZapret = Join-Path $repoRoot 'zapret'
+if (Test-Path -LiteralPath $srcZapret) {
+    & robocopy.exe $srcZapret $dstZapret /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+}
+
+$presZapret = Join-Path $preserveDir 'zapret'
+if (Test-Path -LiteralPath $presZapret) {
+    & robocopy.exe $presZapret $dstZapret /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+}
+
+foreach ($cacheRel in @(
+    'app\\data\\ui-window-v2\\Default\\Cache',
+    'app\\data\\ui-window-v2\\Default\\Code Cache',
+    'app\\data\\ui-window-v2\\Default\\GPUCache'
+)) {
+    $cp = Join-Path $repoRoot $cacheRel
+    if (Test-Path -LiteralPath $cp) {
+        Remove-Item -LiteralPath $cp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+if (Test-Path -LiteralPath $stateSrc) {
+    $stateDir = [System.IO.Path]::GetDirectoryName($stateDst)
+    if (-not (Test-Path -LiteralPath $stateDir)) {
+        New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+    }
+    [System.IO.File]::Copy($stateSrc, $stateDst, $true)
+}
+
+$launcher = Join-Path $repoRoot 'ZapretControl.bat'
+Write-UpdLog ('Relaunching ' + $launcher)
+Start-Process -FilePath $launcher -WorkingDirectory $repoRoot
+
+Start-Sleep -Milliseconds 500
+Remove-Item -LiteralPath $tempWork -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+`;
+
+    writeUtf8BomCrlf(applyScriptPath, psScript);
+
+    const detached = spawn(
+      'cmd.exe',
+      [
+        '/d',
+        '/s',
+        '/c',
+        `start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${applyScriptPath}"`,
+      ],
+      {
+        cwd: os.tmpdir(),
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      }
+    );
+    detached.unref();
 
     return {
       ok: true,
-      restarting: false,
-      installedShortSha: targetMeta ? targetMeta.shortSha : 'zip',
-      message: 'Файлы программы успешно обновлены.',
+      restarting: true,
+      installedShortSha: nextUpdateState.installedShortSha,
+      message: 'Обновление установлено, выполняется автоматический перезапуск...',
     };
-  } catch (err) {
-    try {
-      fs.rmSync(tmpWorkDir, { recursive: true, force: true });
-    } catch {
-      // ignore
-    }
-    throw err;
   }
+
+  writeLocalAppUpdateState(nextUpdateState);
+  fs.rmSync(tempWorkDir, { recursive: true, force: true });
+
+  return {
+    ok: true,
+    restarting: false,
+    installedShortSha: nextUpdateState.installedShortSha,
+    message: 'Файлы программы успешно обновлены.',
+  };
 }

@@ -181,52 +181,64 @@ function Get-GitBlobSha1([byte[]]$bytes) {
     return ([System.BitConverter]::ToString($hash)).Replace("-", "").ToLower()
 }
 
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
 function Get-LatestAppCommit {
-    $headers = @{ "User-Agent" = "ZapretControl/1.2"; "Accept" = "application/vnd.github+json" }
-    $branches = Invoke-RestMethod -Uri "https://api.github.com/repos/flare-award/ZapretMaronnFix/branches?per_page=20" -Headers $headers -TimeoutSec 15
-    $best = $null
-    foreach ($b in ($branches | Select-Object -First 8)) {
-        try {
-            $c = Invoke-RestMethod -Uri "https://api.github.com/repos/flare-award/ZapretMaronnFix/commits/$($b.commit.sha)" -Headers $headers -TimeoutSec 15
-            $tree = Invoke-RestMethod -Uri "https://api.github.com/repos/flare-award/ZapretMaronnFix/git/trees/$($c.commit.tree.sha)?recursive=1" -Headers $headers -TimeoutSec 15
-            $hasApp = $false
-            foreach ($e in $tree.tree) { if ($e.path -eq "app/server/index.mjs") { $hasApp = $true; break } }
-            if (-not $hasApp) { continue }
-            $dt = [DateTimeOffset]::Parse($c.commit.committer.date).ToUnixTimeMilliseconds()
-            if ($null -eq $best -or $dt -gt $best.ts) {
-                $best = @{
-                    branch = $b.name
-                    sha = $c.sha
-                    shortSha = $c.sha.Substring(0, 7)
-                    publishedAt = $c.commit.committer.date
-                    ts = $dt
-                    message = ($c.commit.message -split "`r?`n")[0]
-                    htmlUrl = $c.html_url
-                    entries = $tree.tree
-                }
-            }
-        } catch {}
+    $headers = @{ "User-Agent" = "Mozilla/5.0 ZapretControl/1.3" }
+    $branch = "arena/9383b414-zapretmaronnfix"
+    $atomResp = Invoke-WebRequest -Uri "https://github.com/flare-award/ZapretMaronnFix/commits/$branch.atom" -Headers $headers -UseBasicParsing -TimeoutSec 15
+    $xmlText = $atomResp.Content
+    $entryMatch = [regex]::Match($xmlText, "<entry>([\s\S]*?)</entry>", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $entryMatch.Success) { throw "Не удалось прочитать ленту обновлений GitHub" }
+    $entry = $entryMatch.Groups[1].Value
+    $shaMatch = [regex]::Match($entry, "Commit/([0-9a-f]{40})", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $shaMatch.Success) { $shaMatch = [regex]::Match($entry, "/commit/([0-9a-f]{40})", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase) }
+    if (-not $shaMatch.Success) { throw "Не удалось определить SHA коммита" }
+    $sha = $shaMatch.Groups[1].Value.ToLower()
+    $updMatch = [regex]::Match($entry, "<updated>([^<]+)</updated>", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $titleMatch = [regex]::Match($entry, "<title[^>]*>([\s\S]*?)</title>", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $msg = if ($titleMatch.Success) { ([System.Net.WebUtility]::HtmlDecode($titleMatch.Groups[1].Value) -replace "\s+", " ").Trim() } else { "Обновление Zapret Control" }
+    return @{
+        branch = $branch
+        sha = $sha
+        shortSha = $sha.Substring(0, 7)
+        publishedAt = if ($updMatch.Success) { $updMatch.Groups[1].Value.Trim() } else { $null }
+        message = $msg
+        htmlUrl = "https://github.com/flare-award/ZapretMaronnFix/tree/arena/9383b414-zapretmaronnfix"
     }
-    if ($null -eq $best) { throw "В репозитории на GitHub не найдена сборка Zapret Control" }
-    return $best
 }
 
 function Check-AppUpdatePs {
     $latest = Get-LatestAppCommit
+    $zipCache = Join-Path ([System.IO.Path]::GetTempPath()) "zapret-control-pkg-$($latest.sha).zip"
+    if (-not (Test-Path -LiteralPath $zipCache)) {
+        Invoke-WebRequest -Uri "https://codeload.github.com/flare-award/ZapretMaronnFix/zip/$($latest.sha)" -OutFile $zipCache -UseBasicParsing -TimeoutSec 35
+    }
     $changed = 0
-    foreach ($e in $latest.entries) {
-        if ($e.type -ne "blob") { continue }
-        $p = [string]$e.path
-        if ($p -ne "ZapretControl.bat" -and (-not $p.StartsWith("app/") -or $p.StartsWith("app/data/") -or $p.StartsWith("app/node_modules/"))) { continue }
-        $localFile = Join-Path $RepoRoot ($p -replace "/", "\")
-        if (-not (Test-Path -LiteralPath $localFile)) { $changed++; continue }
-        $raw = [System.IO.File]::ReadAllBytes($localFile)
-        $shaRaw = Get-GitBlobSha1 $raw
-        if ($shaRaw -eq $e.sha) { continue }
-        $lfText = [System.Text.Encoding]::GetEncoding("ISO-8859-1").GetString($raw) -replace "`r`n", "`n"
-        $shaLf = Get-GitBlobSha1 ([System.Text.Encoding]::GetEncoding("ISO-8859-1").GetBytes($lfText))
-        if ($shaLf -eq $e.sha) { continue }
-        $changed++
+    $za = [System.IO.Compression.ZipFile]::OpenRead($zipCache)
+    try {
+        foreach ($ze in $za.Entries) {
+            if ([string]::IsNullOrEmpty($ze.Name)) { continue }
+            $slashIdx = $ze.FullName.IndexOf("/")
+            if ($slashIdx -lt 0) { continue }
+            $p = $ze.FullName.Substring($slashIdx + 1)
+            if ($p -ne "ZapretControl.bat" -and (-not $p.StartsWith("app/") -or $p.StartsWith("app/data/") -or $p.StartsWith("app/node_modules/"))) { continue }
+            $localFile = Join-Path $RepoRoot ($p -replace "/", "\")
+            if (-not (Test-Path -LiteralPath $localFile)) { $changed++; continue }
+            $ms = New-Object System.IO.MemoryStream
+            $st = $ze.Open()
+            $st.CopyTo($ms)
+            $st.Close()
+            $remoteSha = Get-GitBlobSha1 ($ms.ToArray())
+            $ms.Close()
+            $raw = [System.IO.File]::ReadAllBytes($localFile)
+            if ((Get-GitBlobSha1 $raw) -eq $remoteSha) { continue }
+            $lfText = [System.Text.Encoding]::GetEncoding("ISO-8859-1").GetString($raw) -replace "`r`n", "`n"
+            if ((Get-GitBlobSha1 ([System.Text.Encoding]::GetEncoding("ISO-8859-1").GetBytes($lfText))) -eq $remoteSha) { continue }
+            $changed++
+        }
+    } finally {
+        $za.Dispose()
     }
     if ($changed -eq 0) {
         (@{
@@ -250,7 +262,48 @@ function Check-AppUpdatePs {
         commitMessage = $latest.message
         changedFilesCount = $changed
         updateAvailable = ($changed -gt 0)
-        htmlUrl = $latest.htmlUrl
+        htmlUrl = "https://github.com/flare-award/ZapretMaronnFix/tree/arena/9383b414-zapretmaronnfix"
+        checkedAt = [DateTime]::UtcNow.ToString("o")
+    }
+}
+
+function Check-ZapretReleasePs([string]$zDir) {
+    $svcPath = Join-Path $zDir "service.bat"
+    $localVer = "Неизвестно"
+    if (Test-Path $svcPath) {
+        $rawSvc = Get-Content $svcPath -Raw -Encoding UTF8
+        if ($rawSvc -match 'LOCAL_VERSION=([^\r\n"]+)') { $localVer = $Matches[1].Trim() }
+    }
+    $headers = @{ "User-Agent" = "Mozilla/5.0 ZapretControl/1.3" }
+    $atomXml = (Invoke-WebRequest -Uri "https://github.com/Flowseal/zapret-discord-youtube/releases.atom" -Headers $headers -UseBasicParsing -TimeoutSec 15).Content
+    $em = [regex]::Match($atomXml, "<entry>([\s\S]*?)</entry>", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $em.Success) { throw "Не удалось прочитать список релизов Zapret" }
+    $block = $em.Groups[1].Value
+    $tagMatch = [regex]::Match($block, "/releases/tag/([^`"&<>?#]+)", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $tag = if ($tagMatch.Success) { [Uri]::UnescapeDataString($tagMatch.Groups[1].Value) } else { $localVer }
+    $cleanVer = $tag -replace "^v", ""
+    $updMatch = [regex]::Match($block, "<updated>([^<]+)</updated>", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $pubAt = if ($updMatch.Success) { $updMatch.Groups[1].Value.Trim() } else { $null }
+    $assetName = "zapret-discord-youtube-$cleanVer.zip"
+    $dlUrl = "https://github.com/Flowseal/zapret-discord-youtube/releases/download/$tag/$assetName"
+    try {
+        $assetsHtml = (Invoke-WebRequest -Uri "https://github.com/Flowseal/zapret-discord-youtube/releases/expanded_assets/$tag" -Headers $headers -UseBasicParsing -TimeoutSec 12).Content
+        $zm = [regex]::Match($assetsHtml, 'href="([^"]*/releases/download/[^"]+\.zip)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($zm.Success) {
+            $dlUrl = "https://github.com" + $zm.Groups[1].Value
+            $assetName = [System.IO.Path]::GetFileName($dlUrl)
+        }
+    } catch {}
+    return @{
+        localVersion = $localVer
+        latestVersion = $cleanVer
+        updateAvailable = ($localVer -ne $cleanVer)
+        publishedAt = $pubAt
+        releaseName = "Zapret $cleanVer"
+        releaseNotes = ""
+        htmlUrl = "https://github.com/Flowseal/zapret-discord-youtube/releases"
+        downloadUrl = $dlUrl
+        assetName = $assetName
         checkedAt = [DateTime]::UtcNow.ToString("o")
     }
 }
@@ -296,6 +349,50 @@ while ($listener.IsListening) {
                 $reader = New-Object System.IO.StreamReader($req.InputStream, [System.Text.Encoding]::UTF8)
                 $rawBody = $reader.ReadToEnd()
                 if ($rawBody.Trim()) { $bodyObj = $rawBody | ConvertFrom-Json }
+            }
+
+            if ($urlPath -eq "/api/updates/check" -and $req.HttpMethod -eq "GET") {
+                $stCur = Get-AppSettings
+                $uInfo = Check-ZapretReleasePs $stCur.zapretDir
+                $uBytes = [System.Text.Encoding]::UTF8.GetBytes(($uInfo | ConvertTo-Json -Depth 6))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($uBytes, 0, $uBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            if ($urlPath -eq "/api/updates/download-latest") {
+                $stCur = Get-AppSettings
+                $uInfo = Check-ZapretReleasePs $stCur.zapretDir
+                if ($req.HttpMethod -eq "GET") {
+                    $res.StatusCode = 302
+                    $res.RedirectLocation = $uInfo.downloadUrl
+                    $res.Close()
+                    continue
+                }
+                Start-Process "rundll32.exe" -ArgumentList "url.dll,FileProtocolHandler $($uInfo.downloadUrl)" | Out-Null
+                $dBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ ok = $true; delegatedToOs = $true; downloadUrl = $uInfo.downloadUrl; assetName = $uInfo.assetName; updateInfo = $uInfo } | ConvertTo-Json -Depth 6))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($dBytes, 0, $dBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            if ($urlPath -eq "/api/system/shutdown" -and $req.HttpMethod -eq "POST") {
+                Stop-WinwsDirect
+                foreach ($svc in @("zapret","GoodbyeDPI","discordfix_zapret","winws1","winws2")) { & sc.exe stop $svc 2>&1 | Out-Null }
+                & taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
+                & taskkill.exe /IM goodbyedpi.exe /F 2>&1 | Out-Null
+                Start-Sleep -Milliseconds 180
+                foreach ($drv in @("WinDivert","WinDivert14","WinDivert64")) { & sc.exe stop $drv 2>&1 | Out-Null; & sc.exe delete $drv 2>&1 | Out-Null }
+                $okBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ ok = $true } | ConvertTo-Json))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($okBytes, 0, $okBytes.Length)
+                $res.Close()
+                continue
             }
 
             if ($urlPath -eq "/api/app-update/check" -and $req.HttpMethod -eq "GET") {
@@ -486,9 +583,9 @@ Remove-Item -LiteralPath '$($tmpWork.Replace("'", "''"))' -Recurse -Force -Error
                     binCount = @(Get-ChildItem -Path (Join-Path $zDir "bin") -Filter "*.bin" -ErrorAction SilentlyContinue).Count
                     links = @{
                         upstreamRepo = "https://github.com/Flowseal/zapret-discord-youtube"
-                        latestRelease = "https://github.com/Flowseal/zapret-discord-youtube/releases/latest"
+                        latestRelease = "https://github.com/Flowseal/zapret-discord-youtube/releases"
                         coreRepo = "https://github.com/bol-van/zapret"
-                        userRepo = "https://github.com/flare-award/ZapretMaronnFix"
+                        userRepo = "https://github.com/flare-award/ZapretMaronnFix/tree/arena/9383b414-zapretmaronnfix"
                     }
                 }
                 strategies = $strats

@@ -133,6 +133,15 @@ export const api = {
 
   checkUpdates: () => request<UpdateCheckResult>('/api/updates/check'),
 
+  downloadLatestZapretZip: () =>
+    request<{
+      ok: boolean;
+      delegatedToOs: boolean;
+      downloadUrl: string;
+      assetName: string | null;
+      updateInfo: UpdateCheckResult;
+    }>('/api/updates/download-latest', { method: 'POST' }),
+
   checkAppUpdate: () => request<AppProgramUpdateResult>('/api/app-update/check'),
 
   installAppUpdate: (zipBase64?: string) =>

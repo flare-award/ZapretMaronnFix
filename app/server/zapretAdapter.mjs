@@ -6,6 +6,7 @@ import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import https from 'node:https';
 import tls from 'node:tls';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
@@ -501,9 +502,9 @@ export function readZapretInfo(zapretDir) {
     binCount: bins.length,
     links: {
       upstreamRepo: 'https://github.com/Flowseal/zapret-discord-youtube',
-      latestRelease: 'https://github.com/Flowseal/zapret-discord-youtube/releases/latest',
+      latestRelease: 'https://github.com/Flowseal/zapret-discord-youtube/releases',
       coreRepo: 'https://github.com/bol-van/zapret',
-      userRepo: 'https://github.com/flare-award/ZapretMaronnFix',
+      userRepo: 'https://github.com/flare-award/ZapretMaronnFix/tree/arena/9383b414-zapretmaronnfix',
     },
   };
 }
@@ -986,22 +987,29 @@ const SYSTEM_CA_BUNDLE = (() => {
   return undefined;
 })();
 
-function httpsGetViaNode(url, extraHeaders = {}) {
+function httpsGetViaNode(url, extraHeaders = {}, maxRedirects = 6) {
   return new Promise((resolve, reject) => {
     const req = https.get(
       url,
       {
         ca: SYSTEM_CA_BUNDLE,
         headers: {
-          'User-Agent': 'ZapretControl/1.0',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZapretControl/1.3',
           'Cache-Control': 'no-cache',
           ...extraHeaders,
         },
-        timeout: 8000,
+        timeout: 12000,
       },
       (res) => {
-        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          httpsGetViaNode(res.headers.location, extraHeaders).then(resolve, reject);
+        if (
+          res.statusCode &&
+          res.statusCode >= 300 &&
+          res.statusCode < 400 &&
+          res.headers.location &&
+          maxRedirects > 0
+        ) {
+          const nextUrl = new URL(res.headers.location, url).toString();
+          httpsGetViaNode(nextUrl, extraHeaders, maxRedirects - 1).then(resolve, reject);
           res.resume();
           return;
         }
@@ -1012,15 +1020,85 @@ function httpsGetViaNode(url, extraHeaders = {}) {
           if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
             resolve(body);
           } else {
-            reject(new Error(`HTTP ${res.statusCode}: ${body.slice(0, 180)}`));
+            reject(new Error(`HTTP ${res.statusCode} при обращении к ${new URL(url).hostname}`));
           }
         });
       }
     );
     req.on('timeout', () => {
-      req.destroy(new Error('Таймаут запроса к GitHub API'));
+      req.destroy(new Error('Превышено время ожидания ответа от GitHub'));
     });
     req.on('error', reject);
+  });
+}
+
+function httpsGetBufferRaw(url, extraHeaders = {}, maxRedirects = 6) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      url,
+      {
+        ca: SYSTEM_CA_BUNDLE,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZapretControl/1.3',
+          'Cache-Control': 'no-cache',
+          ...extraHeaders,
+        },
+        timeout: 20000,
+      },
+      (res) => {
+        if (
+          res.statusCode &&
+          res.statusCode >= 300 &&
+          res.statusCode < 400 &&
+          res.headers.location &&
+          maxRedirects > 0
+        ) {
+          const nextUrl = new URL(res.headers.location, url).toString();
+          res.resume();
+          httpsGetBufferRaw(nextUrl, extraHeaders, maxRedirects - 1).then(resolve, reject);
+          return;
+        }
+        const chunks = [];
+        res.on('data', (c) => chunks.push(Buffer.from(c)));
+        res.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            resolve(buf);
+          } else {
+            reject(new Error(`HTTP ${res.statusCode}`));
+          }
+        });
+      }
+    );
+    req.on('timeout', () => req.destroy(new Error('Timeout')));
+    req.on('error', reject);
+  });
+}
+
+function resolveRedirectLocation(url) {
+  return new Promise((resolve) => {
+    const req = https.request(
+      url,
+      {
+        method: 'HEAD',
+        ca: SYSTEM_CA_BUNDLE,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZapretControl/1.3',
+        },
+        timeout: 8000,
+      },
+      (res) => {
+        const loc = res.headers.location ? new URL(res.headers.location, url).toString() : null;
+        res.resume();
+        resolve(loc);
+      }
+    );
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.on('error', () => resolve(null));
+    req.end();
   });
 }
 
@@ -1030,7 +1108,7 @@ export async function httpsGetJsonOrText(url, extraHeaders = {}) {
   } catch (nodeErr) {
     // Fallback to OS curl (uses Windows Schannel / OS CA store natively)
     const curlBin = os.platform() === 'win32' ? 'curl.exe' : 'curl';
-    const curlArgs = ['-fsSL', '-m', '10', '-H', 'User-Agent: ZapretControl/1.0'];
+    const curlArgs = ['-fsSL', '-m', '12', '-H', 'User-Agent: Mozilla/5.0 ZapretControl/1.3'];
     for (const [k, v] of Object.entries(extraHeaders)) {
       curlArgs.push('-H', `${k}: ${v}`);
     }
@@ -1042,6 +1120,37 @@ export async function httpsGetJsonOrText(url, extraHeaders = {}) {
       throw nodeErr;
     }
   }
+}
+
+function decodeHtmlEntities(str) {
+  if (!str) return '';
+  return str
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function htmlReleaseContentToPlainText(rawHtml) {
+  if (!rawHtml) return '';
+  const decoded = decodeHtmlEntities(rawHtml);
+  return decoded
+    .replace(/<li[^>]*>/gi, '- ')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<\/h[1-6]>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .join('\n')
+    .trim();
 }
 
 function compareSemver(localVer, remoteVer) {
@@ -1057,39 +1166,183 @@ function compareSemver(localVer, remoteVer) {
   return clean(localVer) !== clean(remoteVer) ? 1 : 0;
 }
 
+let inFlightZapretReleasePromise = null;
+let cachedZapretReleaseMeta = { ts: 0, meta: null };
+
+async function fetchLatestFlowsealReleaseMeta() {
+  const now = Date.now();
+  if (cachedZapretReleaseMeta.meta && now - cachedZapretReleaseMeta.ts < 15000) {
+    return cachedZapretReleaseMeta.meta;
+  }
+  if (inFlightZapretReleasePromise) {
+    return inFlightZapretReleasePromise;
+  }
+
+  inFlightZapretReleasePromise = (async () => {
+    const [redirectLoc, atomXml] = await Promise.all([
+      resolveRedirectLocation('https://github.com/Flowseal/zapret-discord-youtube/releases/latest'),
+      httpsGetJsonOrText('https://github.com/Flowseal/zapret-discord-youtube/releases.atom', {
+        Accept: 'application/atom+xml, text/xml, */*',
+      }).catch(() => ''),
+    ]);
+
+    let targetTag = null;
+    if (redirectLoc) {
+      const m = redirectLoc.match(/\/releases\/tag\/([^/?#]+)/i);
+      if (m) targetTag = decodeURIComponent(m[1]);
+    }
+
+    const entries = [];
+    const entryRe = /<entry>([\s\S]*?)<\/entry>/gi;
+    let em;
+    while ((em = entryRe.exec(atomXml)) !== null) {
+      const block = em[1];
+      const linkMatch = block.match(/\/releases\/tag\/([^"&<>?#]+)/i);
+      const tag = linkMatch ? decodeURIComponent(linkMatch[1]) : null;
+      const updated = (block.match(/<updated>([^<]+)<\/updated>/i) || [])[1] || null;
+      const titleRaw = (block.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
+      const contentRaw = (block.match(/<content[^>]*>([\s\S]*?)<\/content>/i) || [])[1] || '';
+      if (tag) {
+        entries.push({
+          tag,
+          publishedAt: updated ? updated.trim() : null,
+          releaseName: decodeHtmlEntities(titleRaw).trim() || `Zapret ${tag}`,
+          releaseNotes: htmlReleaseContentToPlainText(contentRaw),
+        });
+      }
+    }
+
+    const matchedEntry =
+      (targetTag && entries.find((e) => e.tag === targetTag)) || entries[0] || null;
+    const finalTag = targetTag || (matchedEntry ? matchedEntry.tag : null);
+    if (!finalTag) {
+      throw new Error('Не удалось определить последнюю версию Zapret на GitHub');
+    }
+
+    const cleanVersion = finalTag.replace(/^v/i, '').trim();
+    let downloadUrl = `https://github.com/Flowseal/zapret-discord-youtube/releases/download/${encodeURIComponent(finalTag)}/zapret-discord-youtube-${cleanVersion}.zip`;
+    let assetName = `zapret-discord-youtube-${cleanVersion}.zip`;
+
+    try {
+      const assetsHtml = await httpsGetJsonOrText(
+        `https://github.com/Flowseal/zapret-discord-youtube/releases/expanded_assets/${encodeURIComponent(finalTag)}`
+      );
+      const hrefs = [];
+      const hrefRe = /href="([^"]+\.zip)"/gi;
+      let hm;
+      while ((hm = hrefRe.exec(assetsHtml)) !== null) {
+        hrefs.push(hm[1]);
+      }
+      const releaseZipHref =
+        hrefs.find((h) => h.includes('/releases/download/') && h.toLowerCase().endsWith('.zip')) ||
+        hrefs.find((h) => h.toLowerCase().endsWith('.zip'));
+      if (releaseZipHref) {
+        downloadUrl = new URL(releaseZipHref, 'https://github.com').toString();
+        assetName = decodeURIComponent(downloadUrl.split('/').pop() || assetName);
+      }
+    } catch {
+      // fallback to standard Flowseal zip naming above
+    }
+
+    const meta = {
+      tag: finalTag,
+      latestVersion: cleanVersion,
+      publishedAt: matchedEntry ? matchedEntry.publishedAt : null,
+      releaseName: matchedEntry ? matchedEntry.releaseName : `Zapret ${cleanVersion}`,
+      releaseNotes: matchedEntry ? matchedEntry.releaseNotes : '',
+      htmlUrl: 'https://github.com/Flowseal/zapret-discord-youtube/releases',
+      downloadUrl,
+      assetName,
+    };
+
+    cachedZapretReleaseMeta = { ts: Date.now(), meta };
+    return meta;
+  })().finally(() => {
+    inFlightZapretReleasePromise = null;
+  });
+
+  return inFlightZapretReleasePromise;
+}
+
 export async function checkZapretUpdates(zapretDir) {
   const info = readZapretInfo(zapretDir);
-  const releaseRaw = await httpsGetJsonOrText(
-    'https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest',
-    { Accept: 'application/vnd.github+json' }
-  );
-  const rel = JSON.parse(releaseRaw);
-  const latestVersion = String(rel.tag_name || '').replace(/^v/i, '').trim();
-  const asset = Array.isArray(rel.assets)
-    ? rel.assets.find((a) => String(a.name || '').endsWith('.zip') || String(a.name || '').endsWith('.rar')) || rel.assets[0]
-    : null;
-
-  const cmp = compareSemver(info.localVersion, latestVersion);
+  const meta = await fetchLatestFlowsealReleaseMeta();
+  const cmp = compareSemver(info.localVersion, meta.latestVersion);
 
   return {
     localVersion: info.localVersion,
-    latestVersion: latestVersion || info.localVersion,
+    latestVersion: meta.latestVersion || info.localVersion,
     updateAvailable: cmp > 0,
-    publishedAt: rel.published_at || null,
-    releaseName: rel.name || `Zapret ${latestVersion}`,
-    releaseNotes: rel.body || '',
-    htmlUrl: rel.html_url || info.links.latestRelease,
-    downloadUrl: asset ? asset.browser_download_url : rel.zipball_url || info.links.latestRelease,
-    assetName: asset ? asset.name : null,
+    publishedAt: meta.publishedAt,
+    releaseName: meta.releaseName,
+    releaseNotes: meta.releaseNotes,
+    htmlUrl: 'https://github.com/Flowseal/zapret-discord-youtube/releases',
+    downloadUrl: meta.downloadUrl,
+    assetName: meta.assetName,
     checkedAt: new Date().toISOString(),
   };
 }
 
-export async function updateRemoteIpsetList(zapretDir) {
-  const raw = await httpsGetJsonOrText(
-    'https://api.github.com/repos/Flowseal/zapret-discord-youtube/contents/.service/ipset-service.txt',
-    { Accept: 'application/vnd.github.raw' }
+async function fetchSingleFileFromCodeloadRepoZip(repoSlug, branch, targetRelPath) {
+  const zipBuf = await httpsGetBufferRaw(
+    `https://codeload.github.com/${repoSlug}/zip/refs/heads/${branch}`
   );
+  let eocdPos = -1;
+  const minPos = Math.max(0, zipBuf.length - 65558);
+  for (let i = zipBuf.length - 22; i >= minPos; i--) {
+    if (zipBuf.readUInt32LE(i) === 0x06054b50) {
+      eocdPos = i;
+      break;
+    }
+  }
+  if (eocdPos === -1) throw new Error('Invalid archive');
+  const cdSize = zipBuf.readUInt32LE(eocdPos + 12);
+  const cdOffset = zipBuf.readUInt32LE(eocdPos + 16);
+  const cdEnd = cdOffset + cdSize;
+  const suffix = `/${targetRelPath.replace(/^\/+/, '')}`;
+
+  let pos = cdOffset;
+  while (pos < cdEnd && pos + 46 <= zipBuf.length) {
+    if (zipBuf.readUInt32LE(pos) !== 0x02014b50) break;
+    const method = zipBuf.readUInt16LE(pos + 10);
+    const compSize = zipBuf.readUInt32LE(pos + 20);
+    const nameLen = zipBuf.readUInt16LE(pos + 28);
+    const extraLen = zipBuf.readUInt16LE(pos + 30);
+    const commentLen = zipBuf.readUInt16LE(pos + 32);
+    const localOffset = zipBuf.readUInt32LE(pos + 42);
+    const rawName = zipBuf.subarray(pos + 46, pos + 46 + nameLen).toString('utf8');
+    pos += 46 + nameLen + extraLen + commentLen;
+
+    if (rawName.endsWith(suffix)) {
+      const lhNameLen = zipBuf.readUInt16LE(localOffset + 26);
+      const lhExtraLen = zipBuf.readUInt16LE(localOffset + 28);
+      const dataStart = localOffset + 30 + lhNameLen + lhExtraLen;
+      const compSlice = zipBuf.subarray(dataStart, dataStart + compSize);
+      const out = method === 0 ? compSlice : zlib.inflateRawSync(compSlice);
+      return out.toString('utf8');
+    }
+  }
+  throw new Error(`Файл ${targetRelPath} не найден в архиве репозитория`);
+}
+
+async function fetchFlowsealRepoFileText(relPath) {
+  // Primary: codeload zip stream on codeload.github.com (no api.github.com 60/hr rate limit)
+  try {
+    return await fetchSingleFileFromCodeloadRepoZip(
+      'Flowseal/zapret-discord-youtube',
+      'main',
+      relPath
+    );
+  } catch {
+    // Fallback to raw github url
+    return await httpsGetJsonOrText(
+      `https://github.com/Flowseal/zapret-discord-youtube/raw/main/${relPath}`
+    );
+  }
+}
+
+export async function updateRemoteIpsetList(zapretDir) {
+  const raw = await fetchFlowsealRepoFileText('.service/ipset-service.txt');
   const lines = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   if (lines.length < 10) {
     throw new Error('Получен некорректный ответ при загрузке ipset-service.txt');
@@ -1110,10 +1363,7 @@ export async function updateRemoteIpsetList(zapretDir) {
 }
 
 export async function checkRemoteHostsDiff() {
-  const remoteHosts = await httpsGetJsonOrText(
-    'https://api.github.com/repos/Flowseal/zapret-discord-youtube/contents/.service/hosts',
-    { Accept: 'application/vnd.github.raw' }
-  );
+  const remoteHosts = await fetchFlowsealRepoFileText('.service/hosts');
   const remoteLines = remoteHosts
     .split(/\r?\n/)
     .map((s) => s.trim())

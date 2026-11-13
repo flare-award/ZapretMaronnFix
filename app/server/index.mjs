@@ -41,6 +41,7 @@ import {
   getTestJobState,
   startStrategyProcess,
   stopStrategyProcess,
+  shutdownBypassServicesAndDriver,
   restartIfRunning,
   applyWindowsStartupSetting,
   fixWinDivertConflictsOnWindows,
@@ -496,6 +497,40 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (pathname === '/api/updates/download-latest') {
+    const settings = loadSettings();
+    const updateInfo = await checkZapretUpdates(settings.zapretDir);
+    const zipUrl = updateInfo.downloadUrl;
+    if (method === 'GET' || method === 'HEAD') {
+      res.writeHead(302, {
+        Location: zipUrl,
+        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      });
+      res.end();
+      return;
+    }
+    if (method === 'POST') {
+      const delegated = os.platform() === 'win32';
+      if (delegated) {
+        execFile('rundll32.exe', ['url.dll,FileProtocolHandler', zipUrl], () => {});
+      }
+      sendJson(res, 200, {
+        ok: true,
+        delegatedToOs: delegated,
+        downloadUrl: zipUrl,
+        assetName: updateInfo.assetName,
+        updateInfo,
+      });
+      return;
+    }
+  }
+
+  if (method === 'POST' && pathname === '/api/system/shutdown') {
+    await shutdownBypassServicesAndDriver();
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   if (method === 'GET' && pathname === '/api/app-update/check') {
     const appUpdate = await checkProgramUpdate();
     sendJson(res, 200, appUpdate);
@@ -676,3 +711,9 @@ server.listen(PORT, HOST, async () => {
     console.error('Startup init warning:', err);
   }
 });
+
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    shutdownBypassServicesAndDriver().finally(() => process.exit(0));
+  });
+}

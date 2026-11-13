@@ -64,6 +64,73 @@ async function killExistingWinwsOnWindows() {
   }
 }
 
+async function unloadWinDivertDriverIfIdle() {
+  if (!isWin) return;
+  for (const drv of ['WinDivert', 'WinDivert14', 'WinDivert64']) {
+    try {
+      await execFileAsync('sc.exe', ['stop', drv]);
+    } catch {
+      // ignore
+    }
+    try {
+      await execFileAsync('sc.exe', ['delete', drv]);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export async function shutdownBypassServicesAndDriver() {
+  if (activeChild) {
+    try {
+      activeChild.removeAllListeners('exit');
+      activeChild.kill('SIGTERM');
+    } catch {
+      // ignore
+    }
+    activeChild = null;
+  }
+
+  runtimeState = {
+    ...runtimeState,
+    running: false,
+    activeStrategy: null,
+    startedAt: null,
+    pid: null,
+    expandedCommand: null,
+  };
+
+  if (!isWin) {
+    return { ok: true };
+  }
+
+  for (const svc of ['zapret', 'GoodbyeDPI', 'discordfix_zapret', 'winws1', 'winws2']) {
+    try {
+      await execFileAsync('sc.exe', ['stop', svc]);
+    } catch {
+      // ignore
+    }
+    try {
+      await execFileAsync('net', ['stop', svc]);
+    } catch {
+      // ignore
+    }
+  }
+
+  for (const procName of ['winws.exe', 'goodbyedpi.exe']) {
+    try {
+      await execFileAsync('taskkill', ['/IM', procName, '/F']);
+    } catch {
+      // ignore
+    }
+  }
+
+  await new Promise((r) => setTimeout(r, 180));
+  await unloadWinDivertDriverIfIdle();
+
+  return { ok: true };
+}
+
 async function enableTcpTimestampsOnWindows() {
   if (!isWin) return;
   try {
@@ -84,6 +151,7 @@ export async function stopStrategyProcess() {
     activeChild = null;
   }
   await killExistingWinwsOnWindows();
+  await unloadWinDivertDriverIfIdle();
   runtimeState = {
     ...runtimeState,
     running: false,

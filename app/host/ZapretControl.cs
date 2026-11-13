@@ -224,6 +224,7 @@ namespace ZapretControlHost
         private Process uiAppProcess;
         private DarkTrayMenuForm activeMenu;
         private System.Windows.Forms.Timer iconSyncTimer;
+        private bool windowObservedOpen;
         private bool isShuttingDown;
 
         public TrayHostContext(bool startMinimized)
@@ -246,14 +247,54 @@ namespace ZapretControlHost
             WaitForServerReady(port, 4800);
 
             iconSyncTimer = new System.Windows.Forms.Timer();
-            iconSyncTimer.Interval = 1800;
-            iconSyncTimer.Tick += (s, e) => ApplyWindowIcons();
+            iconSyncTimer.Interval = 1000;
+            iconSyncTimer.Tick += OnWatchdogTick;
             iconSyncTimer.Start();
 
             if (!startMinimized)
             {
                 OpenAppWindow();
             }
+        }
+
+        private void OnWatchdogTick(object sender, EventArgs e)
+        {
+            if (isShuttingDown) return;
+            IntPtr hWnd = Program.FindZapretControlWindow();
+            if (hWnd != IntPtr.Zero)
+            {
+                windowObservedOpen = true;
+                ApplyWindowIcons();
+            }
+            else if (windowObservedOpen)
+            {
+                windowObservedOpen = false;
+                if (!ReadMinimizeToTrayOnClose())
+                {
+                    ShutdownAll();
+                }
+            }
+        }
+
+        private bool ReadMinimizeToTrayOnClose()
+        {
+            try
+            {
+                string settingsPath = Path.Combine(repoRoot, "app", "data", "settings.json");
+                if (File.Exists(settingsPath))
+                {
+                    string raw = File.ReadAllText(settingsPath, Encoding.UTF8);
+                    Match m = Regex.Match(raw, "\"minimizeToTrayOnClose\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
+                    if (m.Success)
+                    {
+                        return string.Equals(m.Groups[1].Value, "true", StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return true;
         }
 
         private void OnTrayMouseUp(object sender, MouseEventArgs e)
@@ -746,9 +787,8 @@ namespace ZapretControlHost
                 900
             );
 
-            // 2. Stop active winws bypass and kill any lingering winws.exe
-            PostApiJson("/api/runner/stop", "{}", 450);
-            RunSilentProcess("taskkill.exe", "/IM winws.exe /F", 600);
+            // 2. Request graceful backend shutdown + stop bypass services
+            PostApiJson("/api/system/shutdown", "{}", 650);
 
             // 3. Terminate backend server process tree
             try
@@ -773,9 +813,33 @@ namespace ZapretControlHost
             {
             }
 
+            // 4. Stop zapret & GoodbyeDPI services, terminate winws/goodbyedpi, and unload WinDivert kernel driver
+            StopBypassServicesAndUnloadWinDivert();
+
             Program.ReleaseSingleInstanceMutex();
             Application.ExitThread();
             Environment.Exit(0);
+        }
+
+        private static void StopBypassServicesAndUnloadWinDivert()
+        {
+            string[] bypassServices = new string[] { "zapret", "GoodbyeDPI", "discordfix_zapret", "winws1", "winws2" };
+            foreach (string svc in bypassServices)
+            {
+                RunSilentProcess("sc.exe", "stop \"" + svc + "\"", 800);
+            }
+
+            RunSilentProcess("taskkill.exe", "/IM winws.exe /F", 600);
+            RunSilentProcess("taskkill.exe", "/IM goodbyedpi.exe /F", 600);
+
+            Thread.Sleep(220);
+
+            string[] driverServices = new string[] { "WinDivert", "WinDivert14", "WinDivert64" };
+            foreach (string drv in driverServices)
+            {
+                RunSilentProcess("sc.exe", "stop \"" + drv + "\"", 700);
+                RunSilentProcess("sc.exe", "delete \"" + drv + "\"", 700);
+            }
         }
     }
 
