@@ -325,19 +325,55 @@ namespace ZapretControlHost
                     Match activeStrat = Regex.Match(json, "\"activeStrategy\"\\s*:\\s*\"([^\"]+)\"");
                     Match selStrat = Regex.Match(json, "\"selectedStrategy\"\\s*:\\s*\"([^\"]+)\"");
                     string strat = activeStrat.Success && !string.IsNullOrEmpty(activeStrat.Groups[1].Value)
-                        ? activeStrat.Groups[1].Value
-                        : (selStrat.Success ? selStrat.Groups[1].Value : "general.bat");
-                    if (strat.EndsWith(".bat", StringComparison.OrdinalIgnoreCase))
+                        ? UnescapeJsonString(activeStrat.Groups[1].Value)
+                        : (selStrat.Success ? UnescapeJsonString(selStrat.Groups[1].Value) : null);
+                    if (!string.IsNullOrEmpty(strat))
                     {
-                        strat = strat.Substring(0, strat.Length - 4);
+                        if (strat.EndsWith(".bat", StringComparison.OrdinalIgnoreCase))
+                        {
+                            strat = strat.Substring(0, strat.Length - 4);
+                        }
+                        snap.StrategyLabel = strat;
                     }
-                    snap.StrategyLabel = strat;
+                    return snap;
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                string settingsPath = Path.Combine(repoRoot, "app", "data", "settings.json");
+                if (File.Exists(settingsPath))
+                {
+                    string rawSettings = File.ReadAllText(settingsPath, Encoding.UTF8);
+                    Match selStrat = Regex.Match(rawSettings, "\"selectedStrategy\"\\s*:\\s*\"([^\"]+)\"");
+                    if (selStrat.Success && !string.IsNullOrEmpty(selStrat.Groups[1].Value))
+                    {
+                        string strat = UnescapeJsonString(selStrat.Groups[1].Value);
+                        if (strat.EndsWith(".bat", StringComparison.OrdinalIgnoreCase))
+                        {
+                            strat = strat.Substring(0, strat.Length - 4);
+                        }
+                        snap.StrategyLabel = strat;
+                    }
                 }
             }
             catch
             {
             }
             return snap;
+        }
+
+        private static string UnescapeJsonString(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return string.Empty;
+            return Regex.Replace(raw, "\\\\u([0-9a-fA-F]{4})", m =>
+            {
+                int code = Convert.ToInt32(m.Groups[1].Value, 16);
+                return ((char)code).ToString();
+            }).Replace("\\\"", "\"").Replace("\\\\", "\\");
         }
 
         private string ResolveRepoRoot()
@@ -783,8 +819,8 @@ namespace ZapretControlHost
         private static readonly Color AccentGreen = Color.FromArgb(125, 216, 166);   // #7DD8A6
         private static readonly Color AccentCoral = Color.FromArgb(242, 184, 181);   // #F2B8B5
 
-        private const int MenuWidth = 268;
-        private const int HeaderHeight = 56;
+        private const int MenuWidth = 264;
+        private const int HeaderHeight = 38;
         private const int ItemHeight = 36;
         private const int SeparatorHeight = 11;
 
@@ -974,7 +1010,7 @@ namespace ZapretControlHost
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
-            // Header surface
+            // Header surface showing only current strategy name
             using (SolidBrush hb = new SolidBrush(BgHeader))
             {
                 g.FillRectangle(hb, 0, 0, Width, HeaderHeight);
@@ -984,38 +1020,18 @@ namespace ZapretControlHost
                 g.DrawLine(divPen, 0, HeaderHeight, Width, HeaderHeight);
             }
 
-            // Brand badge in header
-            using (GraphicsPath badgePath = RoundedRect(new Rectangle(13, 12, 32, 32), 9))
-            using (SolidBrush badgeBrush = new SolidBrush(HoverFill))
+            string strategyTitle = string.IsNullOrEmpty(snapshot.StrategyLabel) ? "general" : snapshot.StrategyLabel;
+            using (Font stratFont = new Font("Segoe UI Semibold", 9.15f, FontStyle.Bold))
+            using (SolidBrush stratBrush = new SolidBrush(TextPrimary))
             {
-                g.FillPath(badgeBrush, badgePath);
-            }
-            DrawShieldGlyph(g, new RectangleF(19f, 18f, 20f, 20f), AccentBlue);
-
-            // Title & live status
-            using (Font titleFont = new Font("Segoe UI Semibold", 9.75f, FontStyle.Bold))
-            using (SolidBrush titleBrush = new SolidBrush(TextPrimary))
-            {
-                g.DrawString("Zapret Control", titleFont, titleBrush, 54f, 10f);
-            }
-
-            Color dotColor = snapshot.Running ? AccentGreen : TextMuted;
-            using (SolidBrush dotBrush = new SolidBrush(dotColor))
-            {
-                g.FillEllipse(dotBrush, 55f, 33.5f, 7f, 7f);
-            }
-
-            string statusLine = (snapshot.Running ? "Активен: " : "Остановлен: ") + snapshot.StrategyLabel;
-            using (Font subFont = new Font("Segoe UI", 8.25f, FontStyle.Regular))
-            using (SolidBrush subBrush = new SolidBrush(TextSecondary))
-            {
-                RectangleF subRect = new RectangleF(66f, 29.5f, Width - 78f, 18f);
+                RectangleF headerRect = new RectangleF(18f, 0f, Width - 32f, HeaderHeight);
                 StringFormat sf = new StringFormat
                 {
+                    LineAlignment = StringAlignment.Center,
                     Trimming = StringTrimming.EllipsisCharacter,
                     FormatFlags = StringFormatFlags.NoWrap
                 };
-                g.DrawString(statusLine, subFont, subBrush, subRect, sf);
+                g.DrawString(strategyTitle, stratFont, stratBrush, headerRect, sf);
             }
 
             // Menu items
@@ -1077,23 +1093,6 @@ namespace ZapretControlHost
             using (Pen borderPen = new Pen(BorderCol, 1f))
             {
                 g.DrawPath(borderPen, outer);
-            }
-        }
-
-        private static void DrawShieldGlyph(Graphics g, RectangleF r, Color color)
-        {
-            using (Pen p = CreateLucidePen(color, 1.85f))
-            {
-                PointF[] pts = new PointF[]
-                {
-                    new PointF(r.Left + r.Width * 0.50f, r.Top + r.Height * 0.08f),
-                    new PointF(r.Left + r.Width * 0.86f, r.Top + r.Height * 0.22f),
-                    new PointF(r.Left + r.Width * 0.82f, r.Top + r.Height * 0.60f),
-                    new PointF(r.Left + r.Width * 0.50f, r.Top + r.Height * 0.92f),
-                    new PointF(r.Left + r.Width * 0.18f, r.Top + r.Height * 0.60f),
-                    new PointF(r.Left + r.Width * 0.14f, r.Top + r.Height * 0.22f)
-                };
-                g.DrawPolygon(p, pts);
             }
         }
 
