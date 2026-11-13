@@ -391,6 +391,19 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, async () => {
   console.log(`Zapret Control UI server listening on http://${HOST}:${PORT}`);
+  if (os.platform() === 'win32' && process.argv.includes('--open')) {
+    const localUrl = `http://127.0.0.1:${PORT}`;
+    const edgePaths = [
+      path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft\\Edge\\Application\\msedge.exe'),
+      path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Microsoft\\Edge\\Application\\msedge.exe'),
+    ];
+    const edgeExe = edgePaths.find((p) => fs.existsSync(p));
+    if (edgeExe) {
+      execFile(edgeExe, [`--app=${localUrl}`, '--window-size=1220,800'], () => {});
+    } else {
+      execFile('explorer.exe', [localUrl], () => {});
+    }
+  }
   // Create initial backup of user lists if not yet backed up
   try {
     const settings = loadSettings();

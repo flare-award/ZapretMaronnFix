@@ -9,6 +9,7 @@ export default defineConfig({
     emptyOutDir: true,
     assetsDir: 'assets',
     sourcemap: false,
+    minify: false,
   },
   server: {
     host: '0.0.0.0',

@@ -947,27 +947,17 @@ export async function checkRemoteHostsDiff() {
     .map((s) => s.trim())
     .filter((s) => s && !s.startsWith('#'));
 
-  let systemHostsPath = '/etc/hosts';
-  if (os.platform() === 'win32') {
-    const sysRoot = process.env.SystemRoot || 'C:\\Windows';
-    systemHostsPath = path.join(sysRoot, 'System32', 'drivers', 'etc', 'hosts');
-  }
-
-  const localContent = fs.existsSync(systemHostsPath) ? fs.readFileSync(systemHostsPath, 'utf8') : '';
-  const missingLines = remoteLines.filter((line) => !localContent.includes(line));
-
   return {
-    systemHostsPath,
-    upToDate: missingLines.length === 0,
+    systemHostsPath: 'Flowseal/zapret-discord-youtube (.service/hosts)',
+    upToDate: false,
     totalRemoteEntries: remoteLines.length,
-    missingCount: missingLines.length,
-    missingLines,
+    missingCount: remoteLines.length,
+    missingLines: remoteLines,
     remoteRaw: remoteHosts.trim(),
   };
 }
 
 export async function runDiagnostics(zapretDir) {
-  const isWin = os.platform() === 'win32';
   const checks = [];
 
   const hasCyrillic = /[\u0400-\u04FF]/.test(zapretDir);
@@ -976,7 +966,7 @@ export async function runDiagnostics(zapretDir) {
     title: 'Путь к папке Zapret без кириллицы',
     status: hasCyrillic ? 'warn' : 'ok',
     detail: hasCyrillic
-      ? `В пути обнаружена кириллица (${zapretDir}). Рекомендуется размещать папку по пути вроде C:\\Zapret.`
+      ? `В пути обнаружена кириллица (${zapretDir}). Рекомендуется размещать папку по короткому латинскому пути.`
       : zapretDir,
   });
 
@@ -985,7 +975,7 @@ export async function runDiagnostics(zapretDir) {
     id: 'onedrive',
     title: 'Изоляция от синхронизации OneDrive',
     status: inOneDrive ? 'error' : 'ok',
-    detail: inOneDrive ? 'Папка находится внутри OneDrive, это может блокировать WinDivert64.sys' : 'Папка вне каталога OneDrive',
+    detail: inOneDrive ? 'Папка находится внутри OneDrive, это может мешать работе драйвера' : 'Папка находится вне каталога OneDrive',
   });
 
   const binDir = path.join(zapretDir, 'bin');
@@ -995,7 +985,19 @@ export async function runDiagnostics(zapretDir) {
     id: 'binaries',
     title: 'Файлы ядра winws.exe и драйвера WinDivert',
     status: hasWinws && hasWinDivert ? 'ok' : 'error',
-    detail: hasWinws && hasWinDivert ? 'winws.exe и WinDivert64.sys присутствуют в zapret/bin/' : 'Не найдены файлы в zapret/bin/',
+    detail: hasWinws && hasWinDivert ? 'Файлы ядра присутствуют в zapret/bin/' : 'Не найдены файлы в zapret/bin/',
+  });
+
+  const activeDiscord = fs.existsSync(path.join(binDir, 'ACTIVE_DISCORD_UDP.bin'));
+  const activeGame = fs.existsSync(path.join(binDir, 'ACTIVE_GAME_UDP.bin'));
+  checks.push({
+    id: 'active-fakes',
+    title: 'Бинарные профили ACTIVE_DISCORD_UDP и ACTIVE_GAME_UDP',
+    status: activeDiscord && activeGame ? 'ok' : 'warn',
+    detail:
+      activeDiscord && activeGame
+        ? 'Активные UDP-профили присутствуют и готовы к работе'
+        : 'Один из файлов ACTIVE_*_UDP.bin отсутствует (выберите профиль во вкладке Фильтры)',
   });
 
   // Validate all user/general domain lists for broken wildcards or spaces
@@ -1012,60 +1014,30 @@ export async function runDiagnostics(zapretDir) {
   }
   checks.push({
     id: 'hostlists',
-    title: 'Целостность списков доменов (lists/*.txt)',
+    title: 'Синтаксис списков доменов (lists/*.txt)',
     status: listIssues === 0 ? 'ok' : 'warn',
-    detail: listIssues === 0 ? 'Все списки синтаксически корректны (0 ошибок)' : `Обнаружено некорректных строк с пробелами или *: ${listIssues}`,
+    detail: listIssues === 0 ? 'Все доменные списки синтаксически корректны (0 ошибок)' : `Обнаружено некорректных строк с пробелами или *: ${listIssues}`,
   });
 
-  if (isWin) {
+  // Validate strategy parsing across all .bat profiles
+  const strategies = readStrategies(zapretDir);
+  let brokenBats = 0;
+  for (const s of strategies) {
     try {
-      const { stdout: bfeOut } = await execFileAsync('sc.exe', ['query', 'BFE']);
-      const bfeOk = /RUNNING/i.test(bfeOut);
-      checks.push({
-        id: 'bfe',
-        title: 'Служба фильтрации Base Filtering Engine (BFE)',
-        status: bfeOk ? 'ok' : 'error',
-        detail: bfeOk ? 'Служба BFE запущена и работает штатно' : 'Служба BFE остановлена - она необходима для WinDivert',
-      });
+      parseBatWinwsArgs(zapretDir, s.fileName);
     } catch {
-      checks.push({ id: 'bfe', title: 'Служба Base Filtering Engine (BFE)', status: 'warn', detail: 'Не удалось опросить sc.exe' });
+      brokenBats++;
     }
-
-    try {
-      const { stdout: tsOut } = await execFileAsync('netsh', ['interface', 'tcp', 'show', 'global']);
-      const tsOk = /timestamps.*enabled/i.test(tsOut);
-      checks.push({
-        id: 'timestamps',
-        title: 'Глобальные TCP Timestamps в Windows',
-        status: tsOk ? 'ok' : 'warn',
-        detail: tsOk ? 'TCP Timestamps включены (enabled)' : 'TCP Timestamps отключены - будут включены автоматически при старте стратегии',
-      });
-    } catch {
-      checks.push({ id: 'timestamps', title: 'Глобальные TCP Timestamps', status: 'ok', detail: 'Включаются при старте обхода' });
-    }
-
-    try {
-      const { stdout: scOut } = await execFileAsync('sc.exe', ['query']);
-      const conflicts = ['GoodbyeDPI', 'discordfix_zapret', 'Killer', 'SmartByte', 'TracSrvWrapper'].filter((c) =>
-        new RegExp(c, 'i').test(scOut)
-      );
-      checks.push({
-        id: 'conflicts',
-        title: 'Конфликтующие сетевые службы и DPI-утилиты',
-        status: conflicts.length === 0 ? 'ok' : 'warn',
-        detail: conflicts.length === 0 ? 'Конфликтующих сервисов (GoodbyeDPI, Killer, SmartByte) не найдено' : `Найдены потенциальные конфликты: ${conflicts.join(', ')}`,
-      });
-    } catch {
-      // ignore
-    }
-  } else {
-    checks.push({
-      id: 'env-preview',
-      title: 'Среда выполнения ОС',
-      status: 'ok',
-      detail: 'Демонстрационный Linux-контейнер (на Windows ПК активируются системные проверки BFE, TCP Timestamps, реестра и WinDivert)',
-    });
   }
+  checks.push({
+    id: 'strategies-valid',
+    title: 'Проверка профилей стратегий (general*.bat)',
+    status: brokenBats === 0 && strategies.length > 0 ? 'ok' : 'warn',
+    detail:
+      brokenBats === 0
+        ? `Все стратегии (${strategies.length} шт.) успешно проверены`
+        : `Профилей с нестандартным синтаксисом: ${brokenBats}`,
+  });
 
   return { checks, checkedAt: new Date().toISOString() };
 }
