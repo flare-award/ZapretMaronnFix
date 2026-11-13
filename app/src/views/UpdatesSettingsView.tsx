@@ -16,6 +16,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { api } from '../api';
+import { ModalBackdrop } from '../components/ModalBackdrop';
 import type {
   AppProgramUpdateResult,
   AppSettings,
@@ -98,44 +99,67 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     }
   };
 
-  const waitForRestartAndReload = (previousBootId?: string) => {
-    let attempts = 0;
+  const waitForRestartAndReload = (previousBootId?: string, previousSha?: string | null) => {
+    const startedAt = Date.now();
     let sawServerDown = false;
-    const timer = setInterval(async () => {
-      attempts++;
-      if (attempts < 2) return;
-      try {
-        const nextState = await api.getState();
-        const bootChanged =
-          Boolean(previousBootId && nextState.serverBootId && nextState.serverBootId !== previousBootId);
-        if (bootChanged || (!previousBootId && sawServerDown)) {
-          clearInterval(timer);
-          window.location.replace(`${window.location.pathname}?updated=${Date.now()}`);
+
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    (async () => {
+      await sleep(350);
+      while (Date.now() - startedAt < 40000) {
+        const ctrl = new AbortController();
+        const timeoutId = setTimeout(() => ctrl.abort(), 1200);
+        try {
+          const res = await fetch(`/api/state?_t=${Date.now()}`, {
+            cache: 'no-store',
+            signal: ctrl.signal,
+          });
+          clearTimeout(timeoutId);
+          if (res.ok) {
+            const nextState = (await res.json()) as FullAppState;
+            const bootChanged = Boolean(
+              previousBootId && nextState.serverBootId && nextState.serverBootId !== previousBootId
+            );
+            const shaChanged = Boolean(
+              previousSha &&
+                nextState.appUpdateState?.installedSha &&
+                nextState.appUpdateState.installedSha !== previousSha
+            );
+            if (bootChanged || shaChanged || sawServerDown) {
+              window.location.replace(`${window.location.pathname}?updated=${Date.now()}`);
+              return;
+            }
+          } else {
+            sawServerDown = true;
+          }
+        } catch {
+          clearTimeout(timeoutId);
+          sawServerDown = true;
         }
-      } catch {
-        sawServerDown = true;
-        if (attempts > 65) {
-          clearInterval(timer);
-          setInstallingAppUpdate(false);
-        }
+        await sleep(350);
       }
-    }, 650);
+
+      setInstallingAppUpdate(false);
+      onNotify('Сервер перезапускается дольше обычного. Обновите окно или перезапустите программу.', true);
+    })();
   };
 
   const handleInstallFromGitHub = async () => {
     const prevBootId = state.serverBootId;
+    const prevSha = state.appUpdateState?.installedSha || null;
     setInstallingAppUpdate(true);
-    setInstallPhaseText('Скачивание сборки с GitHub и сохранение ваших данных...');
+    setInstallPhaseText('Подготовка обновления...');
     try {
       const res = await api.installAppUpdate();
       if (res.restarting) {
-        setInstallPhaseText('Установка файлов и автоматический перезапуск...');
-        waitForRestartAndReload(prevBootId);
+        setInstallPhaseText('Перезапуск программы...');
+        waitForRestartAndReload(prevBootId, prevSha);
       } else {
-        setInstallPhaseText('Обновление установлено. Перезагрузка интерфейса...');
+        setInstallPhaseText('Перезагрузка интерфейса...');
         setTimeout(() => {
           window.location.replace(`${window.location.pathname}?updated=${Date.now()}`);
-        }, 600);
+        }, 450);
       }
     } catch (err) {
       setInstallingAppUpdate(false);
@@ -149,6 +173,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     if (!file) return;
 
     const prevBootId = state.serverBootId;
+    const prevSha = state.appUpdateState?.installedSha || null;
     setInstallingAppUpdate(true);
     setInstallPhaseText(`Чтение архива ${file.name}...`);
     try {
@@ -161,13 +186,13 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
 
       const res = await api.installAppUpdate(base64);
       if (res.restarting) {
-        setInstallPhaseText('Установка файлов и автоматический перезапуск...');
-        waitForRestartAndReload(prevBootId);
+        setInstallPhaseText('Перезапуск программы...');
+        waitForRestartAndReload(prevBootId, prevSha);
       } else {
-        setInstallPhaseText('Обновление установлено. Перезагрузка интерфейса...');
+        setInstallPhaseText('Перезагрузка интерфейса...');
         setTimeout(() => {
           window.location.replace(`${window.location.pathname}?updated=${Date.now()}`);
-        }, 600);
+        }, 450);
       }
     } catch (err) {
       setInstallingAppUpdate(false);
@@ -804,7 +829,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
 
       {/* Modal Overlay while Installing Self-Update */}
       {installingAppUpdate && (
-        <div className="modal-backdrop">
+        <ModalBackdrop>
           <div
             className="modal-panel"
             style={{
@@ -822,7 +847,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
               {installPhaseText}
             </div>
           </div>
-        </div>
+        </ModalBackdrop>
       )}
     </div>
   );

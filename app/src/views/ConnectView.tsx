@@ -44,6 +44,7 @@ import {
   stripBatExtension,
 } from '../utils/metrics';
 import { SeamlessSelect } from '../components/SeamlessSelect';
+import { ModalBackdrop } from '../components/ModalBackdrop';
 
 interface ConnectViewProps {
   state: FullAppState;
@@ -709,8 +710,8 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
 
       {/* Developer Mode Modal: Inspect exact .bat winws command */}
       {inspectStrategy && (
-        <div className="modal-backdrop" onClick={() => setInspectStrategy(null)}>
-          <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+        <ModalBackdrop onClose={() => setInspectStrategy(null)}>
+          <div className="modal-panel">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
               <div>
                 <div style={{ fontSize: '15.5px', fontWeight: 600 }}>
@@ -763,16 +764,15 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
               </button>
             </div>
           </div>
-        </div>
+        </ModalBackdrop>
       )}
 
       {/* Developer Mode Modal: Safe Custom Strategy Builder (#12) */}
       {builderOpen && (
-        <div className="modal-backdrop" onClick={() => setBuilderOpen(false)}>
+        <ModalBackdrop onClose={() => setBuilderOpen(false)}>
           <form
             className="modal-panel"
             style={{ maxWidth: '640px' }}
-            onClick={(e) => e.stopPropagation()}
             onSubmit={handleSaveCustomStrategy}
           >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
@@ -1003,7 +1003,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
               </button>
             </div>
           </form>
-        </div>
+        </ModalBackdrop>
       )}
     </div>
   );

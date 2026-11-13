@@ -119,7 +119,7 @@ namespace ZapretControlHost
             }
 
             bool createdNew = false;
-            int mutexAttempts = relaunchAfterUpdate ? 30 : 1;
+            int mutexAttempts = relaunchAfterUpdate ? 50 : 1;
             for (int i = 0; i < mutexAttempts; i++)
             {
                 singleInstanceMutex = new Mutex(true, "Local\\ZapretControlSingleInstanceMutex", out createdNew);
@@ -303,8 +303,14 @@ namespace ZapretControlHost
             StartBackendServer();
             WaitForServerReady(port, 4800);
 
+            if (waitForPreferredPort)
+            {
+                Program.CloseAllZapretControlWindows();
+                Thread.Sleep(150);
+            }
+
             iconSyncTimer = new System.Windows.Forms.Timer();
-            iconSyncTimer.Interval = 1000;
+            iconSyncTimer.Interval = 600;
             iconSyncTimer.Tick += OnWatchdogTick;
             iconSyncTimer.Start();
             RefreshTrayVisualStateAsync();
@@ -318,6 +324,44 @@ namespace ZapretControlHost
         private void OnWatchdogTick(object sender, EventArgs e)
         {
             if (isShuttingDown) return;
+
+            string hostUpdatingLock = Path.Combine(repoRoot, "app", "data", "host-updating.lock");
+            if (!File.Exists(hostUpdatingLock))
+            {
+                bool backendExited = false;
+                if (backendProcess != null)
+                {
+                    try
+                    {
+                        backendExited = backendProcess.HasExited;
+                    }
+                    catch
+                    {
+                        backendExited = true;
+                    }
+                }
+                else if (powershellBackend != null)
+                {
+                    try
+                    {
+                        backendExited = powershellBackend.HasExited;
+                    }
+                    catch
+                    {
+                        backendExited = true;
+                    }
+                }
+
+                if (backendExited)
+                {
+                    backendProcess = null;
+                    powershellBackend = null;
+                    StartBackendServer();
+                    WaitForServerReady(port, 2500);
+                    RefreshTrayVisualStateAsync();
+                }
+            }
+
             IntPtr hWnd = Program.FindZapretControlWindow();
             if (hWnd != IntPtr.Zero)
             {
@@ -327,7 +371,7 @@ namespace ZapretControlHost
             else if (windowObservedOpen)
             {
                 windowObservedOpen = false;
-                if (!ReadMinimizeToTrayOnClose())
+                if (!File.Exists(hostUpdatingLock) && !ReadMinimizeToTrayOnClose())
                 {
                     ShutdownAll();
                     return;
@@ -335,7 +379,7 @@ namespace ZapretControlHost
             }
 
             tickCounter++;
-            if (tickCounter % 2 == 0)
+            if (tickCounter % 3 == 0)
             {
                 RefreshTrayVisualStateAsync();
             }
@@ -729,7 +773,7 @@ namespace ZapretControlHost
 
         private static int FindAvailablePort(int preferred, bool waitIfBusy)
         {
-            int attempts = waitIfBusy ? 30 : 1;
+            int attempts = waitIfBusy ? 65 : 1;
             for (int i = 0; i < attempts; i++)
             {
                 try
@@ -1223,6 +1267,8 @@ namespace ZapretControlHost
         private readonly Icon brandIcon;
         private readonly List<MenuEntry> entries = new List<MenuEntry>();
         private int hoveredIndex = -1;
+        private int pressedIndex = -1;
+        private bool pressedOutside;
         private bool isExecutingAction;
 
         private static readonly Color BgSurface = Color.FromArgb(23, 27, 36);        // #171B24
@@ -1285,6 +1331,29 @@ namespace ZapretControlHost
         protected override bool ShowWithoutActivation
         {
             get { return false; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                // WS_EX_TOPMOST (0x08) | WS_EX_TOOLWINDOW (0x80) keeps menu above NotifyIconOverflowWindow
+                cp.ExStyle |= 0x00000008 | 0x00000080;
+                return cp;
+            }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_MOUSEACTIVATE = 0x0021;
+            const int MA_ACTIVATE = 1;
+            if (m.Msg == WM_MOUSEACTIVATE)
+            {
+                m.Result = (IntPtr)MA_ACTIVATE;
+                return;
+            }
+            base.WndProc(ref m);
         }
 
         private void BuildEntries(
@@ -1385,6 +1454,7 @@ namespace ZapretControlHost
 
             Location = new Point(x, y);
             Show();
+            NativeWin32.SetForegroundWindow(Handle);
             Activate();
         }
 
@@ -1396,9 +1466,42 @@ namespace ZapretControlHost
             }
         }
 
+        private void ScheduleShieldedDismiss(Action afterAction)
+        {
+            if (IsDisposed) return;
+            // Make window visually invisible immediately while keeping alpha >= 3 (Opacity 0.02)
+            // for 85ms so Windows hit-testing absorbs any trailing WM_LBUTTONUP / touchpad tap
+            // instead of letting it fall through onto tray icons (Discord, Telegram, NVIDIA) underneath.
+            Opacity = 0.02;
+            System.Windows.Forms.Timer closeTimer = new System.Windows.Forms.Timer();
+            closeTimer.Interval = 85;
+            closeTimer.Tick += (s, ev) =>
+            {
+                closeTimer.Stop();
+                closeTimer.Dispose();
+                SafeDismiss();
+            };
+            closeTimer.Start();
+
+            if (afterAction != null)
+            {
+                BeginInvoke(new MethodInvoker(() =>
+                {
+                    try
+                    {
+                        afterAction();
+                    }
+                    catch
+                    {
+                    }
+                }));
+            }
+        }
+
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            if (isExecutingAction) return;
             int found = -1;
             for (int i = 0; i < entries.Count; i++)
             {
@@ -1431,22 +1534,70 @@ namespace ZapretControlHost
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
-            if (e.Button != MouseButtons.Left || isExecutingAction) return;
+            if (isExecutingAction) return;
+
+            // Capture mouse until WM_*BUTTONUP arrives so the button-release event never leaks
+            // to underlying tray overflow icons (Discord / Telegram / NVIDIA).
+            Capture = true;
+
+            if (!ClientRectangle.Contains(e.Location))
+            {
+                pressedOutside = true;
+                pressedIndex = -1;
+                return;
+            }
+
+            pressedOutside = false;
+            if (e.Button != MouseButtons.Left)
+            {
+                pressedIndex = -1;
+                return;
+            }
+
+            int found = -1;
             for (int i = 0; i < entries.Count; i++)
             {
                 MenuEntry item = entries[i];
                 if (!item.IsSeparator && item.Bounds.Contains(e.Location))
                 {
+                    found = i;
+                    break;
+                }
+            }
+            pressedIndex = found;
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (Capture)
+            {
+                Capture = false;
+            }
+            if (isExecutingAction) return;
+
+            if (pressedOutside || !ClientRectangle.Contains(e.Location))
+            {
+                pressedOutside = false;
+                pressedIndex = -1;
+                isExecutingAction = true;
+                ScheduleShieldedDismiss(null);
+                return;
+            }
+
+            if (e.Button == MouseButtons.Left && pressedIndex >= 0 && pressedIndex < entries.Count)
+            {
+                MenuEntry item = entries[pressedIndex];
+                pressedIndex = -1;
+                if (!item.IsSeparator && item.Bounds.Contains(e.Location))
+                {
                     isExecutingAction = true;
-                    Action act = item.OnClick;
-                    SafeDismiss();
-                    if (act != null)
-                    {
-                        act();
-                    }
+                    ScheduleShieldedDismiss(item.OnClick);
                     return;
                 }
             }
+
+            pressedIndex = -1;
         }
 
         protected override void OnPaint(PaintEventArgs e)

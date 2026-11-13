@@ -20,6 +20,7 @@ const CANDIDATE_BRANCHES = [PRIMARY_BRANCH, 'main'];
 const APP_UPDATE_STATE_FILE = path.join(DATA_DIR, 'app-update-state.json');
 const RESUME_AFTER_UPDATE_FILE = path.join(DATA_DIR, 'resume-after-update.json');
 const UPDATE_LOG_FILE = path.join(DATA_DIR, 'last-update.log');
+const HOST_UPDATING_LOCK_FILE = path.join(DATA_DIR, 'host-updating.lock');
 
 // Files inside zapret/ and app/data/ that belong to the user and must never be overwritten
 const PRESERVED_ZAPRET_REL_PATHS = [
@@ -58,12 +59,12 @@ function httpsGetBufferViaNode(url, extraHeaders = {}, maxRedirects = 6) {
       {
         ca: SYSTEM_CA_BUNDLE,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZapretControl/1.3',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZapretControl/1.4',
           Accept: '*/*',
           'Cache-Control': 'no-cache',
           ...extraHeaders,
         },
-        timeout: 30000,
+        timeout: 25000,
       },
       (res) => {
         if (
@@ -95,33 +96,54 @@ function httpsGetBufferViaNode(url, extraHeaders = {}, maxRedirects = 6) {
   });
 }
 
+async function fetchViaCurl(url, extraHeaders = {}) {
+  const curlBin = isWin ? 'curl.exe' : 'curl';
+  const tmpOut = path.join(
+    os.tmpdir(),
+    `zapret-dl-${Date.now()}-${Math.random().toString(36).slice(2)}.bin`
+  );
+  const args = [
+    '-fsSL',
+    '--connect-timeout',
+    '8',
+    '-m',
+    '30',
+    '-H',
+    'User-Agent: Mozilla/5.0 ZapretControl/1.4',
+    '-o',
+    tmpOut,
+  ];
+  for (const [k, v] of Object.entries(extraHeaders)) {
+    args.push('-H', `${k}: ${v}`);
+  }
+  args.push(url);
+  try {
+    await execFileAsync(curlBin, args, { windowsHide: true });
+    const buf = fs.readFileSync(tmpOut);
+    fs.rmSync(tmpOut, { force: true });
+    return buf;
+  } catch (err) {
+    try {
+      fs.rmSync(tmpOut, { force: true });
+    } catch {
+      // ignore
+    }
+    throw err;
+  }
+}
+
 async function fetchBufferWithFallback(url, extraHeaders = {}) {
+  if (isWin) {
+    try {
+      return await fetchViaCurl(url, extraHeaders);
+    } catch {
+      return await httpsGetBufferViaNode(url, extraHeaders);
+    }
+  }
   try {
     return await httpsGetBufferViaNode(url, extraHeaders);
-  } catch (nodeErr) {
-    const curlBin = isWin ? 'curl.exe' : 'curl';
-    const tmpOut = path.join(
-      os.tmpdir(),
-      `zapret-dl-${Date.now()}-${Math.random().toString(36).slice(2)}.bin`
-    );
-    const args = ['-fsSL', '-m', '35', '-H', 'User-Agent: Mozilla/5.0 ZapretControl/1.3', '-o', tmpOut];
-    for (const [k, v] of Object.entries(extraHeaders)) {
-      args.push('-H', `${k}: ${v}`);
-    }
-    args.push(url);
-    try {
-      await execFileAsync(curlBin, args);
-      const buf = fs.readFileSync(tmpOut);
-      fs.rmSync(tmpOut, { force: true });
-      return buf;
-    } catch {
-      try {
-        fs.rmSync(tmpOut, { force: true });
-      } catch {
-        // ignore
-      }
-      throw nodeErr;
-    }
+  } catch {
+    return await fetchViaCurl(url, extraHeaders);
   }
 }
 
@@ -154,6 +176,7 @@ function isProtectedPath(relPosix) {
   if (relPosix.startsWith('app/node_modules/') || relPosix.startsWith('node_modules/')) return true;
   if (relPosix.startsWith('app/data/')) return true;
   if (relPosix.startsWith('zapret/utils/test results/')) return true;
+  if (/^zapret\/custom\s*-.*\.bat$/i.test(relPosix)) return true;
   if (relPosix === 'ZapretControl.exe') return true;
   if (PRESERVED_ZAPRET_REL_PATHS.includes(relPosix)) return true;
   return false;
@@ -167,7 +190,6 @@ function matchesRemoteBlob(localPath, expectedBlobSha) {
     const raw = fs.readFileSync(localPath);
     if (gitBlobSha1(raw) === expectedBlobSha) return true;
 
-    // Git checkout on Windows converts LF -> CRLF; normalize CRLF -> LF for accurate comparison
     if (!raw.includes(0x00) && raw.includes(0x0d)) {
       const lfBuf = Buffer.from(raw.toString('latin1').replace(/\r\n/g, '\n'), 'latin1');
       if (gitBlobSha1(lfBuf) === expectedBlobSha) return true;
@@ -178,10 +200,6 @@ function matchesRemoteBlob(localPath, expectedBlobSha) {
   }
 }
 
-/**
- * Computes a fast deterministic SHA-256 digest of local program files so repeat update checks
- * do not need to re-download or re-compare archives when nothing on disk or GitHub changed.
- */
 function computeLocalProgramDigest() {
   const hash = crypto.createHash('sha256');
   const walk = (dirRel) => {
@@ -262,8 +280,7 @@ export function consumeResumeAfterUpdateFlag() {
 }
 
 /**
- * Pure Node.js ZIP reader using Central Directory + zlib.inflateRawSync.
- * Eliminates PowerShell Expand-Archive slowness/quirks and works identically on Windows & Linux.
+ * Pure Node.js in-memory ZIP reader using Central Directory + zlib.inflateRawSync.
  */
 function iterateZipBuffer(zipBuf) {
   let eocdPos = -1;
@@ -316,7 +333,6 @@ function iterateZipBuffer(zipBuf) {
     files.push({ rawName, data });
   }
 
-  // Strip common top-level folder prefix if GitHub zip wraps everything in Repo-sha/
   let commonPrefix = '';
   const firstSlash = files[0]?.rawName.indexOf('/') ?? -1;
   if (firstSlash > 0) {
@@ -334,20 +350,6 @@ function iterateZipBuffer(zipBuf) {
     .filter((f) => f.relPath && !f.relPath.includes('..'));
 }
 
-function extractZipBufferToDir(zipBuf, destDir) {
-  const entries = iterateZipBuffer(zipBuf);
-  for (const entry of entries) {
-    const fullPath = path.join(destDir, ...entry.relPath.split('/'));
-    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-    fs.writeFileSync(fullPath, entry.data);
-  }
-  return destDir;
-}
-
-/**
- * Fetches latest commit info WITHOUT touching api.github.com (no 60 req/hr rate limit / HTTP 403).
- * Uses GitHub Atom feed + Git Smart HTTP info/refs on github.com.
- */
 async function fetchBranchCommitViaAtom(branch) {
   const encodedBranch = branch.split('/').map(encodeURIComponent).join('/');
   const atomUrl = `https://github.com/${APP_REPO}/commits/${encodedBranch}.atom`;
@@ -402,7 +404,6 @@ async function fetchRefsViaSmartHttp() {
 }
 
 export async function fetchLatestCommitInfo() {
-  // 1. Primary: Atom feeds on github.com (fast, rich metadata, no REST API 60/hr limit)
   const atomCandidates = [];
   for (const branch of CANDIDATE_BRANCHES) {
     try {
@@ -414,14 +415,12 @@ export async function fetchLatestCommitInfo() {
   }
 
   if (atomCandidates.length > 0) {
-    // Prefer PRIMARY_BRANCH unless another candidate has a strictly newer timestamp and includes app/
     const primary = atomCandidates.find((c) => c.branch === PRIMARY_BRANCH);
     if (primary) return primary;
     atomCandidates.sort((a, b) => Date.parse(b.publishedAt || '') - Date.parse(a.publishedAt || ''));
     return atomCandidates[0];
   }
 
-  // 2. Secondary: Git Smart HTTP info/refs (ultra-lightweight git protocol on github.com)
   const refs = await fetchRefsViaSmartHttp();
   for (const branch of CANDIDATE_BRANCHES) {
     const sha = refs.get(branch);
@@ -450,7 +449,9 @@ function getCachedManifestPath(sha) {
 
 async function getOrFetchRemoteManifest(sha) {
   const manifestPath = getCachedManifestPath(sha);
-  if (fs.existsSync(manifestPath)) {
+  const archivePath = getCachedArchivePath(sha);
+
+  if (fs.existsSync(manifestPath) && fs.existsSync(archivePath)) {
     try {
       return JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     } catch {
@@ -458,7 +459,6 @@ async function getOrFetchRemoteManifest(sha) {
     }
   }
 
-  const archivePath = getCachedArchivePath(sha);
   let zipBuf = null;
   if (fs.existsSync(archivePath)) {
     try {
@@ -510,7 +510,6 @@ async function performProgramUpdateCheck() {
   const localState = readLocalAppUpdateState();
   const gitHead = await detectLocalGitHead();
 
-  // Fast-path: already verified this exact commit SHA against unchanged local files (0 extra downloads!)
   if (localState.installedSha === latest.sha && localState.verifiedDigest === localDigest) {
     return {
       repo: APP_REPO,
@@ -622,85 +621,102 @@ function cleanAccidentalNestedDirs() {
   }
 }
 
-function copyTreeFilesRecursive(srcDir, dstDir, { mirrorDelete = false } = {}) {
-  if (!fs.existsSync(srcDir)) return;
-  fs.mkdirSync(dstDir, { recursive: true });
-
-  const srcEntries = fs.readdirSync(srcDir, { withFileTypes: true });
-  const srcNames = new Set(srcEntries.map((e) => e.name));
-
-  if (mirrorDelete && fs.existsSync(dstDir)) {
-    for (const existing of fs.readdirSync(dstDir, { withFileTypes: true })) {
-      if (!srcNames.has(existing.name)) {
+function removeStaleManagedAppFiles(validRelPosixSet) {
+  const pruneWalk = (dirRel) => {
+    const absDir = path.join(REPO_ROOT, ...dirRel.split('/'));
+    if (!fs.existsSync(absDir)) return;
+    for (const ent of fs.readdirSync(absDir, { withFileTypes: true })) {
+      const relPosix = `${dirRel}/${ent.name}`;
+      if (isProtectedPath(relPosix)) continue;
+      const fullPath = path.join(absDir, ent.name);
+      if (ent.isDirectory()) {
+        pruneWalk(relPosix);
         try {
-          fs.rmSync(path.join(dstDir, existing.name), { recursive: true, force: true });
+          if (fs.readdirSync(fullPath).length === 0) {
+            fs.rmdirSync(fullPath);
+          }
         } catch {
-          // ignore locked file
+          // ignore
+        }
+      } else if (ent.isFile() && !validRelPosixSet.has(relPosix)) {
+        try {
+          fs.rmSync(fullPath, { force: true });
+        } catch {
+          // ignore
         }
       }
     }
-  }
+  };
 
-  for (const entry of srcEntries) {
-    const srcPath = path.join(srcDir, entry.name);
-    const dstPath = path.join(dstDir, entry.name);
-    if (entry.isDirectory()) {
-      copyTreeFilesRecursive(srcPath, dstPath, { mirrorDelete });
-    } else if (entry.isFile()) {
-      fs.mkdirSync(path.dirname(dstPath), { recursive: true });
-      fs.copyFileSync(srcPath, dstPath);
-    }
+  for (const sub of APP_SUBDIRS_TO_SYNC) {
+    pruneWalk(`app/${sub}`);
   }
 }
 
-function applyExtractedFilesInNode(sourceRoot, preserveDir) {
+/**
+ * Fast delta-apply directly from in-memory ZIP entries.
+ * Only writes files whose content actually changed, avoiding locked kernel drivers (WinDivert64.sys)
+ * and eliminating slow multi-pass robocopy runs.
+ */
+function applyDeltaZipEntriesInMemory(entries, deferredDir) {
   cleanAccidentalNestedDirs();
 
-  for (const entry of fs.readdirSync(sourceRoot, { withFileTypes: true })) {
-    if (entry.name === '.git' || entry.name === 'app' || entry.name === 'zapret') continue;
-    if (entry.name === 'ZapretControl.exe') continue;
-    const sPath = path.join(sourceRoot, entry.name);
-    const dPath = path.join(REPO_ROOT, entry.name);
+  const validRelPosixSet = new Set();
+  let hostSourceChanged = false;
+  let updatedCount = 0;
+  let deferredCount = 0;
+
+  for (const entry of entries) {
+    const relPosix = entry.relPath;
+    validRelPosixSet.add(relPosix);
+    if (isProtectedPath(relPosix)) continue;
+
+    const dstPath = path.join(REPO_ROOT, ...relPosix.split('/'));
+    const remoteSha = gitBlobSha1(entry.data);
+    if (matchesRemoteBlob(dstPath, remoteSha)) {
+      continue;
+    }
+
+    if (relPosix === 'app/host/ZapretControl.cs' || relPosix === 'app/host/app.ico') {
+      hostSourceChanged = true;
+    }
+
+    // Prepare buffer (ensure UTF-8 BOM + CRLF on .cs and .ps1 for Windows csc.exe / PowerShell 5.1)
+    let outBuf = entry.data;
+    if (relPosix.endsWith('.cs') || relPosix.endsWith('.ps1')) {
+      let rawStr = outBuf.toString('utf8');
+      if (rawStr.charCodeAt(0) === 0xfeff) {
+        rawStr = rawStr.slice(1);
+      }
+      const crlfStr = rawStr.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n');
+      outBuf = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(crlfStr, 'utf8')]);
+    } else if (relPosix.endsWith('.bat')) {
+      let rawStr = outBuf.toString('utf8');
+      if (rawStr.charCodeAt(0) === 0xfeff) {
+        rawStr = rawStr.slice(1);
+      }
+      const crlfStr = rawStr.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n');
+      outBuf = Buffer.from(crlfStr, 'utf8');
+    }
+
     try {
-      if (entry.isDirectory()) {
-        copyTreeFilesRecursive(sPath, dPath, { mirrorDelete: false });
-      } else if (entry.isFile()) {
-        fs.copyFileSync(sPath, dPath);
-      }
+      fs.mkdirSync(path.dirname(dstPath), { recursive: true });
+      fs.writeFileSync(dstPath, outBuf);
+      updatedCount++;
     } catch {
-      // fallback PS script handles any locked root file
-    }
-  }
-
-  const srcApp = path.join(sourceRoot, 'app');
-  if (fs.existsSync(srcApp)) {
-    for (const sub of APP_SUBDIRS_TO_SYNC) {
-      const sSub = path.join(srcApp, sub);
-      const dSub = path.join(APP_DIR, sub);
-      if (fs.existsSync(sSub)) {
-        copyTreeFilesRecursive(sSub, dSub, { mirrorDelete: true });
-      }
-    }
-    for (const entry of fs.readdirSync(srcApp, { withFileTypes: true })) {
-      if (!entry.isFile()) continue;
-      try {
-        fs.copyFileSync(path.join(srcApp, entry.name), path.join(APP_DIR, entry.name));
-      } catch {
-        // ignore
+      // File locked while running: stage ONLY this locked file for post-stop copy
+      if (deferredDir) {
+        const stageFile = path.join(deferredDir, ...relPosix.split('/'));
+        fs.mkdirSync(path.dirname(stageFile), { recursive: true });
+        fs.writeFileSync(stageFile, outBuf);
+        deferredCount++;
       }
     }
   }
 
-  const srcZapret = path.join(sourceRoot, 'zapret');
-  const dstZapret = path.join(REPO_ROOT, 'zapret');
-  if (fs.existsSync(srcZapret)) {
-    copyTreeFilesRecursive(srcZapret, dstZapret, { mirrorDelete: false });
-  }
+  removeStaleManagedAppFiles(validRelPosixSet);
 
-  const preservedZapret = path.join(preserveDir, 'zapret');
-  if (fs.existsSync(preservedZapret)) {
-    copyTreeFilesRecursive(preservedZapret, dstZapret, { mirrorDelete: false });
-  }
+  return { hostSourceChanged, updatedCount, deferredCount };
 }
 
 function escapePsSingleQuoted(str) {
@@ -720,14 +736,6 @@ export async function installProgramUpdate({
   onBeforeApply = null,
 } = {}) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-
-  const tempWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zapret-control-upd-'));
-  const extractDir = path.join(tempWorkDir, 'extracted');
-  const preserveDir = path.join(tempWorkDir, 'preserve');
-  const stagedStateFile = path.join(tempWorkDir, 'app-update-state.json');
-
-  fs.mkdirSync(extractDir, { recursive: true });
-  fs.mkdirSync(preserveDir, { recursive: true });
 
   let commitMeta = null;
   let zipBuf;
@@ -754,33 +762,12 @@ export async function installProgramUpdate({
     }
   }
 
-  const sourceRoot = extractZipBufferToDir(zipBuf, extractDir);
-  if (
-    !fs.existsSync(path.join(sourceRoot, 'app')) &&
-    !fs.existsSync(path.join(sourceRoot, 'ZapretControl.bat'))
-  ) {
+  const entries = iterateZipBuffer(zipBuf);
+  const hasAppFiles = entries.some(
+    (e) => e.relPath.startsWith('app/') || e.relPath === 'ZapretControl.bat'
+  );
+  if (!hasAppFiles) {
     throw new Error('Выбранный архив не содержит файлов программы Zapret Control');
-  }
-
-  for (const rel of PRESERVED_ZAPRET_REL_PATHS) {
-    const src = path.join(REPO_ROOT, ...rel.split('/'));
-    if (fs.existsSync(src)) {
-      const dst = path.join(preserveDir, ...rel.split('/'));
-      fs.mkdirSync(path.dirname(dst), { recursive: true });
-      fs.copyFileSync(src, dst);
-    }
-  }
-
-  const localZapretRoot = path.join(REPO_ROOT, 'zapret');
-  if (fs.existsSync(localZapretRoot)) {
-    for (const fn of fs.readdirSync(localZapretRoot)) {
-      if (/^custom\s*-.*\.bat$/i.test(fn)) {
-        const srcBat = path.join(localZapretRoot, fn);
-        const dstBat = path.join(preserveDir, 'zapret', fn);
-        fs.mkdirSync(path.dirname(dstBat), { recursive: true });
-        fs.copyFileSync(srcBat, dstBat);
-      }
-    }
   }
 
   if (activeRunningStrategy) {
@@ -799,7 +786,10 @@ export async function installProgramUpdate({
     }
   }
 
-  applyExtractedFilesInNode(sourceRoot, preserveDir);
+  const tempWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zapret-control-upd-'));
+  const deferredDir = path.join(tempWorkDir, 'deferred');
+
+  const { hostSourceChanged, deferredCount } = applyDeltaZipEntriesInMemory(entries, deferredDir);
   const newDigest = computeLocalProgramDigest();
 
   const nextUpdateState = commitMeta
@@ -821,33 +811,55 @@ export async function installProgramUpdate({
         updatedAt: new Date().toISOString(),
       };
 
-  fs.writeFileSync(stagedStateFile, JSON.stringify(nextUpdateState, null, 2), 'utf8');
   writeLocalAppUpdateState(nextUpdateState);
   lastCheckCache = { ts: 0, result: null };
 
   if (isWin) {
+    const exePath = path.join(REPO_ROOT, 'ZapretControl.exe');
+    const csPath = path.join(REPO_ROOT, 'app', 'host', 'ZapretControl.cs');
+    let needRebuildExe = hostSourceChanged || !fs.existsSync(exePath);
+    if (!needRebuildExe && fs.existsSync(exePath) && fs.existsSync(csPath)) {
+      try {
+        if (fs.statSync(csPath).mtimeMs > fs.statSync(exePath).mtimeMs + 1000) {
+          needRebuildExe = true;
+        }
+      } catch {
+        needRebuildExe = true;
+      }
+    }
+
     const applyScriptPath = path.join(os.tmpdir(), `zapret-control-restart-${Date.now()}.ps1`);
+    const vbsLauncherPath = path.join(os.tmpdir(), `zapret-control-launch-${Date.now()}.vbs`);
     const psRepo = escapePsSingleQuoted(REPO_ROOT);
-    const psSrc = escapePsSingleQuoted(sourceRoot);
-    const psPreserve = escapePsSingleQuoted(preserveDir);
-    const psStateSrc = escapePsSingleQuoted(stagedStateFile);
-    const psStateDst = escapePsSingleQuoted(APP_UPDATE_STATE_FILE);
+    const psDeferred = escapePsSingleQuoted(deferredDir);
     const psTempWork = escapePsSingleQuoted(tempWorkDir);
     const psLog = escapePsSingleQuoted(UPDATE_LOG_FILE);
+    const psLock = escapePsSingleQuoted(HOST_UPDATING_LOCK_FILE);
     const currentServerPid = process.pid;
     const safePort = Number(targetPort) > 0 ? Number(targetPort) : 3847;
+    const psNeedRebuild = needRebuildExe ? '$true' : '$false';
+    const psHasDeferred = deferredCount > 0 ? '$true' : '$false';
+
+    if (needRebuildExe) {
+      try {
+        fs.writeFileSync(HOST_UPDATING_LOCK_FILE, String(Date.now()), 'utf8');
+      } catch {
+        // ignore
+      }
+    }
 
     const psScript = `
+$ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Continue'
 $repoRoot = '${psRepo}'
-$srcRoot = '${psSrc}'
-$preserveDir = '${psPreserve}'
-$stateSrc = '${psStateSrc}'
-$stateDst = '${psStateDst}'
+$deferredDir = '${psDeferred}'
 $tempWork = '${psTempWork}'
 $logFile = '${psLog}'
+$lockFile = '${psLock}'
 $targetPort = ${safePort}
 $oldServerPid = ${currentServerPid}
+$needRebuildExe = ${psNeedRebuild}
+$hasDeferred = ${psHasDeferred}
 
 function Write-UpdLog([string]$msg) {
     try {
@@ -856,100 +868,131 @@ function Write-UpdLog([string]$msg) {
     } catch {}
 }
 
-Write-UpdLog ('Starting silent restart finalizer (oldServerPid=' + $oldServerPid + ', port=' + $targetPort + ')')
-Start-Sleep -Milliseconds 600
+function Test-BackendAlive([int]$port) {
+    try {
+        $req = [System.Net.HttpWebRequest]::Create(('http://127.0.0.1:' + $port + '/api/state'))
+        $req.Timeout = 450
+        $resp = $req.GetResponse()
+        $code = [int]$resp.StatusCode
+        $resp.Close()
+        return ($code -eq 200)
+    } catch {
+        return $false
+    }
+}
 
-# 1. Stop old tray host process (without killing our own PowerShell process)
-try {
-    Get-Process -Name 'ZapretControl' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Wait-Process -Name 'ZapretControl' -Timeout 5 -ErrorAction SilentlyContinue
-} catch {}
+function Wait-PortFree([int]$port, [int]$maxWaitMs) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $maxWaitMs) {
+        try {
+            $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $port)
+            $l.Start()
+            $l.Stop()
+            return $true
+        } catch {
+            Start-Sleep -Milliseconds 90
+        }
+    }
+    return $false
+}
 
-# 2. Stop old Node server PID directly (NEVER use taskkill /T, which would kill this child PowerShell!)
+Write-UpdLog ('Restart script started (needRebuildExe=' + $needRebuildExe + ', port=' + $targetPort + ')')
+Start-Sleep -Milliseconds 220
+
+# Stop old server process if still alive
 try {
     $srvProc = Get-Process -Id $oldServerPid -ErrorAction SilentlyContinue
     if ($null -ne $srvProc) {
         Stop-Process -Id $oldServerPid -Force -ErrorAction SilentlyContinue
-        Wait-Process -Id $oldServerPid -Timeout 4 -ErrorAction SilentlyContinue
+        Wait-Process -Id $oldServerPid -Timeout 3 -ErrorAction SilentlyContinue
     }
 } catch {}
 
-& taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
-Start-Sleep -Milliseconds 250
-
-# 3. Ensure old ZapretControl.exe is unlocked so csc.exe can rebuild cleanly
 $exePath = Join-Path $repoRoot 'ZapretControl.exe'
-for ($i = 0; $i -lt 25; $i++) {
-    if (-not (Test-Path -LiteralPath $exePath)) { break }
-    try {
-        Remove-Item -LiteralPath $exePath -Force -ErrorAction Stop
-        break
-    } catch {
-        Get-Process -Name 'ZapretControl' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 200
+
+# Fast path: if ZapretControl.exe did NOT change and is running, let its watchdog respawn the server in-place!
+if (-not $needRebuildExe -and -not $hasDeferred) {
+    $trayRunning = @(Get-Process -Name 'ZapretControl' -ErrorAction SilentlyContinue).Count -gt 0
+    if ($trayRunning) {
+        for ($w = 0; $w -lt 14; $w++) {
+            Start-Sleep -Milliseconds 180
+            if (Test-BackendAlive $targetPort) {
+                Write-UpdLog 'In-place fast backend restart succeeded via TrayHost watchdog'
+                Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $tempWork -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+                exit 0
+            }
+        }
+        Write-UpdLog 'TrayHost appears to be an older build without watchdog; performing full host relaunch'
     }
 }
 
-# 4. Mirror updated files to ensure 100% consistency after process unlock
-foreach ($sub in @('server', 'static', 'src', 'host', 'public')) {
-    $nested = Join-Path (Join-Path (Join-Path $repoRoot 'app') $sub) $sub
-    if (Test-Path -LiteralPath $nested) {
-        Remove-Item -LiteralPath $nested -Recurse -Force -ErrorAction SilentlyContinue
+# Full host relaunch path (when ZapretControl.cs changed or tray host was an older build / not running)
+try {
+    [System.IO.File]::WriteAllText($lockFile, 'updating')
+} catch {}
+
+# Close old --app browser window so it can never get stuck on a dead socket
+try {
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and ($_.CommandLine -like '*ui-window-v2*' -or $_.CommandLine -like '*window-profile*')
+    } | ForEach-Object {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
     }
-    $sSub = Join-Path (Join-Path $srcRoot 'app') $sub
-    $dSub = Join-Path (Join-Path $repoRoot 'app') $sub
-    if (Test-Path -LiteralPath $sSub) {
-        & robocopy.exe $sSub $dSub /MIR /R:3 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-        Write-UpdLog ('Mirrored app\\' + $sub + ' exit=' + $LASTEXITCODE)
+} catch {}
+
+try {
+    Get-Process -Name 'ZapretControl' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Wait-Process -Name 'ZapretControl' -Timeout 4 -ErrorAction SilentlyContinue
+} catch {}
+
+& taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
+Wait-PortFree $targetPort 4500 | Out-Null
+
+if ($hasDeferred -and (Test-Path -LiteralPath $deferredDir)) {
+    Get-ChildItem -LiteralPath $deferredDir -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        $rel = $_.FullName.Substring($deferredDir.Length).TrimStart('\\', '/')
+        $dst = Join-Path $repoRoot $rel
+        $dstParent = [System.IO.Path]::GetDirectoryName($dst)
+        if (-not (Test-Path -LiteralPath $dstParent)) {
+            New-Item -ItemType Directory -Force -Path $dstParent | Out-Null
+        }
+        try { [System.IO.File]::Copy($_.FullName, $dst, $true) } catch {}
     }
 }
 
-Get-ChildItem -LiteralPath (Join-Path $srcRoot 'app') -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
-    [System.IO.File]::Copy($_.FullName, (Join-Path (Join-Path $repoRoot 'app') $_.Name), $true)
-}
-
-$srcLauncher = Join-Path $srcRoot 'ZapretControl.bat'
-if (Test-Path -LiteralPath $srcLauncher) {
-    [System.IO.File]::Copy($srcLauncher, (Join-Path $repoRoot 'ZapretControl.bat'), $true)
-}
-
-$srcZapret = Join-Path $srcRoot 'zapret'
-$dstZapret = Join-Path $repoRoot 'zapret'
-if (Test-Path -LiteralPath $srcZapret) {
-    & robocopy.exe $srcZapret $dstZapret /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-}
-
-$presZapret = Join-Path $preserveDir 'zapret'
-if (Test-Path -LiteralPath $presZapret) {
-    & robocopy.exe $presZapret $dstZapret /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-}
-
-if (Test-Path -LiteralPath $stateSrc) {
-    $stateDir = [System.IO.Path]::GetDirectoryName($stateDst)
-    if (-not (Test-Path -LiteralPath $stateDir)) {
-        New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+if ($needRebuildExe -or -not (Test-Path -LiteralPath $exePath)) {
+    for ($i = 0; $i -lt 20; $i++) {
+        if (-not (Test-Path -LiteralPath $exePath)) { break }
+        try {
+            Remove-Item -LiteralPath $exePath -Force -ErrorAction Stop
+            break
+        } catch {
+            Get-Process -Name 'ZapretControl' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 150
+        }
     }
-    [System.IO.File]::Copy($stateSrc, $stateDst, $true)
-}
 
-# 5. Recompile ZapretControl.exe directly via csc.exe (silent, no .bat console window, no ShellExecute sound)
-$csPath = Join-Path $repoRoot 'app\\host\\ZapretControl.cs'
-$icoPath = Join-Path $repoRoot 'app\\host\\app.ico'
-$csc64 = Join-Path $env:SystemRoot 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'
-$csc32 = Join-Path $env:SystemRoot 'Microsoft.NET\\Framework\\v4.0.30319\\csc.exe'
-$csc = if (Test-Path -LiteralPath $csc64) { $csc64 } elseif (Test-Path -LiteralPath $csc32) { $csc32 } else { $null }
+    $csPath = Join-Path $repoRoot 'app\\host\\ZapretControl.cs'
+    $icoPath = Join-Path $repoRoot 'app\\host\\app.ico'
+    $csc64 = Join-Path $env:SystemRoot 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'
+    $csc32 = Join-Path $env:SystemRoot 'Microsoft.NET\\Framework\\v4.0.30319\\csc.exe'
+    $csc = if (Test-Path -LiteralPath $csc64) { $csc64 } elseif (Test-Path -LiteralPath $csc32) { $csc32 } else { $null }
 
-if ($null -ne $csc -and (Test-Path -LiteralPath $csPath)) {
-    $cscArgs = @('/nologo', '/target:winexe', '/optimize+', ("/out:$exePath"), '/r:System.dll', '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll')
-    if (Test-Path -LiteralPath $icoPath) {
-        $cscArgs += ("/win32icon:$icoPath")
+    if ($null -ne $csc -and (Test-Path -LiteralPath $csPath)) {
+        $cscArgs = @('/nologo', '/target:winexe', '/optimize+', ("/out:$exePath"), '/r:System.dll', '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll')
+        if (Test-Path -LiteralPath $icoPath) {
+            $cscArgs += ("/win32icon:$icoPath")
+        }
+        $cscArgs += $csPath
+        & $csc @cscArgs 2>&1 | Out-Null
+        Write-UpdLog ('Compiled ZapretControl.exe exit=' + $LASTEXITCODE)
     }
-    $cscArgs += $csPath
-    & $csc @cscArgs 2>&1 | Out-Null
-    Write-UpdLog ('Compiled ZapretControl.exe exit=' + $LASTEXITCODE)
 }
 
-# 6. Launch new host (or fallback node server) via CreateProcess (UseShellExecute=$false -> zero OS error sounds)
+Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+
 if (Test-Path -LiteralPath $exePath) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exePath
@@ -958,7 +1001,7 @@ if (Test-Path -LiteralPath $exePath) {
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     [System.Diagnostics.Process]::Start($psi) | Out-Null
-    Write-UpdLog 'Launched ZapretControl.exe successfully'
+    Write-UpdLog 'Launched ZapretControl.exe cleanly'
 } else {
     $nodeCmd = Get-Command 'node.exe' -ErrorAction SilentlyContinue
     if ($null -ne $nodeCmd) {
@@ -974,43 +1017,64 @@ if (Test-Path -LiteralPath $exePath) {
     }
 }
 
-Start-Sleep -Milliseconds 500
+Start-Sleep -Milliseconds 300
 Remove-Item -LiteralPath $tempWork -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 `;
 
     writeUtf8BomCrlf(applyScriptPath, psScript);
 
-    const detached = spawn(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-WindowStyle',
-        'Hidden',
-        '-File',
-        applyScriptPath,
-      ],
-      {
+    // Launch via silent wscript.exe //B trampoline so child powershell.exe NEVER inherits
+    // open socket handles (port 3847) from the dying server process and produces zero window flash/sounds.
+    const escapedPsPathForVbs = applyScriptPath.replace(/"/g, '""');
+    const vbsContent = [
+      'Set sh = CreateObject("WScript.Shell")',
+      `sh.Run "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File ""${escapedPsPathForVbs}""", 0, False`,
+      'Set fso = CreateObject("Scripting.FileSystemObject")',
+      'On Error Resume Next',
+      'fso.DeleteFile WScript.ScriptFullName, True',
+    ].join('\r\n');
+    fs.writeFileSync(vbsLauncherPath, vbsContent, 'utf8');
+
+    try {
+      const wscriptChild = spawn('wscript.exe', ['//B', '//NoLogo', vbsLauncherPath], {
         cwd: os.tmpdir(),
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
-      }
-    );
-    detached.unref();
+      });
+      wscriptChild.unref();
+    } catch {
+      const fallbackPs = spawn(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-WindowStyle',
+          'Hidden',
+          '-File',
+          applyScriptPath,
+        ],
+        {
+          cwd: os.tmpdir(),
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        }
+      );
+      fallbackPs.unref();
+    }
 
     return {
       ok: true,
       restarting: true,
       installedShortSha: nextUpdateState.installedShortSha,
-      message: 'Обновление установлено, выполняется автоматический перезапуск...',
+      message: 'Обновление установлено, выполняется перезапуск...',
     };
   }
 
-  writeLocalAppUpdateState(nextUpdateState);
   fs.rmSync(tempWorkDir, { recursive: true, force: true });
 
   return {

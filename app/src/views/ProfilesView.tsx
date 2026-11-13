@@ -18,6 +18,7 @@ import type {
   IpsetFilterMode,
   UserProfile,
 } from '../types';
+import { ModalBackdrop } from '../components/ModalBackdrop';
 
 interface ProfilesViewProps {
   state: FullAppState;
@@ -257,11 +258,10 @@ export const ProfilesView: React.FC<ProfilesViewProps> = ({
 
       {/* Create / Edit Profile Info Modal */}
       {modalMode && (
-        <div className="modal-backdrop" onClick={closeModal}>
+        <ModalBackdrop onClose={closeModal}>
           <form
             className="modal-panel"
             style={{ maxWidth: '460px' }}
-            onClick={(e) => e.stopPropagation()}
             onSubmit={handleSubmit}
           >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
@@ -336,7 +336,7 @@ export const ProfilesView: React.FC<ProfilesViewProps> = ({
               </button>
             </div>
           </form>
-        </div>
+        </ModalBackdrop>
       )}
     </div>
   );

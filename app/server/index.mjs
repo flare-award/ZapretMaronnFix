@@ -579,13 +579,25 @@ async function handleApi(req, res, pathname, urlObj) {
     sendJson(res, 200, result);
     if (result.restarting) {
       setTimeout(() => {
+        for (const client of sseClients) {
+          try {
+            client.end();
+            client.socket?.destroy();
+          } catch {
+            // ignore
+          }
+        }
+        sseClients.clear();
         try {
+          if (typeof server.closeAllConnections === 'function') {
+            server.closeAllConnections();
+          }
           server.close();
         } catch {
           // ignore
         }
         process.exit(0);
-      }, 350);
+      }, 160);
     }
     return;
   }

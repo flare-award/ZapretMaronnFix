@@ -32,6 +32,7 @@ import {
   sortStrategiesWithMetrics,
 } from '../utils/metrics';
 import { SeamlessSelect } from '../components/SeamlessSelect';
+import { ModalBackdrop } from '../components/ModalBackdrop';
 
 interface TestsViewProps {
   state: FullAppState;
@@ -739,11 +740,10 @@ export const TestsView: React.FC<TestsViewProps> = ({
 
       {/* Comparison Modal (#10) */}
       {compareOpen && (
-        <div className="modal-backdrop" onClick={() => setCompareOpen(false)}>
+        <ModalBackdrop onClose={() => setCompareOpen(false)}>
           <div
             className="modal-panel"
             style={{ maxWidth: '680px' }}
-            onClick={(e) => e.stopPropagation()}
           >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
@@ -940,7 +940,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
               </>
             )}
           </div>
-        </div>
+        </ModalBackdrop>
       )}
     </div>
   );
