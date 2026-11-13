@@ -11,6 +11,7 @@ import {
   ArrowUpCircle,
   Calendar,
   Save,
+  LayoutPanelLeft,
 } from 'lucide-react';
 import { api } from '../api';
 import type { AppSettings, FullAppState, UpdateCheckResult } from '../types';
@@ -55,6 +56,10 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     setCustomDir(settings.zapretDir);
   }, [settings.zapretDir]);
 
+  const handleOpenExternal = (url: string) => {
+    api.openExternalUrl(url);
+  };
+
   const handleSaveBackup = async () => {
     setBackupBusy(true);
     try {
@@ -94,7 +99,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     }
   };
 
-  const switches: Array<{
+  const startupSwitches: Array<{
     key: keyof AppSettings;
     title: string;
     desc: string;
@@ -102,7 +107,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     {
       key: 'autoStartStrategyOnLaunch',
       title: 'Включать стратегию при запуске программы',
-      desc: 'При открытии программы автоматически запускает последнюю выбранную стратегию со всеми сохранёнными фильтрами и списками.',
+      desc: 'При открытии программы автоматически запускает выбранную стратегию активного профиля со всеми фильтрами.',
     },
     {
       key: 'launchOnWindowsStartup',
@@ -122,7 +127,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     {
       key: 'autoRestartOnFilterChange',
       title: 'Мгновенно применять изменения фильтров и списков',
-      desc: 'Автоматически перезапускает активный процесс winws.exe при переключении Game Filter, IPSet или сохранении списков.',
+      desc: 'Автоматически перезапускает активный процесс winws.exe при переключении профиля, Game Filter, IPSet или сохранении списков.',
     },
     {
       key: 'autoCheckUpdates',
@@ -131,9 +136,111 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     },
   ];
 
+  const isClassicStackedLayout = settings.connectLayout === 'stacked';
+  const showBestCards = settings.showBestStrategyCards !== false;
+
   return (
     <div className="content-container">
-      {/* Zapret Core Version & Update Checker */}
+      {/* Interface & Display Settings */}
+      <div className="m3-card">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
+          <div className="brand-mark">
+            <LayoutPanelLeft size={18} />
+          </div>
+          <div>
+            <div style={{ fontSize: '15px', fontWeight: 600 }}>Отображение и интерфейс</div>
+            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
+              Настройка расположения панелей на главном экране и карточек рекомендаций в тестах
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div className="m3-switch-row">
+            <div className="m3-switch-info">
+              <div className="m3-switch-title">
+                Показывать плашки лучших стратегий во вкладке «Тесты и цели»
+              </div>
+              <div className="m3-switch-desc">
+                Отображает карточки «Лучшая универсальная», «Лучшая для Discord», «Лучшая для YouTube», «Лучшая для Cloudflare» и «Лучшая для GitHub».
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={showBestCards}
+              className={`m3-switch ${showBestCards ? 'checked' : ''}`}
+              onClick={() => onUpdateSettings({ showBestStrategyCards: !showBestCards })}
+            >
+              <span className="m3-switch-thumb" />
+            </button>
+          </div>
+
+          <div className="m3-switch-row">
+            <div className="m3-switch-info">
+              <div className="m3-switch-title">
+                Классическое расположение вкладки «Подключение» (список стратегий снизу)
+              </div>
+              <div className="m3-switch-desc">
+                По умолчанию список стратегий находится справа от кнопки подключения, а 4 плашки фильтров — под кнопкой. Включите, чтобы вернуть прежний вариант.
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={isClassicStackedLayout}
+              className={`m3-switch ${isClassicStackedLayout ? 'checked' : ''}`}
+              onClick={() =>
+                onUpdateSettings({
+                  connectLayout: isClassicStackedLayout ? 'split' : 'stacked',
+                })
+              }
+            >
+              <span className="m3-switch-thumb" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Program Startup & Auto-Enable Strategy Settings */}
+      <div className="m3-card">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
+          <div className="brand-mark">
+            <Settings2 size={18} />
+          </div>
+          <div>
+            <div style={{ fontSize: '15px', fontWeight: 600 }}>Автозапуск и поведение программы</div>
+            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
+              Настройки применяются мгновенно и сохраняются между перезапусками и обновлениями Zapret
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {startupSwitches.map((sw) => {
+            const checked = Boolean(settings[sw.key]);
+            return (
+              <div key={sw.key} className="m3-switch-row">
+                <div className="m3-switch-info">
+                  <div className="m3-switch-title">{sw.title}</div>
+                  <div className="m3-switch-desc">{sw.desc}</div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={checked}
+                  className={`m3-switch ${checked ? 'checked' : ''}`}
+                  onClick={() => onUpdateSettings({ [sw.key]: !checked })}
+                >
+                  <span className="m3-switch-thumb" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Zapret Version & Update Checker */}
       <div className="m3-card">
         <div
           style={{
@@ -177,7 +284,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
               v{zapretInfo.localVersion}
             </div>
             <div style={{ fontSize: '11.5px', color: 'var(--m3-text-muted)', marginTop: '4px' }}>
-              Профилей: {zapretInfo.strategyCount} / бинарных пакетов: {zapretInfo.binCount}
+              Стратегий: {zapretInfo.strategyCount} / бинарных пакетов: {zapretInfo.binCount}
             </div>
           </div>
 
@@ -204,7 +311,15 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
           </div>
 
           <div className="m3-card-compact" style={{ background: 'var(--m3-surface-low)' }}>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', display: 'flex', alignItems: 'center', gap: '5px' }}>
+            <div
+              style={{
+                fontSize: '12px',
+                color: 'var(--m3-text-secondary)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px',
+              }}
+            >
               <Calendar size={13} />
               Дата выхода релиза
             </div>
@@ -217,53 +332,52 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
           </div>
         </div>
 
-        {/* Links & Release Notes */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: updateInfo?.releaseNotes ? '12px' : 0 }}>
+        {/* External Links opened via OS Default Browser */}
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '8px',
+            marginBottom: updateInfo?.releaseNotes ? '12px' : 0,
+          }}
+        >
           {updateInfo?.downloadUrl && (
-            <a
-              href={updateInfo.downloadUrl}
-              target="_blank"
-              rel="noreferrer"
+            <button
+              type="button"
               className="btn btn-tonal"
-              style={{ textDecoration: 'none' }}
+              onClick={() => handleOpenExternal(updateInfo.downloadUrl!)}
             >
               <Download size={14} />
               Скачать архив релиза {updateInfo.assetName || ''}
-            </a>
+            </button>
           )}
 
-          <a
-            href={updateInfo?.htmlUrl || zapretInfo.links.latestRelease}
-            target="_blank"
-            rel="noreferrer"
+          <button
+            type="button"
             className="btn btn-surface"
-            style={{ textDecoration: 'none' }}
+            onClick={() => handleOpenExternal(updateInfo?.htmlUrl || zapretInfo.links.latestRelease)}
           >
             <ExternalLink size={14} />
             Страница релиза GitHub
-          </a>
+          </button>
 
-          <a
-            href={zapretInfo.links.upstreamRepo}
-            target="_blank"
-            rel="noreferrer"
+          <button
+            type="button"
             className="btn btn-surface"
-            style={{ textDecoration: 'none' }}
+            onClick={() => handleOpenExternal(zapretInfo.links.upstreamRepo)}
           >
             <ExternalLink size={14} />
             Репозиторий Flowseal
-          </a>
+          </button>
 
-          <a
-            href={zapretInfo.links.coreRepo}
-            target="_blank"
-            rel="noreferrer"
+          <button
+            type="button"
             className="btn btn-surface"
-            style={{ textDecoration: 'none' }}
+            onClick={() => handleOpenExternal(zapretInfo.links.coreRepo)}
           >
             <ExternalLink size={14} />
-            Ядро bol-van/zapret
-          </a>
+            Репозиторий bol-van/zapret
+          </button>
         </div>
 
         {updateInfo?.releaseNotes && (
@@ -295,7 +409,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
           Изолированная папка файлов Zapret и сохранность ваших списков
         </div>
         <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginBottom: '14px' }}>
-          Чтобы обновить Zapret вручную, просто распакуйте новые файлы в папку ниже с заменой. Настройки программы и резервные копии пользовательских списков хранятся отдельно в app/data и не затираются.
+          Чтобы обновить Zapret вручную, просто распакуйте новые файлы в папку ниже с заменой. Настройки, профили и резервные копии пользовательских списков хранятся отдельно в app/data и не затираются. Файлы в папке отслеживаются автоматически в реальном времени.
         </div>
 
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '12px' }}>
@@ -330,44 +444,6 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             <RotateCcw size={14} />
             Восстановить мои списки после обновления
           </button>
-        </div>
-      </div>
-
-      {/* Program Startup & Auto-Enable Strategy Settings */}
-      <div className="m3-card">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
-          <div className="brand-mark">
-            <Settings2 size={18} />
-          </div>
-          <div>
-            <div style={{ fontSize: '15px', fontWeight: 600 }}>Автозапуск и поведение программы</div>
-            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
-              Настройки применяются мгновенно и сохраняются между перезапусками и обновлениями Zapret
-            </div>
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          {switches.map((sw) => {
-            const checked = Boolean(settings[sw.key]);
-            return (
-              <div key={sw.key} className="m3-switch-row">
-                <div className="m3-switch-info">
-                  <div className="m3-switch-title">{sw.title}</div>
-                  <div className="m3-switch-desc">{sw.desc}</div>
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={checked}
-                  className={`m3-switch ${checked ? 'checked' : ''}`}
-                  onClick={() => onUpdateSettings({ [sw.key]: !checked })}
-                >
-                  <span className="m3-switch-thumb" />
-                </button>
-              </div>
-            );
-          })}
         </div>
       </div>
     </div>

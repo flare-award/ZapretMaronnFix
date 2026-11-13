@@ -1,4 +1,4 @@
-param(
+﻿param(
     [int]$Port = 3847,
     [string]$RepoRoot = (Resolve-Path "$PSScriptRoot\..\..").Path
 )
@@ -11,6 +11,7 @@ $StaticDir = Join-Path $AppDir "static"
 $DataDir = Join-Path $AppDir "data"
 $BackupDir = Join-Path $DataDir "user-lists-backup"
 $SettingsFile = Join-Path $DataDir "settings.json"
+$ProfilesFile = Join-Path $DataDir "profiles.json"
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
 
@@ -22,6 +23,9 @@ function Get-AppSettings {
     $defaults = [ordered]@{
         zapretDir = (Join-Path $RepoRoot "zapret")
         selectedStrategy = "general (ALT11).bat"
+        activeProfileId = "default"
+        showBestStrategyCards = $true
+        connectLayout = "split"
         autoStartStrategyOnLaunch = $false
         launchOnWindowsStartup = $false
         startMinimizedToTray = $false
@@ -69,6 +73,48 @@ function Read-GameFilter($zapretDir) {
         }
     }
     return @{ mode = $mode; tcpRange = $tcp; udpRange = $udp }
+}
+
+function Write-GameFilter($zapretDir, $mode, $tcp, $udp) {
+    $utilsDir = Join-Path $zapretDir "utils"
+    New-Item -ItemType Directory -Force -Path $utilsDir | Out-Null
+    $flag = Join-Path $utilsDir "game_filter.enabled"
+    if ($mode -eq "disabled") {
+        if (Test-Path $flag) { Remove-Item -Force $flag }
+        return
+    }
+    $text = "$mode`r`nmode=$mode`r`ntcp=$tcp`r`nudp=$udp`r`n"
+    Set-Content -Path $flag -Value $text -Encoding UTF8
+}
+
+function Get-ProfilesList($settings) {
+    $gf = Read-GameFilter $settings.zapretDir
+    $nowIso = [DateTime]::UtcNow.ToString("o")
+    $defaultProf = [ordered]@{
+        id = "default"
+        name = "Основной"
+        description = "Профиль по умолчанию"
+        isDefault = $true
+        strategy = $settings.selectedStrategy
+        gameFilterMode = $gf.mode
+        gameFilterTcp = $gf.tcpRange
+        gameFilterUdp = $gf.udpRange
+        ipsetMode = "none"
+        discordFakeBin = $null
+        gameFakeBin = $null
+        updatedAt = $nowIso
+    }
+    if (Test-Path $ProfilesFile) {
+        try {
+            $arr = @(Get-Content $ProfilesFile -Raw -Encoding UTF8 | ConvertFrom-Json)
+            if ($arr.Count -gt 0) {
+                return $arr
+            }
+        } catch {}
+    }
+    $initList = @($defaultProf)
+    ($initList | ConvertTo-Json -Depth 6) | Set-Content -Path $ProfilesFile -Encoding UTF8
+    return $initList
 }
 
 function Stop-WinwsDirect {
@@ -130,13 +176,16 @@ $listener.Prefixes.Add("http://127.0.0.1:$Port/")
 $listener.Start()
 
 $mimeMap = @{
-    ".html" = "text/html; charset=utf-8"
-    ".js"   = "application/javascript; charset=utf-8"
-    ".css"  = "text/css; charset=utf-8"
-    ".json" = "application/json; charset=utf-8"
-    ".woff2"= "font/woff2"
-    ".woff" = "font/woff"
-    ".svg"  = "image/svg+xml"
+    ".html"        = "text/html; charset=utf-8"
+    ".js"          = "application/javascript; charset=utf-8"
+    ".css"         = "text/css; charset=utf-8"
+    ".json"        = "application/json; charset=utf-8"
+    ".webmanifest" = "application/manifest+json; charset=utf-8"
+    ".ico"         = "image/x-icon"
+    ".png"         = "image/png"
+    ".woff2"       = "font/woff2"
+    ".woff"        = "font/woff"
+    ".svg"         = "image/svg+xml"
 }
 
 while ($listener.IsListening) {
@@ -154,12 +203,39 @@ while ($listener.IsListening) {
                 if ($rawBody.Trim()) { $bodyObj = $rawBody | ConvertFrom-Json }
             }
 
+            if ($urlPath -eq "/api/system/open-url" -and $req.HttpMethod -eq "POST") {
+                $u = [string]$bodyObj.url
+                if ($u -match "^https?://") {
+                    Start-Process "rundll32.exe" -ArgumentList "url.dll,FileProtocolHandler $u" | Out-Null
+                }
+                $okBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ opened = $true } | ConvertTo-Json))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($okBytes, 0, $okBytes.Length)
+                $res.Close()
+                continue
+            }
+
             if ($urlPath -eq "/api/runner/start" -and $req.HttpMethod -eq "POST") {
                 Start-WinwsDirect $bodyObj.strategy
             } elseif ($urlPath -eq "/api/runner/stop" -and $req.HttpMethod -eq "POST") {
                 Stop-WinwsDirect
             } elseif ($urlPath -eq "/api/settings" -and $req.HttpMethod -eq "POST") {
                 Save-AppSettings $bodyObj | Out-Null
+            } elseif ($urlPath -eq "/api/profiles/activate" -and $req.HttpMethod -eq "POST") {
+                $stCur = Get-AppSettings
+                $profs = Get-ProfilesList $stCur
+                $targetProf = $profs | Where-Object { $_.id -eq $bodyObj.id } | Select-Object -First 1
+                if ($targetProf) {
+                    Write-GameFilter $stCur.zapretDir $targetProf.gameFilterMode $targetProf.gameFilterTcp $targetProf.gameFilterUdp
+                    Save-AppSettings ([pscustomobject]@{
+                        activeProfileId = $targetProf.id
+                        selectedStrategy = $targetProf.strategy
+                    }) | Out-Null
+                    if ($bodyObj.startNow -or ($null -ne $script:ActiveWinws -and -not $script:ActiveWinws.HasExited)) {
+                        Start-WinwsDirect $targetProf.strategy
+                    }
+                }
             }
 
             $st = Get-AppSettings
@@ -178,7 +254,7 @@ while ($listener.IsListening) {
                         displayName = ($_.BaseName)
                         sizeBytes = $_.Length
                         modifiedAt = $_.LastWriteTimeUtc.ToString("o")
-                        engineSummary = "Нативный профиль Zapret"
+                        engineSummary = "Стратегия Zapret"
                         usesGameFilter = $true
                         usesIpset = $true
                         commandPreview = (Get-Content $_.FullName -Raw -Encoding UTF8)
@@ -186,10 +262,13 @@ while ($listener.IsListening) {
                 }
             }
 
+            $profilesArr = @(Get-ProfilesList $st)
             $runningNow = ($null -ne $script:ActiveWinws -and -not $script:ActiveWinws.HasExited)
             $statePayload = @{
                 platform = @{ os = "win32"; arch = "x64" }
                 settings = $st
+                profiles = $profilesArr
+                activeProfileId = $st.activeProfileId
                 runtime = @{
                     running = $runningNow
                     activeStrategy = if ($runningNow) { $script:ActiveStrategy } else { $null }
@@ -224,6 +303,7 @@ while ($listener.IsListening) {
                 listsMeta = @()
                 testHistory = @()
                 latestTestRun = $null
+                zapretFingerprint = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString())
                 testJob = @{ running = $false; aborted = $false; completedCount = 0; totalCount = 0; progressPct = 0; results = @() }
             }
 

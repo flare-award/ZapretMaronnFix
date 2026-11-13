@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Gauge,
   Square,
@@ -14,7 +14,6 @@ import {
   Play,
   History,
 } from 'lucide-react';
-import { api } from '../api';
 import type { FullAppState, TargetCategory, TestRunReport } from '../types';
 import {
   buildMetricsLookup,
@@ -30,6 +29,9 @@ import {
 
 interface TestsViewProps {
   state: FullAppState;
+  activeReport: TestRunReport | null;
+  selectedHistoryFile: string;
+  onSelectHistoryFile: (fileName: string) => void;
   busy: boolean;
   onStartTests: (categories: string[]) => void;
   onStopTests: () => void;
@@ -49,12 +51,15 @@ const TARGET_CATEGORY_OPTIONS: Array<{ id: TargetCategory; label: string }> = [
 
 export const TestsView: React.FC<TestsViewProps> = ({
   state,
+  activeReport,
+  selectedHistoryFile,
+  onSelectHistoryFile,
   busy,
   onStartTests,
   onStopTests,
   onApplyStrategy,
 }) => {
-  const { strategies, latestTestRun, testHistory, testJob, settings, runtime } = state;
+  const { strategies, testHistory, testJob, settings, runtime } = state;
 
   const [selectedCategories, setSelectedCategories] = useState<string[]>([
     'discord',
@@ -68,42 +73,6 @@ export const TestsView: React.FC<TestsViewProps> = ({
   const [sortBy, setSortBy] = useState<SortOption>('best');
   const [onlyPassing, setOnlyPassing] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
-  const [selectedHistoryFile, setSelectedHistoryFile] = useState<string>('latest');
-  const [customHistoryReport, setCustomHistoryReport] = useState<TestRunReport | null>(null);
-
-  useEffect(() => {
-    if (selectedHistoryFile === 'latest') {
-      setCustomHistoryReport(null);
-      return;
-    }
-    let cancelled = false;
-    api
-      .getTestHistoryReport(selectedHistoryFile)
-      .then((rep) => {
-        if (!cancelled) setCustomHistoryReport(rep);
-      })
-      .catch(() => {
-        if (!cancelled) setCustomHistoryReport(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedHistoryFile]);
-
-  // Live partial report while test is running
-  const activeReport: TestRunReport | null = useMemo(() => {
-    if (testJob.running && testJob.results.length > 0) {
-      return {
-        fileName: 'Выполняется тест...',
-        timestamp: new Date().toISOString(),
-        strategies: testJob.results,
-      };
-    }
-    if (selectedHistoryFile !== 'latest' && customHistoryReport) {
-      return customHistoryReport;
-    }
-    return latestTestRun;
-  }, [testJob.running, testJob.results, selectedHistoryFile, customHistoryReport, latestTestRun]);
 
   const lookup = useMemo(() => buildMetricsLookup(activeReport), [activeReport]);
 
@@ -185,10 +154,10 @@ export const TestsView: React.FC<TestsViewProps> = ({
                 <History size={14} className="input-icon" />
                 <select
                   className="m3-select"
-                  style={{ paddingLeft: '32px', maxWidth: '235px' }}
+                  style={{ paddingLeft: '32px', maxWidth: '245px' }}
                   value={selectedHistoryFile}
                   disabled={testJob.running}
-                  onChange={(e) => setSelectedHistoryFile(e.target.value)}
+                  onChange={(e) => onSelectHistoryFile(e.target.value)}
                 >
                   <option value="latest">Последний замер</option>
                   {testHistory.map((h) => (
@@ -211,7 +180,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
                 className="btn btn-primary"
                 disabled={strategies.length === 0}
                 onClick={() => {
-                  setSelectedHistoryFile('latest');
+                  onSelectHistoryFile('latest');
                   onStartTests(selectedCategories);
                 }}
               >
@@ -254,7 +223,7 @@ export const TestsView: React.FC<TestsViewProps> = ({
                 marginBottom: '6px',
               }}
             >
-              <span>Тестируется профиль: {testJob.currentStrategy || 'запуск...'}</span>
+              <span>Тестируется стратегия: {testJob.currentStrategy || 'запуск...'}</span>
               <span className="mono">{testJob.progressPct}%</span>
             </div>
             <div className="progress-track">
@@ -267,47 +236,49 @@ export const TestsView: React.FC<TestsViewProps> = ({
         )}
       </div>
 
-      {/* Best Strategy Recommendations per Target */}
-      <div className="leaders-grid">
-        {leaderCards.map((card) => (
-          <div key={card.key} className="leader-card">
-            <div className="leader-card-top">
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                {card.icon}
-                {card.title}
-              </span>
-              {card.winner && (
-                <span className={`score-pill ${classifyScoreTone(card.winner.scorePct)}`}>
-                  {card.winner.scorePct}%
+      {/* Optional Best Strategy Recommendations per Target (toggleable in Settings) */}
+      {settings.showBestStrategyCards !== false && (
+        <div className="leaders-grid">
+          {leaderCards.map((card) => (
+            <div key={card.key} className="leader-card">
+              <div className="leader-card-top">
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                  {card.icon}
+                  {card.title}
                 </span>
-              )}
-            </div>
+                {card.winner && (
+                  <span className={`score-pill ${classifyScoreTone(card.winner.scorePct)}`}>
+                    {card.winner.scorePct}%
+                  </span>
+                )}
+              </div>
 
-            <div className="leader-strat-name">
-              {card.winner ? card.winner.strategy.displayName : 'Нет данных'}
-            </div>
+              <div className="leader-strat-name">
+                {card.winner ? card.winner.strategy.displayName : 'Нет данных'}
+              </div>
 
-            <div className="leader-meta">
-              <span>
-                {card.winner
-                  ? `${card.winner.okText} OK / ${card.winner.pingMs !== null ? `${card.winner.pingMs} мс` : '-- мс'}`
-                  : 'Запустите тест'}
-              </span>
-              {card.winner && (
-                <button
-                  type="button"
-                  className="m3-chip"
-                  style={{ height: '24px', padding: '0 9px', fontSize: '11.5px' }}
-                  disabled={busy}
-                  onClick={() => onApplyStrategy(card.winner!.strategy.fileName, runtime.running)}
-                >
-                  Выбрать
-                </button>
-              )}
+              <div className="leader-meta">
+                <span>
+                  {card.winner
+                    ? `${card.winner.okText} OK / ${card.winner.pingMs !== null ? `${card.winner.pingMs} мс` : '-- мс'}`
+                    : 'Запустите тест'}
+                </span>
+                {card.winner && (
+                  <button
+                    type="button"
+                    className="m3-chip"
+                    style={{ height: '24px', padding: '0 9px', fontSize: '11.5px' }}
+                    disabled={busy}
+                    onClick={() => onApplyStrategy(card.winner!.strategy.fileName, runtime.running)}
+                  >
+                    Выбрать
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       {/* Per-Target Filter & Sort Matrix */}
       <div className="m3-card">

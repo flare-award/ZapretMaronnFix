@@ -28,6 +28,8 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
   const [newEntry, setNewEntry] = useState<string>('');
   const [saving, setSaving] = useState<boolean>(false);
 
+  const isDirty = doc !== null && rawText !== doc.content;
+
   useEffect(() => {
     let cancelled = false;
     api
@@ -48,6 +50,26 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
     };
   }, [selectedId, onNotify]);
 
+  // Live reload when zapret/ files change on disk (as long as editor has no unsaved edits)
+  useEffect(() => {
+    if (!state.zapretFingerprint || isDirty) return;
+    let cancelled = false;
+    api
+      .getList(selectedId)
+      .then((loaded) => {
+        if (cancelled) return;
+        setDoc((prev) => {
+          if (prev && prev.content === loaded.content) return prev;
+          setRawText(loaded.content);
+          return loaded;
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [state.zapretFingerprint, selectedId, isDirty]);
+
   const parsedEntries = useMemo(() => {
     return rawText
       .split(/\r?\n/)
@@ -60,8 +82,6 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
     if (!q) return parsedEntries;
     return parsedEntries.filter((item) => item.toLowerCase().includes(q));
   }, [parsedEntries, filterQuery]);
-
-  const isDirty = doc !== null && rawText !== doc.content;
 
   const handleSave = async (textToSave: string, autoClean: boolean) => {
     if (!doc) return;

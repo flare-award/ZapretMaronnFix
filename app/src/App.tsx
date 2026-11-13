@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Shield,
+  Bookmark,
   Gauge,
   SlidersHorizontal,
   ListFilter,
@@ -10,16 +11,20 @@ import {
   RotateCw,
   AlertCircle,
   CheckCircle2,
+  ArrowUpCircle,
 } from 'lucide-react';
-import { api } from './api';
+import { api, type CreateProfilePayload } from './api';
 import type {
   AppSettings,
   FullAppState,
   GameFilterMode,
   IpsetFilterMode,
+  TestRunReport,
   UpdateCheckResult,
+  UserProfile,
 } from './types';
 import { ConnectView } from './views/ConnectView';
+import { ProfilesView } from './views/ProfilesView';
 import { TestsView } from './views/TestsView';
 import { FiltersView } from './views/FiltersView';
 import { ListsView } from './views/ListsView';
@@ -27,33 +32,16 @@ import { ToolsView } from './views/ToolsView';
 import { UpdatesSettingsView } from './views/UpdatesSettingsView';
 import { formatDuration } from './utils/metrics';
 
-type NavTab = 'connect' | 'tests' | 'filters' | 'lists' | 'tools' | 'settings';
+type NavTab = 'connect' | 'profiles' | 'tests' | 'filters' | 'lists' | 'tools' | 'settings';
 
-const PAGE_HEADERS: Record<NavTab, { title: string; subtitle: string }> = {
-  connect: {
-    title: 'Подключение и профили',
-    subtitle: 'Прямой запуск стратегий Zapret без установки системной службы Windows',
-  },
-  tests: {
-    title: 'Тестирование и подбор по целям',
-    subtitle: 'Замер задержки и автоматический выбор лучших стратегий для Discord, YouTube, Cloudflare и GitHub',
-  },
-  filters: {
-    title: 'Фильтры портов, IPSet и UDP-фейки',
-    subtitle: 'Управление Game Filter, базой подсетей ipset-all и активными бинарными профилями',
-  },
-  lists: {
-    title: 'Редактор списков доменов и IP',
-    subtitle: 'Настройка пользовательских списков обхода и исключений с автоматическим резервным копированием',
-  },
-  tools: {
-    title: 'Диагностика и обслуживание',
-    subtitle: 'Проверка сетевого стека, очистка кэша Discord, сверка hosts и освобождение WinDivert',
-  },
-  settings: {
-    title: 'Обновление Zapret и настройки',
-    subtitle: 'Проверка новых релизов на GitHub, управление папкой zapret и параметрами автозапуска',
-  },
+const TAB_LABELS: Record<NavTab, string> = {
+  connect: 'Подключение',
+  profiles: 'Профили',
+  tests: 'Тесты и цели',
+  filters: 'Фильтры и фейки',
+  lists: 'Списки доменов',
+  tools: 'Инструменты',
+  settings: 'Настройки',
 };
 
 export const App: React.FC = () => {
@@ -65,6 +53,10 @@ export const App: React.FC = () => {
   const [checkingUpdate, setCheckingUpdate] = useState<boolean>(false);
   const [toast, setToast] = useState<{ msg: string; isError: boolean } | null>(null);
 
+  // Lifted test history state so switching tabs never resets test results
+  const [selectedHistoryFile, setSelectedHistoryFile] = useState<string>('latest');
+  const [customHistoryReport, setCustomHistoryReport] = useState<TestRunReport | null>(null);
+
   const notify = useCallback((msg: string, isError = false) => {
     setToast({ msg, isError });
   }, []);
@@ -75,16 +67,21 @@ export const App: React.FC = () => {
     return () => clearTimeout(t);
   }, [toast]);
 
-  const refreshState = useCallback(async () => {
-    try {
-      const next = await api.getState();
-      setState(next);
-      return next;
-    } catch (err) {
-      notify(err instanceof Error ? err.message : String(err), true);
-      return null;
-    }
-  }, [notify]);
+  const refreshState = useCallback(
+    async (silent = false) => {
+      try {
+        const next = await api.getState();
+        setState(next);
+        return next;
+      } catch (err) {
+        if (!silent) {
+          notify(err instanceof Error ? err.message : String(err), true);
+        }
+        return null;
+      }
+    },
+    [notify]
+  );
 
   const handleCheckUpdate = useCallback(
     async (silent = false) => {
@@ -116,6 +113,69 @@ export const App: React.FC = () => {
       }
     });
   }, [refreshState, handleCheckUpdate]);
+
+  // Live SSE subscription to /api/events for instant UI updates when files in zapret/ or tray actions change state
+  useEffect(() => {
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource('/api/events');
+      const onStatePush = (evt: MessageEvent) => {
+        try {
+          const nextState = JSON.parse(evt.data) as FullAppState;
+          if (nextState && nextState.settings) {
+            setState(nextState);
+          }
+        } catch {
+          refreshState(true);
+        }
+      };
+      es.addEventListener('state', onStatePush as EventListener);
+      es.onmessage = onStatePush;
+    } catch {
+      // fallback if EventSource is unavailable
+    }
+    return () => {
+      if (es) es.close();
+    };
+  }, [refreshState]);
+
+  // Load selected historical report and preserve across tab navigation
+  useEffect(() => {
+    if (selectedHistoryFile === 'latest') {
+      setCustomHistoryReport(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getTestHistoryReport(selectedHistoryFile)
+      .then((rep) => {
+        if (!cancelled) setCustomHistoryReport(rep);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSelectedHistoryFile('latest');
+          setCustomHistoryReport(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedHistoryFile, state?.zapretFingerprint]);
+
+  const activeReport: TestRunReport | null = useMemo(() => {
+    if (!state) return null;
+    if (state.testJob.running && state.testJob.results.length > 0) {
+      return {
+        fileName: 'live-run',
+        timestamp: state.testJob.startedAt ? new Date(state.testJob.startedAt).toISOString() : null,
+        strategies: state.testJob.results,
+      };
+    }
+    if (selectedHistoryFile !== 'latest' && customHistoryReport) {
+      return customHistoryReport;
+    }
+    return state.latestTestRun || null;
+  }, [state, selectedHistoryFile, customHistoryReport]);
 
   // Uptime clock tick only when running
   useEffect(() => {
@@ -170,6 +230,69 @@ export const App: React.FC = () => {
         const next = await api.updateSettings({ selectedStrategy: fileName });
         setState(next);
       }
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleActivateProfile = async (profileId: string, startNow = false) => {
+    if (!state) return;
+    setBusy(true);
+    try {
+      const next = await api.activateProfile(profileId, startNow);
+      setState(next);
+      if (startNow) setNowMs(Date.now());
+      const found = next.profiles.find((p) => p.id === profileId);
+      notify(
+        startNow
+          ? `Профиль «${found?.name || profileId}» применён и запущен`
+          : `Активирован профиль «${found?.name || profileId}»`
+      );
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCreateProfile = async (payload: CreateProfilePayload): Promise<boolean> => {
+    setBusy(true);
+    try {
+      const next = await api.createProfile(payload);
+      setState(next);
+      notify(`Профиль «${payload.name}» сохранён`);
+      return true;
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err), true);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUpdateProfile = async (id: string, payload: Partial<UserProfile>): Promise<boolean> => {
+    setBusy(true);
+    try {
+      const next = await api.updateProfile(id, payload);
+      setState(next);
+      notify('Профиль обновлён');
+      return true;
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err), true);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDeleteProfile = async (id: string) => {
+    setBusy(true);
+    try {
+      const next = await api.deleteProfile(id);
+      setState(next);
+      notify('Профиль удалён');
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err), true);
     } finally {
@@ -235,6 +358,7 @@ export const App: React.FC = () => {
 
   const handleStartTests = async (strategiesList?: string[], categories?: string[]) => {
     try {
+      setSelectedHistoryFile('latest');
       await api.startTests({ strategies: strategiesList, categories });
       await refreshState();
       notify('Запущено тестирование стратегий');
@@ -284,51 +408,57 @@ export const App: React.FC = () => {
     );
   }
 
+  const activeProfile =
+    state.profiles.find((p) => p.id === state.activeProfileId) || state.profiles[0] || null;
+
   const navItems: Array<{
     id: NavTab;
     label: string;
     icon: React.ReactNode;
     badge?: string;
-    badgeTone?: 'update';
+    showUpdateIcon?: boolean;
   }> = [
     {
       id: 'connect',
-      label: 'Подключение',
+      label: TAB_LABELS.connect,
       icon: <Shield size={17} strokeWidth={1.9} />,
       badge: String(state.strategies.length),
     },
     {
+      id: 'profiles',
+      label: TAB_LABELS.profiles,
+      icon: <Bookmark size={17} strokeWidth={1.9} />,
+      badge: String(state.profiles.length),
+    },
+    {
       id: 'tests',
-      label: 'Тесты и цели',
+      label: TAB_LABELS.tests,
       icon: <Gauge size={17} strokeWidth={1.9} />,
       badge: state.testJob.running ? `${state.testJob.progressPct}%` : undefined,
     },
     {
       id: 'filters',
-      label: 'Фильтры и фейки',
+      label: TAB_LABELS.filters,
       icon: <SlidersHorizontal size={17} strokeWidth={1.9} />,
     },
     {
       id: 'lists',
-      label: 'Списки доменов',
+      label: TAB_LABELS.lists,
       icon: <ListFilter size={17} strokeWidth={1.9} />,
       badge: String(state.listsMeta.length),
     },
     {
       id: 'tools',
-      label: 'Инструменты',
+      label: TAB_LABELS.tools,
       icon: <Wrench size={17} strokeWidth={1.9} />,
     },
     {
       id: 'settings',
-      label: 'Обновления',
+      label: TAB_LABELS.settings,
       icon: <Settings size={17} strokeWidth={1.9} />,
-      badge: updateInfo?.updateAvailable ? `v${updateInfo.latestVersion}` : `v${state.zapretInfo.localVersion}`,
-      badgeTone: updateInfo?.updateAvailable ? 'update' : undefined,
+      showUpdateIcon: Boolean(updateInfo?.updateAvailable),
     },
   ];
-
-  const headerMeta = PAGE_HEADERS[tab];
 
   return (
     <div className="app-shell">
@@ -340,7 +470,7 @@ export const App: React.FC = () => {
           </div>
           <div className="brand-meta">
             <div className="brand-title">Zapret Control</div>
-            <div className="brand-sub">Ядро v{state.zapretInfo.localVersion}</div>
+            <div className="brand-sub">v{state.zapretInfo.localVersion}</div>
           </div>
         </div>
 
@@ -354,9 +484,17 @@ export const App: React.FC = () => {
             >
               {item.icon}
               <span className="nav-item-label">{item.label}</span>
-              {item.badge && (
-                <span className={`nav-badge ${item.badgeTone === 'update' ? 'update' : ''}`}>
-                  {item.badge}
+              {item.badge && <span className="nav-badge">{item.badge}</span>}
+              {item.showUpdateIcon && (
+                <span
+                  className="nav-update-icon"
+                  title={
+                    updateInfo
+                      ? `Доступна новая версия Zapret v${updateInfo.latestVersion}`
+                      : 'Доступно обновление Zapret'
+                  }
+                >
+                  <ArrowUpCircle size={14} strokeWidth={2.1} />
                 </span>
               )}
             </button>
@@ -387,6 +525,17 @@ export const App: React.FC = () => {
             </span>
           </div>
           <div
+            style={{
+              fontSize: '11.5px',
+              color: 'var(--m3-text-secondary)',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            Профиль: {activeProfile ? activeProfile.name : 'Основной'}
+          </div>
+          <div
             className="mono"
             style={{
               fontSize: '11px',
@@ -407,8 +556,7 @@ export const App: React.FC = () => {
       <main className="main-area">
         <header className="topbar">
           <div className="topbar-titles">
-            <h1 className="page-title">{headerMeta.title}</h1>
-            <p className="page-subtitle">{headerMeta.subtitle}</p>
+            <h1 className="page-title">{TAB_LABELS[tab]}</h1>
           </div>
 
           <div className="topbar-actions">
@@ -430,10 +578,12 @@ export const App: React.FC = () => {
           {tab === 'connect' && (
             <ConnectView
               state={state}
+              activeReport={activeReport}
               nowMs={nowMs}
               busy={busy}
               onTogglePower={handleTogglePower}
               onSelectStrategy={handleSelectStrategy}
+              onSelectProfile={(profileId) => handleActivateProfile(profileId, false)}
               onQuickGameMode={(mode) => handleSaveGameFilter({ mode })}
               onQuickIpsetMode={handleSetIpsetMode}
               onRunQuickTest={(strats) => handleStartTests(strats)}
@@ -441,9 +591,23 @@ export const App: React.FC = () => {
             />
           )}
 
+          {tab === 'profiles' && (
+            <ProfilesView
+              state={state}
+              busy={busy}
+              onActivateProfile={handleActivateProfile}
+              onCreateProfile={handleCreateProfile}
+              onUpdateProfile={handleUpdateProfile}
+              onDeleteProfile={handleDeleteProfile}
+            />
+          )}
+
           {tab === 'tests' && (
             <TestsView
               state={state}
+              activeReport={activeReport}
+              selectedHistoryFile={selectedHistoryFile}
+              onSelectHistoryFile={setSelectedHistoryFile}
               busy={busy}
               onStartTests={(cats) => handleStartTests(undefined, cats)}
               onStopTests={handleStopTests}

@@ -15,10 +15,12 @@ export const REPO_ROOT = path.resolve(APP_DIR, '..');
 export const DATA_DIR = path.join(APP_DIR, 'data');
 export const BACKUPS_DIR = path.join(DATA_DIR, 'user-lists-backup');
 const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json');
+const PROFILES_PATH = path.join(DATA_DIR, 'profiles.json');
 
 const DEFAULT_SETTINGS = {
   zapretDir: path.join(REPO_ROOT, 'zapret'),
   selectedStrategy: 'general (ALT11).bat',
+  activeProfileId: 'default',
   autoStartStrategyOnLaunch: false,
   launchOnWindowsStartup: false,
   startMinimizedToTray: false,
@@ -26,6 +28,8 @@ const DEFAULT_SETTINGS = {
   autoRestartOnFilterChange: true,
   autoCheckUpdates: true,
   showWinwsConsole: false,
+  showBestStrategyCards: true,
+  connectLayout: 'split',
 };
 
 export const LIST_DEFINITIONS = [
@@ -543,57 +547,70 @@ export function parseTestResultContent(fileName, content) {
   const tsMatch = fileName.match(/(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})/);
   const timestamp = tsMatch ? `${tsMatch[1]}T${tsMatch[2]}:${tsMatch[3]}:${tsMatch[4]}` : null;
 
-  const blocks = content.split(/Config:\s+([^\r\n(]+\.bat)(?:\s*\(Type:\s*([^)]+)\))?/i);
+  const mainSection = content.split(/===\s*ANALYTICS\s*===/i)[0];
   const strategies = [];
+  let currentStrat = null;
+  let currentType = 'standard';
+  let currentTargets = [];
 
-  for (let i = 1; i < blocks.length; i += 3) {
-    const stratFile = blocks[i].trim();
-    const testType = (blocks[i + 1] || 'standard').trim();
-    const body = (blocks[i + 2] || '').split(/===\s*ANALYTICS\s*===/i)[0];
+  const flushCurrent = () => {
+    if (currentStrat && currentTargets.length > 0) {
+      strategies.push(computeStrategyMetrics(currentStrat, currentType, currentTargets));
+    }
+    currentStrat = null;
+    currentType = 'standard';
+    currentTargets = [];
+  };
 
-    const targets = [];
-    for (const rawLine of body.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (!line) continue;
+  for (const rawLine of mainSection.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
 
-      // Match HTTP/TLS line: TargetId : HTTP:OK TLS1.2:OK TLS1.3:UNSUP | Ping: 31 ms
-      const mHttp = line.match(/^(\S+)\s*:\s*HTTP:(\S+)\s+TLS1\.2:(\S+)\s+TLS1\.3:(\S+)\s*\|\s*Ping:\s*(.+)$/i);
-      if (mHttp) {
-        const [, id, http, tls12, tls13, pingRaw] = mHttp;
-        const pingNum = parseInt(pingRaw, 10);
-        targets.push({
-          id,
-          category: classifyTargetCategory(id),
-          isPingOnly: false,
-          http: http.toUpperCase(),
-          tls12: tls12.toUpperCase(),
-          tls13: tls13.toUpperCase(),
-          pingMs: Number.isFinite(pingNum) ? pingNum : null,
-        });
-        continue;
-      }
-
-      // Match Ping-only line: CloudflareDNS1111 : | Ping: 32 ms
-      const mPing = line.match(/^(\S+)\s*:\s*\|\s*Ping:\s*(.+)$/i);
-      if (mPing) {
-        const [, id, pingRaw] = mPing;
-        const pingNum = parseInt(pingRaw, 10);
-        targets.push({
-          id,
-          category: classifyTargetCategory(id),
-          isPingOnly: true,
-          http: 'NA',
-          tls12: 'NA',
-          tls13: 'NA',
-          pingMs: Number.isFinite(pingNum) ? pingNum : null,
-        });
-      }
+    // Match Config header including strategies with parentheses like "general (ALT11).bat"
+    const mConfig = line.match(/^Config:\s+(.+?\.bat)(?:\s*\(Type:\s*([^)]+)\))?\s*$/i);
+    if (mConfig) {
+      flushCurrent();
+      currentStrat = mConfig[1].trim();
+      currentType = (mConfig[2] || 'standard').trim();
+      continue;
     }
 
-    if (targets.length > 0) {
-      strategies.push(computeStrategyMetrics(stratFile, testType, targets));
+    if (!currentStrat) continue;
+
+    // Match HTTP/TLS line: TargetId : HTTP:OK TLS1.2:OK TLS1.3:UNSUP | Ping: 31 ms
+    const mHttp = line.match(/^(\S+)\s*:\s*HTTP:(\S+)\s+TLS1\.2:(\S+)\s+TLS1\.3:(\S+)\s*\|\s*Ping:\s*(.+)$/i);
+    if (mHttp) {
+      const [, id, http, tls12, tls13, pingRaw] = mHttp;
+      const pingNum = parseInt(pingRaw, 10);
+      currentTargets.push({
+        id,
+        category: classifyTargetCategory(id),
+        isPingOnly: false,
+        http: http.toUpperCase(),
+        tls12: tls12.toUpperCase(),
+        tls13: tls13.toUpperCase(),
+        pingMs: Number.isFinite(pingNum) ? pingNum : null,
+      });
+      continue;
+    }
+
+    // Match Ping-only line: CloudflareDNS1111 : | Ping: 32 ms
+    const mPing = line.match(/^(\S+)\s*:\s*\|\s*Ping:\s*(.+)$/i);
+    if (mPing) {
+      const [, id, pingRaw] = mPing;
+      const pingNum = parseInt(pingRaw, 10);
+      currentTargets.push({
+        id,
+        category: classifyTargetCategory(id),
+        isPingOnly: true,
+        http: 'NA',
+        tls12: 'NA',
+        tls13: 'NA',
+        pingMs: Number.isFinite(pingNum) ? pingNum : null,
+      });
     }
   }
+  flushCurrent();
 
   return {
     fileName,
@@ -993,7 +1010,7 @@ export async function runDiagnostics(zapretDir) {
   const hasWinDivert = fs.existsSync(path.join(binDir, 'WinDivert64.sys')) || fs.existsSync(path.join(binDir, 'WinDivert.dll'));
   checks.push({
     id: 'binaries',
-    title: 'Файлы ядра winws.exe и драйвера WinDivert',
+    title: 'Файлы winws.exe и драйвера WinDivert',
     status: hasWinws && hasWinDivert ? 'ok' : 'error',
     detail: hasWinws && hasWinDivert ? 'winws.exe и WinDivert64.sys присутствуют в zapret/bin/' : 'Не найдены файлы в zapret/bin/',
   });
@@ -1069,3 +1086,287 @@ export async function runDiagnostics(zapretDir) {
 
   return { checks, checkedAt: new Date().toISOString() };
 }
+
+// ============================================================================
+// Profiles Management (Default undeletable profile + custom goal profiles)
+// ============================================================================
+
+function buildSnapshotFromZapret(zapretDir, strategyFallback) {
+  const gf = readGameFilter(zapretDir);
+  const ipset = readIpsetFilter(zapretDir);
+  const fakes = readActiveFakes(zapretDir);
+  return {
+    strategy: strategyFallback || 'general (ALT11).bat',
+    gameFilterMode: gf.mode,
+    gameFilterTcp: gf.tcpRange,
+    gameFilterUdp: gf.udpRange,
+    ipsetMode: ipset.mode,
+    discordFakeBin: fakes.discordCurrent || null,
+    gameFakeBin: fakes.gameCurrent || null,
+  };
+}
+
+function writeProfilesRaw(profiles) {
+  ensureDirs();
+  fs.writeFileSync(PROFILES_PATH, JSON.stringify(profiles, null, 2), 'utf8');
+}
+
+export function readProfiles(zapretDir) {
+  ensureDirs();
+  const settings = loadSettings();
+  let profiles = [];
+  if (fs.existsSync(PROFILES_PATH)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(PROFILES_PATH, 'utf8'));
+      if (Array.isArray(parsed)) {
+        profiles = parsed;
+      }
+    } catch {
+      profiles = [];
+    }
+  }
+
+  let defaultProf = profiles.find((p) => p && p.id === 'default');
+  if (!defaultProf) {
+    const snap = buildSnapshotFromZapret(zapretDir, settings.selectedStrategy);
+    defaultProf = {
+      id: 'default',
+      name: 'Основной',
+      description: 'Профиль по умолчанию',
+      isDefault: true,
+      ...snap,
+    };
+    profiles = [defaultProf, ...profiles.filter((p) => p && p.id !== 'default')];
+    writeProfilesRaw(profiles);
+  } else {
+    defaultProf.isDefault = true;
+    if (!defaultProf.name) defaultProf.name = 'Основной';
+  }
+
+  // Ensure Default profile is always first
+  const ordered = [
+    defaultProf,
+    ...profiles.filter((p) => p && p.id !== 'default').map((p) => ({ ...p, isDefault: false })),
+  ];
+
+  const activeExists = ordered.some((p) => p.id === settings.activeProfileId);
+  const activeProfileId = activeExists ? settings.activeProfileId : 'default';
+  if (!activeExists) {
+    saveSettings({ activeProfileId: 'default' });
+  }
+
+  return { profiles: ordered, activeProfileId };
+}
+
+export function syncCurrentStateToActiveProfile(zapretDir) {
+  const settings = loadSettings();
+  const { profiles, activeProfileId } = readProfiles(zapretDir);
+  const snap = buildSnapshotFromZapret(zapretDir, settings.selectedStrategy);
+  const next = profiles.map((p) =>
+    p.id === activeProfileId
+      ? {
+          ...p,
+          ...snap,
+        }
+      : p
+  );
+  writeProfilesRaw(next);
+  return { profiles: next, activeProfileId };
+}
+
+function applyProfileToZapretFiles(zapretDir, profile) {
+  const strategies = readStrategies(zapretDir);
+  const stratExists = strategies.some((s) => s.fileName === profile.strategy);
+  const targetStrategy = stratExists
+    ? profile.strategy
+    : strategies[0]?.fileName || profile.strategy;
+
+  saveSettings({
+    activeProfileId: profile.id,
+    selectedStrategy: targetStrategy,
+  });
+
+  writeGameFilter(zapretDir, {
+    mode: profile.gameFilterMode || 'disabled',
+    tcpRange: profile.gameFilterTcp || '1024-65535',
+    udpRange: profile.gameFilterUdp || '1024-65535',
+  });
+
+  try {
+    switchIpsetFilter(zapretDir, profile.ipsetMode || 'none');
+  } catch {
+    // If 'loaded' was requested without backup file, fallback safely to 'none'
+    if (profile.ipsetMode === 'loaded') {
+      switchIpsetFilter(zapretDir, 'none');
+    }
+  }
+
+  const binDir = path.join(zapretDir, 'bin');
+  if (profile.discordFakeBin && fs.existsSync(path.join(binDir, profile.discordFakeBin))) {
+    try {
+      replaceActiveFake(zapretDir, 'discord', profile.discordFakeBin);
+    } catch {
+      // ignore
+    }
+  }
+  if (profile.gameFakeBin && fs.existsSync(path.join(binDir, profile.gameFakeBin))) {
+    try {
+      replaceActiveFake(zapretDir, 'game', profile.gameFakeBin);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export function activateProfile(zapretDir, profileId) {
+  const { profiles } = readProfiles(zapretDir);
+  const target = profiles.find((p) => p.id === profileId);
+  if (!target) {
+    throw new Error('Профиль не найден');
+  }
+  applyProfileToZapretFiles(zapretDir, target);
+  return readProfiles(zapretDir);
+}
+
+export function createProfile(zapretDir, payload = {}) {
+  const { profiles } = readProfiles(zapretDir);
+  const name = String(payload.name || '').trim();
+  if (!name) {
+    throw new Error('Введите название профиля');
+  }
+  const settings = loadSettings();
+  const snap = buildSnapshotFromZapret(zapretDir, settings.selectedStrategy);
+
+  const tcpValidated = payload.gameFilterTcp ? validatePortRange(payload.gameFilterTcp) : snap.gameFilterTcp;
+  const udpValidated = payload.gameFilterUdp ? validatePortRange(payload.gameFilterUdp) : snap.gameFilterUdp;
+  if (!tcpValidated || !udpValidated) {
+    throw new Error('Некорректный диапазон портов в настройках профиля');
+  }
+
+  const newProf = {
+    id: `prof-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    name: name.slice(0, 48),
+    description: String(payload.description || '').trim().slice(0, 120),
+    isDefault: false,
+    strategy: payload.strategy || snap.strategy,
+    gameFilterMode: ['disabled', 'all', 'tcp', 'udp'].includes(payload.gameFilterMode)
+      ? payload.gameFilterMode
+      : snap.gameFilterMode,
+    gameFilterTcp: tcpValidated,
+    gameFilterUdp: udpValidated,
+    ipsetMode: ['none', 'loaded', 'any'].includes(payload.ipsetMode)
+      ? payload.ipsetMode
+      : snap.ipsetMode,
+    discordFakeBin: payload.discordFakeBin !== undefined ? payload.discordFakeBin : snap.discordFakeBin,
+    gameFakeBin: payload.gameFakeBin !== undefined ? payload.gameFakeBin : snap.gameFakeBin,
+  };
+
+  const next = [...profiles, newProf];
+  writeProfilesRaw(next);
+
+  if (payload.activateNow) {
+    applyProfileToZapretFiles(zapretDir, newProf);
+  }
+  return readProfiles(zapretDir);
+}
+
+export function updateProfile(zapretDir, profileId, patch = {}) {
+  const { profiles, activeProfileId } = readProfiles(zapretDir);
+  const idx = profiles.findIndex((p) => p.id === profileId);
+  if (idx === -1) {
+    throw new Error('Профиль не найден');
+  }
+  const existing = profiles[idx];
+
+  const nextName = patch.name !== undefined ? String(patch.name).trim() : existing.name;
+  if (!nextName) {
+    throw new Error('Название профиля не может быть пустым');
+  }
+
+  const nextTcp = patch.gameFilterTcp !== undefined ? validatePortRange(patch.gameFilterTcp) : existing.gameFilterTcp;
+  const nextUdp = patch.gameFilterUdp !== undefined ? validatePortRange(patch.gameFilterUdp) : existing.gameFilterUdp;
+  if (!nextTcp || !nextUdp) {
+    throw new Error('Некорректный диапазон портов TCP/UDP');
+  }
+
+  const updated = {
+    ...existing,
+    name: nextName.slice(0, 48),
+    description:
+      patch.description !== undefined ? String(patch.description).trim().slice(0, 120) : existing.description,
+    isDefault: existing.id === 'default',
+    strategy: patch.strategy !== undefined ? patch.strategy : existing.strategy,
+    gameFilterMode:
+      patch.gameFilterMode !== undefined && ['disabled', 'all', 'tcp', 'udp'].includes(patch.gameFilterMode)
+        ? patch.gameFilterMode
+        : existing.gameFilterMode,
+    gameFilterTcp: nextTcp,
+    gameFilterUdp: nextUdp,
+    ipsetMode:
+      patch.ipsetMode !== undefined && ['none', 'loaded', 'any'].includes(patch.ipsetMode)
+        ? patch.ipsetMode
+        : existing.ipsetMode,
+    discordFakeBin: patch.discordFakeBin !== undefined ? patch.discordFakeBin : existing.discordFakeBin,
+    gameFakeBin: patch.gameFakeBin !== undefined ? patch.gameFakeBin : existing.gameFakeBin,
+  };
+
+  const nextList = [...profiles];
+  nextList[idx] = updated;
+  writeProfilesRaw(nextList);
+
+  if (activeProfileId === profileId) {
+    applyProfileToZapretFiles(zapretDir, updated);
+  }
+  return readProfiles(zapretDir);
+}
+
+export function deleteProfile(zapretDir, profileId) {
+  if (profileId === 'default') {
+    throw new Error('Основной профиль по умолчанию нельзя удалить');
+  }
+  const { profiles, activeProfileId } = readProfiles(zapretDir);
+  const next = profiles.filter((p) => p.id !== profileId);
+  if (next.length === profiles.length) {
+    throw new Error('Профиль не найден');
+  }
+  writeProfilesRaw(next);
+  if (activeProfileId === profileId) {
+    const def = next.find((p) => p.id === 'default') || next[0];
+    applyProfileToZapretFiles(zapretDir, def);
+  }
+  return readProfiles(zapretDir);
+}
+
+// Fingerprint of zapret/ directory tree so new/modified .bat, lists, .bin, or test logs trigger live reload
+export function computeZapretDirectoryFingerprint(zapretDir) {
+  if (!fs.existsSync(zapretDir)) return 'missing';
+  const subDirs = [
+    zapretDir,
+    path.join(zapretDir, 'lists'),
+    path.join(zapretDir, 'bin'),
+    path.join(zapretDir, 'utils'),
+    path.join(zapretDir, 'utils', 'test results'),
+  ];
+  const parts = [];
+  for (const dir of subDirs) {
+    if (!fs.existsSync(dir)) continue;
+    try {
+      const entries = fs.readdirSync(dir).sort();
+      for (const name of entries) {
+        const full = path.join(dir, name);
+        try {
+          const st = fs.statSync(full);
+          if (st.isFile()) {
+            parts.push(`${dir}/${name}:${st.size}:${Math.floor(st.mtimeMs)}`);
+          }
+        } catch {
+          // ignore transient file
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return crypto.createHash('sha1').update(parts.join('|')).digest('hex');
+}
+

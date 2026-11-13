@@ -1,10 +1,12 @@
 export type GameFilterMode = 'disabled' | 'all' | 'tcp' | 'udp';
 export type IpsetFilterMode = 'none' | 'loaded' | 'any';
 export type TargetCategory = 'discord' | 'youtube' | 'google' | 'cloudflare' | 'github' | 'dns' | 'custom';
+export type ConnectLayoutMode = 'split' | 'stacked';
 
 export interface AppSettings {
   zapretDir: string;
   selectedStrategy: string;
+  activeProfileId: string;
   autoStartStrategyOnLaunch: boolean;
   launchOnWindowsStartup: boolean;
   startMinimizedToTray: boolean;
@@ -12,6 +14,22 @@ export interface AppSettings {
   autoRestartOnFilterChange: boolean;
   autoCheckUpdates: boolean;
   showWinwsConsole: boolean;
+  showBestStrategyCards: boolean;
+  connectLayout: ConnectLayoutMode;
+}
+
+export interface UserProfile {
+  id: string;
+  name: string;
+  description: string;
+  isDefault: boolean;
+  strategy: string;
+  gameFilterMode: GameFilterMode;
+  gameFilterTcp: string;
+  gameFilterUdp: string;
+  ipsetMode: IpsetFilterMode;
+  discordFakeBin: string | null;
+  gameFakeBin: string | null;
 }
 
 export interface RuntimeState {
@@ -162,11 +180,14 @@ export interface FullAppState {
   runtime: RuntimeState;
   zapretInfo: ZapretInfo;
   strategies: StrategyItem[];
+  profiles: UserProfile[];
+  activeProfileId: string;
   filters: FiltersState;
   listsMeta: ListMeta[];
   testHistory: TestHistoryEntry[];
   latestTestRun: TestRunReport | null;
   testJob: TestJobState;
+  zapretFingerprint: string;
 }
 
 export interface UpdateCheckResult {

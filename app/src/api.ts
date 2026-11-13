@@ -9,6 +9,7 @@ import type {
   TestJobState,
   TestRunReport,
   UpdateCheckResult,
+  UserProfile,
 } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -24,6 +25,19 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(data.error || `Ошибка запроса (${res.status})`);
   }
   return data as T;
+}
+
+export interface CreateProfilePayload {
+  name: string;
+  description?: string;
+  strategy?: string;
+  gameFilterMode?: GameFilterMode;
+  gameFilterTcp?: string;
+  gameFilterUdp?: string;
+  ipsetMode?: IpsetFilterMode;
+  discordFakeBin?: string | null;
+  gameFakeBin?: string | null;
+  activateNow?: boolean;
 }
 
 export const api = {
@@ -49,6 +63,29 @@ export const api = {
     request<FullAppState>('/api/settings', {
       method: 'POST',
       body: JSON.stringify(settings),
+    }),
+
+  activateProfile: (id: string, startNow = false) =>
+    request<FullAppState>('/api/profiles/activate', {
+      method: 'POST',
+      body: JSON.stringify({ id, startNow }),
+    }),
+
+  createProfile: (payload: CreateProfilePayload) =>
+    request<FullAppState>('/api/profiles', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  updateProfile: (id: string, patch: Partial<UserProfile>) =>
+    request<FullAppState>(`/api/profiles/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+
+  deleteProfile: (id: string) =>
+    request<FullAppState>(`/api/profiles/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
     }),
 
   setGameFilter: (payload: { mode?: GameFilterMode; tcpRange?: string; udpRange?: string }) =>
@@ -117,5 +154,20 @@ export const api = {
 
   checkHosts: () => request<HostsCheckReport>('/api/diagnostics/check-hosts'),
 
-  openZapretFolder: () => request<{ opened: boolean; path: string; note?: string }>('/api/system/open-folder', { method: 'POST' }),
+  openZapretFolder: () =>
+    request<{ opened: boolean; path: string; note?: string }>('/api/system/open-folder', { method: 'POST' }),
+
+  openExternalUrl: async (url: string) => {
+    try {
+      const res = await request<{ opened: boolean; delegatedToOs: boolean }>('/api/system/open-url', {
+        method: 'POST',
+        body: JSON.stringify({ url }),
+      });
+      if (!res.delegatedToOs) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+    } catch {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  },
 };

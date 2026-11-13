@@ -26,6 +26,13 @@ import {
   updateRemoteIpsetList,
   checkRemoteHostsDiff,
   runDiagnostics,
+  readProfiles,
+  syncCurrentStateToActiveProfile,
+  activateProfile,
+  createProfile,
+  updateProfile,
+  deleteProfile,
+  computeZapretDirectoryFingerprint,
 } from './zapretAdapter.mjs';
 import {
   getRuntimeState,
@@ -50,6 +57,7 @@ const MIME_TYPES = {
   '.mjs': 'application/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
@@ -57,6 +65,12 @@ const MIME_TYPES = {
   '.woff': 'font/woff',
   '.ttf': 'font/ttf',
 };
+
+const sseClients = new Set();
+let lastZapretFingerprint = '';
+let fsWatchers = [];
+let watchedRootPath = '';
+let watchDebounceTimer = null;
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -101,18 +115,29 @@ function buildFullState() {
   const zapretDir = settings.zapretDir;
   const zapretInfo = readZapretInfo(zapretDir);
   const strategies = zapretInfo.valid ? readStrategies(zapretDir) : [];
-  const gameFilter = zapretInfo.valid ? readGameFilter(zapretDir) : { mode: 'disabled', tcpRange: '1024-65535', udpRange: '1024-65535' };
-  const ipsetFilter = zapretInfo.valid ? readIpsetFilter(zapretDir) : { mode: 'none', entriesCount: 0, hasBackup: false, backupEntriesCount: 0 };
-  const activeFakes = zapretInfo.valid ? readActiveFakes(zapretDir) : { discordCurrent: null, gameCurrent: null, availableBins: [] };
+  const gameFilter = zapretInfo.valid
+    ? readGameFilter(zapretDir)
+    : { mode: 'disabled', tcpRange: '1024-65535', udpRange: '1024-65535' };
+  const ipsetFilter = zapretInfo.valid
+    ? readIpsetFilter(zapretDir)
+    : { mode: 'none', entriesCount: 0, hasBackup: false, backupEntriesCount: 0 };
+  const activeFakes = zapretInfo.valid
+    ? readActiveFakes(zapretDir)
+    : { discordCurrent: null, gameCurrent: null, availableBins: [] };
   const listsMeta = zapretInfo.valid ? readListsMeta(zapretDir) : [];
-  const { history: testHistory, latestRun } = zapretInfo.valid ? readTestHistory(zapretDir) : { history: [], latestRun: null };
+  const { history: testHistory, latestRun } = zapretInfo.valid
+    ? readTestHistory(zapretDir)
+    : { history: [], latestRun: null };
+  const profilesData = zapretInfo.valid
+    ? readProfiles(zapretDir)
+    : { profiles: [], activeProfileId: 'default' };
   const testJob = getTestJobState();
 
-  // If an in-memory test run just finished (e.g. in preview mode), expose its results immediately
+  // In non-Windows preview mode where tests aren't written to disk, expose in-memory results
   const effectiveLatestRun =
-    testJob.results && testJob.results.length > 0 && (!latestRun || !testJob.savedFileName)
+    testJob.results && testJob.results.length > 0 && !testJob.savedFileName
       ? {
-          fileName: testJob.savedFileName || 'Текущая сессия тестирования',
+          fileName: 'Текущая сессия тестирования',
           timestamp: new Date(testJob.finishedAt || testJob.startedAt || Date.now()).toISOString(),
           strategies: testJob.results,
         }
@@ -123,10 +148,12 @@ function buildFullState() {
       os: os.platform(),
       arch: os.arch(),
     },
-    settings,
+    settings: loadSettings(),
     runtime: getRuntimeState(),
     zapretInfo,
     strategies,
+    profiles: profilesData.profiles,
+    activeProfileId: profilesData.activeProfileId,
     filters: {
       gameFilter,
       ipsetFilter,
@@ -136,7 +163,77 @@ function buildFullState() {
     testHistory,
     latestTestRun: effectiveLatestRun,
     testJob,
+    zapretFingerprint: lastZapretFingerprint || computeZapretDirectoryFingerprint(zapretDir),
   };
+}
+
+function broadcastStateChange() {
+  if (sseClients.size === 0) return;
+  try {
+    const payload = JSON.stringify(buildFullState());
+    for (const client of sseClients) {
+      try {
+        client.write(`event: state\ndata: ${payload}\n\n`);
+      } catch {
+        sseClients.delete(client);
+      }
+    }
+  } catch {
+    // ignore transient read error while files are being copied
+  }
+}
+
+function checkZapretFingerprintAndBroadcast() {
+  try {
+    const settings = loadSettings();
+    const fp = computeZapretDirectoryFingerprint(settings.zapretDir);
+    if (fp !== lastZapretFingerprint) {
+      lastZapretFingerprint = fp;
+      broadcastStateChange();
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function setupZapretWatchers(zapretDir) {
+  if (watchedRootPath === zapretDir && fsWatchers.length > 0) return;
+  for (const w of fsWatchers) {
+    try {
+      w.close();
+    } catch {
+      // ignore
+    }
+  }
+  fsWatchers = [];
+  watchedRootPath = zapretDir;
+  if (!fs.existsSync(zapretDir)) return;
+
+  const dirs = [
+    zapretDir,
+    path.join(zapretDir, 'lists'),
+    path.join(zapretDir, 'bin'),
+    path.join(zapretDir, 'utils'),
+    path.join(zapretDir, 'utils', 'test results'),
+  ];
+
+  const onFsEvent = () => {
+    if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
+    watchDebounceTimer = setTimeout(() => {
+      checkZapretFingerprintAndBroadcast();
+    }, 250);
+  };
+
+  for (const d of dirs) {
+    if (!fs.existsSync(d)) continue;
+    try {
+      const watcher = fs.watch(d, onFsEvent);
+      watcher.on('error', () => {});
+      fsWatchers.push(watcher);
+    } catch {
+      // ignore if OS watch limit hit; periodic fingerprint check still catches changes
+    }
+  }
 }
 
 async function handleApi(req, res, pathname) {
@@ -152,6 +249,21 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (method === 'GET' && pathname === '/api/events') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.write(': connected\n\n');
+    sseClients.add(res);
+    req.on('close', () => {
+      sseClients.delete(res);
+    });
+    return;
+  }
+
   if (method === 'GET' && pathname === '/api/state') {
     sendJson(res, 200, buildFullState());
     return;
@@ -160,18 +272,25 @@ async function handleApi(req, res, pathname) {
   if (method === 'POST' && pathname === '/api/runner/start') {
     const body = await readJsonBody(req);
     await startStrategyProcess(body.strategy);
+    if (body.strategy) {
+      const s = loadSettings();
+      syncCurrentStateToActiveProfile(s.zapretDir);
+    }
+    broadcastStateChange();
     sendJson(res, 200, buildFullState());
     return;
   }
 
   if (method === 'POST' && pathname === '/api/runner/stop') {
     await stopStrategyProcess();
+    broadcastStateChange();
     sendJson(res, 200, buildFullState());
     return;
   }
 
   if (method === 'POST' && pathname === '/api/runner/restart') {
     await restartIfRunning();
+    broadcastStateChange();
     sendJson(res, 200, buildFullState());
     return;
   }
@@ -180,22 +299,93 @@ async function handleApi(req, res, pathname) {
     const body = await readJsonBody(req);
     const prev = loadSettings();
     const updated = saveSettings(body);
+    if (body.zapretDir && body.zapretDir !== prev.zapretDir) {
+      setupZapretWatchers(updated.zapretDir);
+    }
+    if (body.selectedStrategy && body.selectedStrategy !== prev.selectedStrategy) {
+      syncCurrentStateToActiveProfile(updated.zapretDir);
+    }
     if (body.launchOnWindowsStartup !== undefined || body.startMinimizedToTray !== undefined) {
-      if (prev.launchOnWindowsStartup !== updated.launchOnWindowsStartup || prev.startMinimizedToTray !== updated.startMinimizedToTray) {
+      if (
+        prev.launchOnWindowsStartup !== updated.launchOnWindowsStartup ||
+        prev.startMinimizedToTray !== updated.startMinimizedToTray
+      ) {
         await applyWindowsStartupSetting(updated.launchOnWindowsStartup, updated.startMinimizedToTray);
       }
     }
+    broadcastStateChange();
     sendJson(res, 200, buildFullState());
     return;
+  }
+
+  // Profiles API
+  if (method === 'POST' && pathname === '/api/profiles/activate') {
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    activateProfile(settings.zapretDir, String(body.id || ''));
+    const nextSettings = loadSettings();
+    if (body.startNow) {
+      await startStrategyDirect(nextSettings.selectedStrategy);
+    } else if (nextSettings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(nextSettings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, buildFullState());
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/profiles') {
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    createProfile(settings.zapretDir, body);
+    if (body.activateNow && settings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, buildFullState());
+    return;
+  }
+
+  const profileMatch = pathname.match(/^\/api\/profiles\/([a-z0-9-]+)$/i);
+  if (profileMatch) {
+    const profileId = profileMatch[1];
+    const settings = loadSettings();
+    if (method === 'PUT') {
+      const body = await readJsonBody(req);
+      updateProfile(settings.zapretDir, profileId, body);
+      if (settings.activeProfileId === profileId && settings.autoRestartOnFilterChange) {
+        await restartIfRunning();
+      }
+      lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+      broadcastStateChange();
+      sendJson(res, 200, buildFullState());
+      return;
+    }
+    if (method === 'DELETE') {
+      const wasActive = settings.activeProfileId === profileId;
+      deleteProfile(settings.zapretDir, profileId);
+      if (wasActive && settings.autoRestartOnFilterChange) {
+        await restartIfRunning();
+      }
+      lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+      broadcastStateChange();
+      sendJson(res, 200, buildFullState());
+      return;
+    }
   }
 
   if (method === 'POST' && pathname === '/api/filters/game') {
     const body = await readJsonBody(req);
     const settings = loadSettings();
     writeGameFilter(settings.zapretDir, body);
+    syncCurrentStateToActiveProfile(settings.zapretDir);
     if (settings.autoRestartOnFilterChange) {
       await restartIfRunning();
     }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
     sendJson(res, 200, buildFullState());
     return;
   }
@@ -204,9 +394,12 @@ async function handleApi(req, res, pathname) {
     const body = await readJsonBody(req);
     const settings = loadSettings();
     switchIpsetFilter(settings.zapretDir, body.mode);
+    syncCurrentStateToActiveProfile(settings.zapretDir);
     if (settings.autoRestartOnFilterChange) {
       await restartIfRunning();
     }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
     sendJson(res, 200, buildFullState());
     return;
   }
@@ -217,6 +410,8 @@ async function handleApi(req, res, pathname) {
     if (settings.autoRestartOnFilterChange) {
       await restartIfRunning();
     }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
     sendJson(res, 200, { ...result, state: buildFullState() });
     return;
   }
@@ -225,9 +420,12 @@ async function handleApi(req, res, pathname) {
     const body = await readJsonBody(req);
     const settings = loadSettings();
     replaceActiveFake(settings.zapretDir, body.target, body.binFileName);
+    syncCurrentStateToActiveProfile(settings.zapretDir);
     if (settings.autoRestartOnFilterChange) {
       await restartIfRunning();
     }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
     sendJson(res, 200, buildFullState());
     return;
   }
@@ -248,6 +446,8 @@ async function handleApi(req, res, pathname) {
       if (settings.autoRestartOnFilterChange) {
         await restartIfRunning();
       }
+      lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+      broadcastStateChange();
       sendJson(res, 200, { list: saved, state: buildFullState() });
       return;
     }
@@ -266,6 +466,8 @@ async function handleApi(req, res, pathname) {
     if (settings.autoRestartOnFilterChange) {
       await restartIfRunning();
     }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
     sendJson(res, 200, { ...result, state: buildFullState() });
     return;
   }
@@ -345,12 +547,28 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (method === 'POST' && pathname === '/api/system/open-url') {
+    const body = await readJsonBody(req);
+    const targetUrl = String(body.url || '').trim();
+    if (!/^https?:\/\/[^\s"<>]+$/i.test(targetUrl)) {
+      sendJson(res, 400, { error: 'Некорректный адрес ссылки' });
+      return;
+    }
+    if (os.platform() === 'win32') {
+      // Open strictly in user's default OS browser instead of the msedge --app container
+      execFile('rundll32.exe', ['url.dll,FileProtocolHandler', targetUrl], () => {});
+      sendJson(res, 200, { opened: true, delegatedToOs: true });
+    } else {
+      sendJson(res, 200, { opened: false, delegatedToOs: false });
+    }
+    return;
+  }
+
   sendJson(res, 404, { error: `Неизвестный метод API: ${method} ${pathname}` });
 }
 
 function serveStatic(req, res, pathname) {
   let targetPath = pathname === '/' ? path.join(STATIC_DIR, 'index.html') : path.join(STATIC_DIR, pathname);
-  // Prevent path traversal
   if (!path.resolve(targetPath).startsWith(path.resolve(STATIC_DIR))) {
     res.writeHead(403);
     res.end('Forbidden');
@@ -391,15 +609,21 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, async () => {
   console.log(`Zapret Control UI server listening on http://${HOST}:${PORT}`);
-  // Create initial backup of user lists if not yet backed up
   try {
     const settings = loadSettings();
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    setupZapretWatchers(settings.zapretDir);
+    setInterval(checkZapretFingerprintAndBroadcast, 1500).unref();
+
     const info = readZapretInfo(settings.zapretDir);
     if (info.valid) {
       backupUserLists(settings.zapretDir);
+      const { activeProfileId } = readProfiles(settings.zapretDir);
+      activateProfile(settings.zapretDir, activeProfileId);
       if (settings.autoStartStrategyOnLaunch) {
-        console.log(`Auto-starting last selected strategy on launch: ${settings.selectedStrategy}`);
-        await startStrategyProcess(settings.selectedStrategy);
+        const refreshed = loadSettings();
+        console.log(`Auto-starting last selected strategy on launch: ${refreshed.selectedStrategy}`);
+        await startStrategyProcess(refreshed.selectedStrategy);
       }
     }
   } catch (err) {

@@ -1,7 +1,8 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -9,15 +10,72 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("Zapret Control")]
 [assembly: AssemblyDescription("Desktop Controller for Zapret")]
-[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
 
 namespace ZapretControlHost
 {
+    internal static class NativeWin32
+    {
+        public const int WM_SETICON = 0x0080;
+        public const int ICON_SMALL = 0;
+        public const int ICON_BIG = 1;
+        public const int ICON_SMALL2 = 2;
+        public const int SW_RESTORE = 9;
+
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+        [DllImport("user32.dll")]
+        public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        public static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("gdi32.dll")]
+        public static extern IntPtr CreateRoundRectRgn(
+            int nLeftRect,
+            int nTopRect,
+            int nRightRect,
+            int nBottomRect,
+            int nWidthEllipse,
+            int nHeightEllipse
+        );
+    }
+
+    internal sealed class ProfileBrief
+    {
+        public string Id;
+        public string Name;
+    }
+
+    internal sealed class TraySnapshot
+    {
+        public bool Running;
+        public string StrategyLabel = "general";
+        public string ActiveProfileId = "default";
+        public List<ProfileBrief> Profiles = new List<ProfileBrief>();
+    }
+
     internal static class Program
     {
         private static Mutex singleInstanceMutex;
@@ -29,6 +87,7 @@ namespace ZapretControlHost
             singleInstanceMutex = new Mutex(true, "Local\\ZapretControlSingleInstanceMutex", out createdNew);
             if (!createdNew)
             {
+                FocusExistingWindow();
                 return;
             }
 
@@ -81,6 +140,41 @@ namespace ZapretControlHost
                 return principal.IsInRole(WindowsBuiltInRole.Administrator);
             }
         }
+
+        public static IntPtr FindZapretControlWindow()
+        {
+            IntPtr found = IntPtr.Zero;
+            NativeWin32.EnumWindows((hWnd, lParam) =>
+            {
+                if (!NativeWin32.IsWindowVisible(hWnd)) return true;
+                StringBuilder sb = new StringBuilder(256);
+                NativeWin32.GetWindowText(hWnd, sb, sb.Capacity);
+                string title = sb.ToString();
+                if (!string.IsNullOrEmpty(title) &&
+                    title.IndexOf("Zapret Control", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    found = hWnd;
+                    return false;
+                }
+                return true;
+            }, IntPtr.Zero);
+            return found;
+        }
+
+        public static bool FocusExistingWindow()
+        {
+            IntPtr hWnd = FindZapretControlWindow();
+            if (hWnd != IntPtr.Zero)
+            {
+                if (NativeWin32.IsIconic(hWnd))
+                {
+                    NativeWin32.ShowWindow(hWnd, NativeWin32.SW_RESTORE);
+                }
+                NativeWin32.SetForegroundWindow(hWnd);
+                return true;
+            }
+            return false;
+        }
     }
 
     internal sealed class TrayHostContext : ApplicationContext
@@ -88,56 +182,38 @@ namespace ZapretControlHost
         private readonly NotifyIcon trayIcon;
         private readonly string repoRoot;
         private readonly int port;
+        private readonly Icon smallIcon;
+        private readonly Icon largeIcon;
         private Process backendProcess;
         private Process powershellBackend;
         private Process uiAppProcess;
+        private DarkTrayMenuForm activeMenu;
+        private System.Windows.Forms.Timer iconSyncTimer;
 
         public TrayHostContext(bool startMinimized)
         {
             repoRoot = ResolveRepoRoot();
             port = FindAvailablePort(3847);
 
-            Icon icon = BuildShieldIcon();
-            ContextMenuStrip menu = new ContextMenuStrip();
-
-            ToolStripMenuItem openItem = new ToolStripMenuItem("Открыть окно Zapret Control");
-            openItem.Font = new Font(openItem.Font, FontStyle.Bold);
-            openItem.Click += (s, e) => OpenAppWindow();
-
-            ToolStripMenuItem stopBypassItem = new ToolStripMenuItem("Остановить обход (winws.exe)");
-            stopBypassItem.Click += (s, e) => PostApiSimple("/api/runner/stop");
-
-            ToolStripMenuItem openFolderItem = new ToolStripMenuItem("Открыть папку zapret");
-            openFolderItem.Click += (s, e) =>
-            {
-                string zDir = Path.Combine(repoRoot, "zapret");
-                if (Directory.Exists(zDir))
-                {
-                    Process.Start("explorer.exe", "\"" + zDir + "\"");
-                }
-            };
-
-            ToolStripMenuItem exitItem = new ToolStripMenuItem("Выход (остановить обход и закрыть)");
-            exitItem.Click += (s, e) => ShutdownAll();
-
-            menu.Items.Add(openItem);
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(stopBypassItem);
-            menu.Items.Add(openFolderItem);
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(exitItem);
+            LoadBrandIcons(repoRoot, out smallIcon, out largeIcon);
 
             trayIcon = new NotifyIcon
             {
-                Icon = icon,
+                Icon = smallIcon,
                 Text = "Zapret Control",
-                ContextMenuStrip = menu,
                 Visible = true
             };
+            trayIcon.MouseUp += OnTrayMouseUp;
             trayIcon.DoubleClick += (s, e) => OpenAppWindow();
 
             StartBackendServer();
-            WaitForServerReady(port, 4500);
+            WaitForServerReady(port, 4800);
+
+            // Periodically ensure any open Zapret Control window carries the custom shield icon in titlebar & taskbar
+            iconSyncTimer = new System.Windows.Forms.Timer();
+            iconSyncTimer.Interval = 1800;
+            iconSyncTimer.Tick += (s, e) => ApplyWindowIcons();
+            iconSyncTimer.Start();
 
             if (!startMinimized)
             {
@@ -145,15 +221,167 @@ namespace ZapretControlHost
             }
         }
 
+        private void OnTrayMouseUp(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right)
+            {
+                ShowCustomTrayMenu(Cursor.Position);
+            }
+        }
+
+        private void ShowCustomTrayMenu(Point anchorScreenPos)
+        {
+            if (activeMenu != null && !activeMenu.IsDisposed)
+            {
+                activeMenu.Close();
+                activeMenu.Dispose();
+                activeMenu = null;
+            }
+
+            TraySnapshot snap = FetchTraySnapshot();
+            activeMenu = new DarkTrayMenuForm(
+                snap,
+                smallIcon,
+                onOpenWindow: () => OpenAppWindow(),
+                onToggleBypass: () =>
+                {
+                    if (snap.Running)
+                    {
+                        PostApiJson("/api/runner/stop", "{}");
+                    }
+                    else
+                    {
+                        PostApiJson("/api/runner/start", "{}");
+                    }
+                },
+                onSelectProfile: (profileId) =>
+                {
+                    string escaped = profileId.Replace("\\", "\\\\").Replace("\"", "\\\"");
+                    PostApiJson("/api/profiles/activate", "{\"id\":\"" + escaped + "\"}");
+                },
+                onOpenZapretFolder: () =>
+                {
+                    string zDir = Path.Combine(repoRoot, "zapret");
+                    if (Directory.Exists(zDir))
+                    {
+                        Process.Start("explorer.exe", "\"" + zDir + "\"");
+                    }
+                },
+                onExitApp: () => ShutdownAll()
+            );
+
+            activeMenu.ShowAtCursor(anchorScreenPos);
+        }
+
+        private TraySnapshot FetchTraySnapshot()
+        {
+            TraySnapshot snap = new TraySnapshot();
+            try
+            {
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + port + "/api/state");
+                req.Timeout = 320;
+                using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                using (Stream st = resp.GetResponseStream())
+                using (StreamReader sr = new StreamReader(st, Encoding.UTF8))
+                {
+                    string json = sr.ReadToEnd();
+
+                    Match runMatch = Regex.Match(json, "\"runtime\"\\s*:\\s*\\{[^}]*\"running\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
+                    if (runMatch.Success)
+                    {
+                        snap.Running = string.Equals(runMatch.Groups[1].Value, "true", StringComparison.OrdinalIgnoreCase);
+                    }
+
+                    Match activeStrat = Regex.Match(json, "\"activeStrategy\"\\s*:\\s*\"([^\"]+)\"");
+                    Match selStrat = Regex.Match(json, "\"selectedStrategy\"\\s*:\\s*\"([^\"]+)\"");
+                    string strat = activeStrat.Success && !string.IsNullOrEmpty(activeStrat.Groups[1].Value)
+                        ? activeStrat.Groups[1].Value
+                        : (selStrat.Success ? selStrat.Groups[1].Value : "general.bat");
+                    if (strat.EndsWith(".bat", StringComparison.OrdinalIgnoreCase))
+                    {
+                        strat = strat.Substring(0, strat.Length - 4);
+                    }
+                    snap.StrategyLabel = strat;
+
+                    Match activeProf = Regex.Match(json, "\"activeProfileId\"\\s*:\\s*\"([^\"]+)\"");
+                    if (activeProf.Success)
+                    {
+                        snap.ActiveProfileId = activeProf.Groups[1].Value;
+                    }
+
+                    int profArrayIdx = json.IndexOf("\"profiles\"", StringComparison.Ordinal);
+                    if (profArrayIdx >= 0)
+                    {
+                        int openBracket = json.IndexOf('[', profArrayIdx);
+                        if (openBracket >= 0)
+                        {
+                            int depth = 0;
+                            int endBracket = -1;
+                            for (int i = openBracket; i < json.Length; i++)
+                            {
+                                if (json[i] == '[') depth++;
+                                else if (json[i] == ']')
+                                {
+                                    depth--;
+                                    if (depth == 0)
+                                    {
+                                        endBracket = i;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (endBracket > openBracket)
+                            {
+                                string arrText = json.Substring(openBracket, endBracket - openBracket + 1);
+                                MatchCollection objMatches = Regex.Matches(
+                                    arrText,
+                                    "\\{[^{}]*\"id\"\\s*:\\s*\"([^\"]+)\"[^{}]*\"name\"\\s*:\\s*\"([^\"]+)\"[^{}]*\\}"
+                                );
+                                foreach (Match m in objMatches)
+                                {
+                                    if (snap.Profiles.Count >= 6) break;
+                                    snap.Profiles.Add(new ProfileBrief
+                                    {
+                                        Id = UnescapeJsonString(m.Groups[1].Value),
+                                        Name = UnescapeJsonString(m.Groups[2].Value)
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            if (snap.Profiles.Count == 0)
+            {
+                snap.Profiles.Add(new ProfileBrief { Id = "default", Name = "Основной" });
+            }
+            return snap;
+        }
+
+        private static string UnescapeJsonString(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return string.Empty;
+            return Regex.Replace(raw, "\\\\u([0-9a-fA-F]{4})", m =>
+            {
+                int code = Convert.ToInt32(m.Groups[1].Value, 16);
+                return ((char)code).ToString();
+            }).Replace("\\\"", "\"").Replace("\\\\", "\\");
+        }
+
         private string ResolveRepoRoot()
         {
             string baseDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\', '/');
-            if (Directory.Exists(Path.Combine(baseDir, "app", "static")))
+            if (Directory.Exists(Path.Combine(baseDir, "app", "static")) ||
+                Directory.Exists(Path.Combine(baseDir, "app", "server")))
             {
                 return baseDir;
             }
             DirectoryInfo parent = Directory.GetParent(baseDir);
-            if (parent != null && Directory.Exists(Path.Combine(parent.FullName, "app", "static")))
+            if (parent != null && Directory.Exists(Path.Combine(parent.FullName, "app")))
             {
                 return parent.FullName;
             }
@@ -199,7 +427,6 @@ namespace ZapretControlHost
                 return;
             }
 
-            // Fallback native PowerShell HTTP bridge when Node.js is not installed on Windows
             string psServer = Path.Combine(repoRoot, "app", "host", "NativeServer.ps1");
             if (File.Exists(psServer))
             {
@@ -259,23 +486,67 @@ namespace ZapretControlHost
 
         private void OpenAppWindow()
         {
+            if (Program.FocusExistingWindow())
+            {
+                ApplyWindowIcons();
+                return;
+            }
+
             string url = "http://127.0.0.1:" + port;
             string browserExe = FindAppModeBrowser();
             if (!string.IsNullOrEmpty(browserExe))
             {
-                string profileDir = Path.Combine(repoRoot, "app", "data", "window-profile");
+                string profileDir = Path.Combine(repoRoot, "app", "data", "ui-window-v2");
                 Directory.CreateDirectory(profileDir);
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
                     FileName = browserExe,
-                    Arguments = "--app=" + url + " --window-size=1220,800 --user-data-dir=\"" + profileDir + "\" --no-first-run --disable-extensions",
+                    Arguments = "--app=" + url + " --window-size=1260,820 --user-data-dir=\"" + profileDir + "\" --no-first-run --disable-extensions",
                     UseShellExecute = false
                 };
                 uiAppProcess = Process.Start(psi);
+
+                // Apply custom shield icon to titlebar & taskbar as soon as the window appears
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    for (int attempt = 0; attempt < 25; attempt++)
+                    {
+                        Thread.Sleep(180);
+                        if (ApplyWindowIcons())
+                        {
+                            Thread.Sleep(400);
+                            ApplyWindowIcons();
+                            break;
+                        }
+                    }
+                });
             }
             else
             {
                 Process.Start(url);
+            }
+        }
+
+        private bool ApplyWindowIcons()
+        {
+            IntPtr hWnd = Program.FindZapretControlWindow();
+            if (hWnd == IntPtr.Zero) return false;
+            try
+            {
+                if (smallIcon != null)
+                {
+                    NativeWin32.SendMessage(hWnd, NativeWin32.WM_SETICON, (IntPtr)NativeWin32.ICON_SMALL, smallIcon.Handle);
+                    NativeWin32.SendMessage(hWnd, NativeWin32.WM_SETICON, (IntPtr)NativeWin32.ICON_SMALL2, smallIcon.Handle);
+                }
+                if (largeIcon != null)
+                {
+                    NativeWin32.SendMessage(hWnd, NativeWin32.WM_SETICON, (IntPtr)NativeWin32.ICON_BIG, largeIcon.Handle);
+                }
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -295,14 +566,15 @@ namespace ZapretControlHost
             return null;
         }
 
-        private void PostApiSimple(string path)
+        private void PostApiJson(string path, string jsonPayload)
         {
             try
             {
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + port + path);
                 req.Method = "POST";
+                req.Timeout = 1500;
                 req.ContentType = "application/json";
-                byte[] body = Encoding.UTF8.GetBytes("{}");
+                byte[] body = Encoding.UTF8.GetBytes(jsonPayload ?? "{}");
                 req.ContentLength = body.Length;
                 using (Stream st = req.GetRequestStream())
                 {
@@ -317,27 +589,70 @@ namespace ZapretControlHost
             }
         }
 
-        private static Icon BuildShieldIcon()
+        private static void LoadBrandIcons(string repoRoot, out Icon small, out Icon large)
         {
-            Bitmap bmp = new Bitmap(32, 32);
+            string icoPath = Path.Combine(repoRoot, "app", "host", "app.ico");
+            if (!File.Exists(icoPath))
+            {
+                icoPath = Path.Combine(repoRoot, "app", "static", "favicon.ico");
+            }
+            if (File.Exists(icoPath))
+            {
+                try
+                {
+                    small = new Icon(icoPath, new Size(16, 16));
+                    large = new Icon(icoPath, new Size(48, 48));
+                    return;
+                }
+                catch
+                {
+                }
+            }
+
+            try
+            {
+                Icon exeIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                if (exeIcon != null)
+                {
+                    small = exeIcon;
+                    large = exeIcon;
+                    return;
+                }
+            }
+            catch
+            {
+            }
+
+            Icon fallback = BuildFallbackShieldIcon(32);
+            small = fallback;
+            large = BuildFallbackShieldIcon(48);
+        }
+
+        private static Icon BuildFallbackShieldIcon(int size)
+        {
+            Bitmap bmp = new Bitmap(size, size);
             using (Graphics g = Graphics.FromImage(bmp))
             {
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.Clear(Color.Transparent);
+                int pad = Math.Max(1, size / 16);
                 using (SolidBrush bg = new SolidBrush(Color.FromArgb(29, 52, 88)))
                 {
-                    g.FillEllipse(bg, 1, 1, 30, 30);
+                    g.FillEllipse(bg, pad, pad, size - pad * 2, size - pad * 2);
                 }
-                using (Pen pen = new Pen(Color.FromArgb(168, 199, 250), 2.4f))
+                using (Pen pen = new Pen(Color.FromArgb(168, 199, 250), Math.Max(1.8f, size * 0.075f)))
                 {
-                    Point[] shield = new Point[]
+                    pen.StartCap = LineCap.Round;
+                    pen.EndCap = LineCap.Round;
+                    pen.LineJoin = LineJoin.Round;
+                    PointF[] shield = new PointF[]
                     {
-                        new Point(16, 6),
-                        new Point(24, 9),
-                        new Point(23, 18),
-                        new Point(16, 25),
-                        new Point(9, 18),
-                        new Point(8, 9)
+                        new PointF(size * 0.50f, size * 0.19f),
+                        new PointF(size * 0.75f, size * 0.28f),
+                        new PointF(size * 0.72f, size * 0.56f),
+                        new PointF(size * 0.50f, size * 0.78f),
+                        new PointF(size * 0.28f, size * 0.56f),
+                        new PointF(size * 0.25f, size * 0.28f)
                     };
                     g.DrawPolygon(pen, shield);
                 }
@@ -347,8 +662,24 @@ namespace ZapretControlHost
 
         private void ShutdownAll()
         {
-            PostApiSimple("/api/runner/stop");
+            if (iconSyncTimer != null)
+            {
+                iconSyncTimer.Stop();
+                iconSyncTimer.Dispose();
+            }
+            PostApiJson("/api/runner/stop", "{}");
             trayIcon.Visible = false;
+
+            try
+            {
+                if (uiAppProcess != null && !uiAppProcess.HasExited)
+                {
+                    uiAppProcess.CloseMainWindow();
+                }
+            }
+            catch
+            {
+            }
 
             try
             {
@@ -386,6 +717,519 @@ namespace ZapretControlHost
             }
 
             Application.Exit();
+        }
+    }
+
+    // Custom Telegram-style borderless dark popup menu with anti-aliased Lucide vector icons
+    internal sealed class DarkTrayMenuForm : Form
+    {
+        private enum IconKind
+        {
+            Window,
+            Power,
+            Bookmark,
+            Folder,
+            Exit
+        }
+
+        private sealed class MenuEntry
+        {
+            public bool IsSeparator;
+            public bool IsSectionLabel;
+            public string Label;
+            public IconKind Icon;
+            public bool Checked;
+            public Color? AccentColor;
+            public Action OnClick;
+            public Rectangle Bounds;
+        }
+
+        private readonly TraySnapshot snapshot;
+        private readonly Icon brandIcon;
+        private readonly List<MenuEntry> entries = new List<MenuEntry>();
+        private int hoveredIndex = -1;
+
+        private static readonly Color BgSurface = Color.FromArgb(23, 27, 36);        // #171B24
+        private static readonly Color BgHeader = Color.FromArgb(17, 20, 27);         // #11141B
+        private static readonly Color HoverFill = Color.FromArgb(29, 52, 88);        // #1D3458
+        private static readonly Color HoverDangerFill = Color.FromArgb(63, 28, 32);
+        private static readonly Color BorderCol = Color.FromArgb(42, 49, 64);        // #2A3140
+        private static readonly Color DividerCol = Color.FromArgb(37, 43, 56);       // #252B38
+        private static readonly Color TextPrimary = Color.FromArgb(227, 231, 239);   // #E3E7EF
+        private static readonly Color TextSecondary = Color.FromArgb(149, 159, 177); // #959FB1
+        private static readonly Color TextMuted = Color.FromArgb(105, 115, 134);     // #697386
+        private static readonly Color AccentBlue = Color.FromArgb(168, 199, 250);    // #A8C7FA
+        private static readonly Color AccentGreen = Color.FromArgb(125, 216, 166);   // #7DD8A6
+        private static readonly Color AccentCoral = Color.FromArgb(242, 184, 181);   // #F2B8B5
+
+        private const int MenuWidth = 276;
+        private const int HeaderHeight = 56;
+        private const int ItemHeight = 35;
+        private const int SectionHeight = 24;
+        private const int SeparatorHeight = 11;
+
+        public DarkTrayMenuForm(
+            TraySnapshot snap,
+            Icon icon,
+            Action onOpenWindow,
+            Action onToggleBypass,
+            Action<string> onSelectProfile,
+            Action onOpenZapretFolder,
+            Action onExitApp)
+        {
+            snapshot = snap;
+            brandIcon = icon;
+
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            TopMost = true;
+            DoubleBuffered = true;
+            BackColor = BgSurface;
+            Font = new Font("Segoe UI", 9.25f, FontStyle.Regular, GraphicsUnit.Point);
+
+            BuildEntries(onOpenWindow, onToggleBypass, onSelectProfile, onOpenZapretFolder, onExitApp);
+            LayoutEntries();
+
+            Region = Region.FromHrgn(NativeWin32.CreateRoundRectRgn(0, 0, Width + 1, Height + 1, 16, 16));
+
+            Deactivate += (s, e) => SafeDismiss();
+            KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Escape) SafeDismiss();
+            };
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return false; }
+        }
+
+        private void BuildEntries(
+            Action onOpenWindow,
+            Action onToggleBypass,
+            Action<string> onSelectProfile,
+            Action onOpenZapretFolder,
+            Action onExitApp)
+        {
+            entries.Add(new MenuEntry
+            {
+                Label = "Открыть Zapret Control",
+                Icon = IconKind.Window,
+                OnClick = onOpenWindow
+            });
+
+            entries.Add(new MenuEntry
+            {
+                Label = snapshot.Running ? "Остановить обход" : "Включить обход",
+                Icon = IconKind.Power,
+                AccentColor = snapshot.Running ? AccentCoral : AccentGreen,
+                OnClick = onToggleBypass
+            });
+
+            if (snapshot.Profiles != null && snapshot.Profiles.Count > 0)
+            {
+                entries.Add(new MenuEntry { IsSeparator = true });
+                entries.Add(new MenuEntry
+                {
+                    IsSectionLabel = true,
+                    Label = "ПРОФИЛЬ НАСТРОЕК"
+                });
+
+                foreach (ProfileBrief prof in snapshot.Profiles)
+                {
+                    string pid = prof.Id;
+                    entries.Add(new MenuEntry
+                    {
+                        Label = prof.Name,
+                        Icon = IconKind.Bookmark,
+                        Checked = string.Equals(pid, snapshot.ActiveProfileId, StringComparison.OrdinalIgnoreCase),
+                        OnClick = () => onSelectProfile(pid)
+                    });
+                }
+            }
+
+            entries.Add(new MenuEntry { IsSeparator = true });
+
+            entries.Add(new MenuEntry
+            {
+                Label = "Открыть папку zapret",
+                Icon = IconKind.Folder,
+                OnClick = onOpenZapretFolder
+            });
+
+            entries.Add(new MenuEntry { IsSeparator = true });
+
+            entries.Add(new MenuEntry
+            {
+                Label = "Выход из программы",
+                Icon = IconKind.Exit,
+                AccentColor = AccentCoral,
+                OnClick = onExitApp
+            });
+        }
+
+        private void LayoutEntries()
+        {
+            int y = HeaderHeight + 6;
+            foreach (MenuEntry e in entries)
+            {
+                if (e.IsSeparator)
+                {
+                    e.Bounds = new Rectangle(12, y, MenuWidth - 24, SeparatorHeight);
+                    y += SeparatorHeight;
+                }
+                else if (e.IsSectionLabel)
+                {
+                    e.Bounds = new Rectangle(14, y, MenuWidth - 28, SectionHeight);
+                    y += SectionHeight;
+                }
+                else
+                {
+                    e.Bounds = new Rectangle(7, y, MenuWidth - 14, ItemHeight);
+                    y += ItemHeight + 2;
+                }
+            }
+            Width = MenuWidth;
+            Height = y + 7;
+        }
+
+        public void ShowAtCursor(Point cursor)
+        {
+            Rectangle work = Screen.FromPoint(cursor).WorkingArea;
+            int x = cursor.X - Width + 14;
+            int y = cursor.Y - Height - 8;
+
+            if (x < work.Left + 8) x = work.Left + 8;
+            if (x + Width > work.Right - 8) x = work.Right - Width - 8;
+            if (y < work.Top + 8) y = cursor.Y + 8;
+            if (y + Height > work.Bottom - 8) y = work.Bottom - Height - 8;
+
+            Location = new Point(x, y);
+            Show();
+            Activate();
+        }
+
+        private void SafeDismiss()
+        {
+            if (!IsDisposed)
+            {
+                Close();
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int found = -1;
+            for (int i = 0; i < entries.Count; i++)
+            {
+                MenuEntry item = entries[i];
+                if (!item.IsSeparator && !item.IsSectionLabel && item.Bounds.Contains(e.Location))
+                {
+                    found = i;
+                    break;
+                }
+            }
+            if (found != hoveredIndex)
+            {
+                hoveredIndex = found;
+                Cursor = found >= 0 ? Cursors.Hand : Cursors.Default;
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (hoveredIndex != -1)
+            {
+                hoveredIndex = -1;
+                Cursor = Cursors.Default;
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseClick(MouseEventArgs e)
+        {
+            base.OnMouseClick(e);
+            if (e.Button != MouseButtons.Left) return;
+            for (int i = 0; i < entries.Count; i++)
+            {
+                MenuEntry item = entries[i];
+                if (!item.IsSeparator && !item.IsSectionLabel && item.Bounds.Contains(e.Location))
+                {
+                    Action act = item.OnClick;
+                    SafeDismiss();
+                    if (act != null) act();
+                    return;
+                }
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+            // Header surface
+            using (SolidBrush hb = new SolidBrush(BgHeader))
+            {
+                g.FillRectangle(hb, 0, 0, Width, HeaderHeight);
+            }
+            using (Pen divPen = new Pen(DividerCol, 1f))
+            {
+                g.DrawLine(divPen, 0, HeaderHeight, Width, HeaderHeight);
+            }
+
+            // Brand badge in header
+            using (GraphicsPath badgePath = RoundedRect(new Rectangle(13, 12, 32, 32), 9))
+            using (SolidBrush badgeBrush = new SolidBrush(HoverFill))
+            {
+                g.FillPath(badgeBrush, badgePath);
+            }
+            DrawShieldGlyph(g, new RectangleF(19f, 18f, 20f, 20f), AccentBlue);
+
+            // Title & live status
+            using (Font titleFont = new Font("Segoe UI Semibold", 9.75f, FontStyle.Bold))
+            using (SolidBrush titleBrush = new SolidBrush(TextPrimary))
+            {
+                g.DrawString("Zapret Control", titleFont, titleBrush, 54f, 10f);
+            }
+
+            Color dotColor = snapshot.Running ? AccentGreen : TextMuted;
+            using (SolidBrush dotBrush = new SolidBrush(dotColor))
+            {
+                g.FillEllipse(dotBrush, 55f, 33.5f, 7f, 7f);
+            }
+
+            string statusLine = (snapshot.Running ? "Активен: " : "Остановлен: ") + snapshot.StrategyLabel;
+            using (Font subFont = new Font("Segoe UI", 8.25f, FontStyle.Regular))
+            using (SolidBrush subBrush = new SolidBrush(TextSecondary))
+            {
+                RectangleF subRect = new RectangleF(66f, 29.5f, Width - 78f, 18f);
+                StringFormat sf = new StringFormat
+                {
+                    Trimming = StringTrimming.EllipsisCharacter,
+                    FormatFlags = StringFormatFlags.NoWrap
+                };
+                g.DrawString(statusLine, subFont, subBrush, subRect, sf);
+            }
+
+            // Menu items
+            for (int i = 0; i < entries.Count; i++)
+            {
+                MenuEntry item = entries[i];
+                if (item.IsSeparator)
+                {
+                    int midY = item.Bounds.Top + item.Bounds.Height / 2;
+                    using (Pen p = new Pen(DividerCol, 1f))
+                    {
+                        g.DrawLine(p, item.Bounds.Left, midY, item.Bounds.Right, midY);
+                    }
+                    continue;
+                }
+
+                if (item.IsSectionLabel)
+                {
+                    using (Font secFont = new Font("Segoe UI Semibold", 7.5f, FontStyle.Bold))
+                    using (SolidBrush secBrush = new SolidBrush(TextMuted))
+                    {
+                        g.DrawString(item.Label, secFont, secBrush, item.Bounds.Left + 4, item.Bounds.Top + 5);
+                    }
+                    continue;
+                }
+
+                bool hovered = (i == hoveredIndex);
+                if (hovered)
+                {
+                    Color fill = item.Icon == IconKind.Exit ? HoverDangerFill : HoverFill;
+                    using (GraphicsPath pill = RoundedRect(item.Bounds, 9))
+                    using (SolidBrush hb = new SolidBrush(fill))
+                    {
+                        g.FillPath(hb, pill);
+                    }
+                }
+
+                Color fg = item.AccentColor.HasValue
+                    ? item.AccentColor.Value
+                    : (hovered || item.Checked ? TextPrimary : Color.FromArgb(208, 214, 226));
+                Color iconCol = item.AccentColor.HasValue
+                    ? item.AccentColor.Value
+                    : (hovered || item.Checked ? AccentBlue : TextSecondary);
+
+                RectangleF iconBox = new RectangleF(item.Bounds.Left + 11f, item.Bounds.Top + 9.5f, 16f, 16f);
+                DrawLucideIcon(g, item.Icon, iconBox, iconCol);
+
+                RectangleF textBox = new RectangleF(
+                    item.Bounds.Left + 36f,
+                    item.Bounds.Top,
+                    item.Bounds.Width - (item.Checked ? 64f : 44f),
+                    item.Bounds.Height
+                );
+                using (SolidBrush tb = new SolidBrush(fg))
+                using (Font itemFont = new Font("Segoe UI", 9.15f, item.Checked ? FontStyle.Bold : FontStyle.Regular))
+                {
+                    StringFormat sf = new StringFormat
+                    {
+                        LineAlignment = StringAlignment.Center,
+                        Trimming = StringTrimming.EllipsisCharacter,
+                        FormatFlags = StringFormatFlags.NoWrap
+                    };
+                    g.DrawString(item.Label, itemFont, tb, textBox, sf);
+                }
+
+                if (item.Checked)
+                {
+                    RectangleF checkBox = new RectangleF(item.Bounds.Right - 24f, item.Bounds.Top + 10f, 14f, 14f);
+                    DrawCheckGlyph(g, checkBox, AccentGreen);
+                }
+            }
+
+            // Outer rounded border
+            using (GraphicsPath outer = RoundedRect(new Rectangle(0, 0, Width - 1, Height - 1), 15))
+            using (Pen borderPen = new Pen(BorderCol, 1f))
+            {
+                g.DrawPath(borderPen, outer);
+            }
+        }
+
+        private static void DrawShieldGlyph(Graphics g, RectangleF r, Color color)
+        {
+            using (Pen p = CreateLucidePen(color, 1.85f))
+            {
+                PointF[] pts = new PointF[]
+                {
+                    new PointF(r.Left + r.Width * 0.50f, r.Top + r.Height * 0.08f),
+                    new PointF(r.Left + r.Width * 0.86f, r.Top + r.Height * 0.22f),
+                    new PointF(r.Left + r.Width * 0.82f, r.Top + r.Height * 0.60f),
+                    new PointF(r.Left + r.Width * 0.50f, r.Top + r.Height * 0.92f),
+                    new PointF(r.Left + r.Width * 0.18f, r.Top + r.Height * 0.60f),
+                    new PointF(r.Left + r.Width * 0.14f, r.Top + r.Height * 0.22f)
+                };
+                g.DrawPolygon(p, pts);
+            }
+        }
+
+        private static void DrawCheckGlyph(Graphics g, RectangleF r, Color color)
+        {
+            using (Pen p = CreateLucidePen(color, 2.0f))
+            {
+                PointF[] pts = new PointF[]
+                {
+                    new PointF(r.Left + r.Width * 0.14f, r.Top + r.Height * 0.54f),
+                    new PointF(r.Left + r.Width * 0.42f, r.Top + r.Height * 0.82f),
+                    new PointF(r.Left + r.Width * 0.88f, r.Top + r.Height * 0.22f)
+                };
+                g.DrawLines(p, pts);
+            }
+        }
+
+        private static void DrawLucideIcon(Graphics g, IconKind kind, RectangleF r, Color color)
+        {
+            using (Pen p = CreateLucidePen(color, 1.7f))
+            {
+                switch (kind)
+                {
+                    case IconKind.Window:
+                    {
+                        using (GraphicsPath box = RoundedRectF(r, 3.2f))
+                        {
+                            g.DrawPath(p, box);
+                        }
+                        float barY = r.Top + r.Height * 0.34f;
+                        g.DrawLine(p, r.Left + 1f, barY, r.Right - 1f, barY);
+                        break;
+                    }
+                    case IconKind.Power:
+                    {
+                        RectangleF arcRect = new RectangleF(r.Left + 1.5f, r.Top + 2.2f, r.Width - 3f, r.Height - 3f);
+                        g.DrawArc(p, arcRect, -52f, 284f);
+                        float cx = r.Left + r.Width * 0.5f;
+                        g.DrawLine(p, cx, r.Top + 0.8f, cx, r.Top + r.Height * 0.48f);
+                        break;
+                    }
+                    case IconKind.Bookmark:
+                    {
+                        PointF[] pts = new PointF[]
+                        {
+                            new PointF(r.Left + r.Width * 0.22f, r.Top + r.Height * 0.10f),
+                            new PointF(r.Left + r.Width * 0.78f, r.Top + r.Height * 0.10f),
+                            new PointF(r.Left + r.Width * 0.78f, r.Top + r.Height * 0.90f),
+                            new PointF(r.Left + r.Width * 0.50f, r.Top + r.Height * 0.68f),
+                            new PointF(r.Left + r.Width * 0.22f, r.Top + r.Height * 0.90f)
+                        };
+                        g.DrawPolygon(p, pts);
+                        break;
+                    }
+                    case IconKind.Folder:
+                    {
+                        PointF[] pts = new PointF[]
+                        {
+                            new PointF(r.Left + 1f, r.Top + r.Height * 0.24f),
+                            new PointF(r.Left + r.Width * 0.40f, r.Top + r.Height * 0.24f),
+                            new PointF(r.Left + r.Width * 0.52f, r.Top + r.Height * 0.38f),
+                            new PointF(r.Right - 1f, r.Top + r.Height * 0.38f),
+                            new PointF(r.Right - 1f, r.Bottom - 1.5f),
+                            new PointF(r.Left + 1f, r.Bottom - 1.5f)
+                        };
+                        g.DrawPolygon(p, pts);
+                        break;
+                    }
+                    case IconKind.Exit:
+                    {
+                        // Lucide LogOut icon
+                        PointF[] door = new PointF[]
+                        {
+                            new PointF(r.Left + r.Width * 0.45f, r.Top + 1.5f),
+                            new PointF(r.Left + 1.5f, r.Top + 1.5f),
+                            new PointF(r.Left + 1.5f, r.Bottom - 1.5f),
+                            new PointF(r.Left + r.Width * 0.45f, r.Bottom - 1.5f)
+                        };
+                        g.DrawLines(p, door);
+                        float midY = r.Top + r.Height * 0.50f;
+                        g.DrawLine(p, r.Left + r.Width * 0.36f, midY, r.Right - 1.2f, midY);
+                        g.DrawLine(p, r.Right - 4.5f, midY - 3.3f, r.Right - 1.2f, midY);
+                        g.DrawLine(p, r.Right - 4.5f, midY + 3.3f, r.Right - 1.2f, midY);
+                        break;
+                    }
+                }
+            }
+        }
+
+        private static Pen CreateLucidePen(Color color, float width)
+        {
+            return new Pen(color, width)
+            {
+                StartCap = LineCap.Round,
+                EndCap = LineCap.Round,
+                LineJoin = LineJoin.Round
+            };
+        }
+
+        private static GraphicsPath RoundedRect(Rectangle bounds, int radius)
+        {
+            int d = radius * 2;
+            GraphicsPath path = new GraphicsPath();
+            path.AddArc(bounds.Left, bounds.Top, d, d, 180, 90);
+            path.AddArc(bounds.Right - d, bounds.Top, d, d, 270, 90);
+            path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
+            path.AddArc(bounds.Left, bounds.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        private static GraphicsPath RoundedRectF(RectangleF bounds, float radius)
+        {
+            float d = radius * 2f;
+            GraphicsPath path = new GraphicsPath();
+            path.AddArc(bounds.Left, bounds.Top, d, d, 180, 90);
+            path.AddArc(bounds.Right - d, bounds.Top, d, d, 270, 90);
+            path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
+            path.AddArc(bounds.Left, bounds.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
         }
     }
 }
