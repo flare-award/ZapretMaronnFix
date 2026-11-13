@@ -129,15 +129,19 @@ export const App: React.FC = () => {
     [notify]
   );
 
-  // Initial load + optional background update check
+  // Initial load + optional background update check + clean post-update query param
   useEffect(() => {
+    if (window.location.search.includes('updated=')) {
+      window.history.replaceState(null, '', window.location.pathname);
+      notify('Обновление программы успешно установлено');
+    }
     refreshState().then((initial) => {
       if (initial?.settings.autoCheckUpdates) {
         handleCheckUpdate(true);
         handleCheckAppUpdate(true);
       }
     });
-  }, [refreshState, handleCheckUpdate, handleCheckAppUpdate]);
+  }, [refreshState, handleCheckUpdate, handleCheckAppUpdate, notify]);
 
   // Live SSE subscription to /api/events for instant UI updates when files in zapret/ or tray actions change state
   useEffect(() => {

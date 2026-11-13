@@ -452,12 +452,12 @@ while ($listener.IsListening) {
 
                 $applyScript = Join-Path ([System.IO.Path]::GetTempPath()) ("zapret-control-restart-" + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + ".ps1")
                 $scriptBody = @"
-Start-Sleep -Milliseconds 900
-Get-CimInstance Win32_Process | Where-Object { `$_.CommandLine -and (`$_.CommandLine -like '*ui-window-v2*' -or `$_.CommandLine -like '*window-profile*') } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }
-& taskkill.exe /IM ZapretControl.exe /F 2>&1 | Out-Null
-& taskkill.exe /PID $PID /T /F 2>&1 | Out-Null
+Start-Sleep -Milliseconds 600
+Get-Process -Name 'ZapretControl' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Wait-Process -Name 'ZapretControl' -Timeout 5 -ErrorAction SilentlyContinue
+Stop-Process -Id $PID -Force -ErrorAction SilentlyContinue
 & taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
-Start-Sleep -Milliseconds 400
+Start-Sleep -Milliseconds 250
 `$exePath = Join-Path '$($RepoRoot.Replace("'", "''"))' 'ZapretControl.exe'
 for (`$i = 0; `$i -lt 25; `$i++) { if (-not (Test-Path -LiteralPath `$exePath)) { break }; try { Remove-Item -LiteralPath `$exePath -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 200 } }
 foreach (`$sub in @('server','static','src','host','public')) {
@@ -475,26 +475,48 @@ if (Test-Path -LiteralPath `$sBat) { [System.IO.File]::Copy(`$sBat, (Join-Path '
 if (Test-Path -LiteralPath `$sZap) { & robocopy.exe `$sZap `$dZap /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null }
 `$pZap = Join-Path '$($preserveDir.Replace("'", "''"))' 'zapret'
 if (Test-Path -LiteralPath `$pZap) { & robocopy.exe `$pZap `$dZap /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null }
-foreach (`$cRel in @('app\data\ui-window-v2\Default\Cache','app\data\ui-window-v2\Default\Code Cache')) {
-    `$cp = Join-Path '$($RepoRoot.Replace("'", "''"))' `$cRel
-    if (Test-Path -LiteralPath `$cp) { Remove-Item -LiteralPath `$cp -Recurse -Force -ErrorAction SilentlyContinue }
-}
 if (Test-Path -LiteralPath '$($stagedState.Replace("'", "''"))') {
     [System.IO.File]::Copy('$($stagedState.Replace("'", "''"))', (Join-Path '$($RepoRoot.Replace("'", "''"))' 'app\data\app-update-state.json'), `$true)
 }
-Start-Process -FilePath (Join-Path '$($RepoRoot.Replace("'", "''"))' 'ZapretControl.bat') -WorkingDirectory '$($RepoRoot.Replace("'", "''"))'
+`$csPath = Join-Path '$($RepoRoot.Replace("'", "''"))' 'app\host\ZapretControl.cs'
+`$icoPath = Join-Path '$($RepoRoot.Replace("'", "''"))' 'app\host\app.ico'
+`$csc64 = Join-Path `$env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+`$csc32 = Join-Path `$env:SystemRoot 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+`$csc = if (Test-Path -LiteralPath `$csc64) { `$csc64 } elseif (Test-Path -LiteralPath `$csc32) { `$csc32 } else { `$null }
+if (`$null -ne `$csc -and (Test-Path -LiteralPath `$csPath)) {
+    `$cscArgs = @('/nologo', '/target:winexe', '/optimize+', ("/out:`$exePath"), '/r:System.dll', '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll')
+    if (Test-Path -LiteralPath `$icoPath) { `$cscArgs += ("/win32icon:`$icoPath") }
+    `$cscArgs += `$csPath
+    & `$csc @cscArgs 2>&1 | Out-Null
+}
+if (Test-Path -LiteralPath `$exePath) {
+    `$psi = New-Object System.Diagnostics.ProcessStartInfo
+    `$psi.FileName = `$exePath
+    `$psi.Arguments = '--relaunch-after-update --port=$Port'
+    `$psi.WorkingDirectory = '$($RepoRoot.Replace("'", "''"))'
+    `$psi.UseShellExecute = `$false
+    `$psi.CreateNoWindow = `$true
+    [System.Diagnostics.Process]::Start(`$psi) | Out-Null
+}
 Start-Sleep -Milliseconds 400
 Remove-Item -LiteralPath '$($tmpWork.Replace("'", "''"))' -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 "@
                 Set-Content -Path $applyScript -Value $scriptBody -Encoding UTF8
-                Start-Process -FilePath "cmd.exe" -ArgumentList "/d /s /c start `"`" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$applyScript`"" -WindowStyle Hidden | Out-Null
+                $psiPs = New-Object System.Diagnostics.ProcessStartInfo
+                $psiPs.FileName = "powershell.exe"
+                $psiPs.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$applyScript`""
+                $psiPs.UseShellExecute = $false
+                $psiPs.CreateNoWindow = $true
+                [System.Diagnostics.Process]::Start($psiPs) | Out-Null
 
                 $okBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ ok = $true; restarting = $true; message = "Обновление установлено, выполняется перезапуск..." } | ConvertTo-Json))
                 $res.StatusCode = 200
                 $res.ContentType = "application/json; charset=utf-8"
                 $res.OutputStream.Write($okBytes, 0, $okBytes.Length)
                 $res.Close()
-                continue
+                $listener.Stop()
+                break
             }
 
             if ($urlPath -eq "/api/system/open-url" -and $req.HttpMethod -eq "POST") {

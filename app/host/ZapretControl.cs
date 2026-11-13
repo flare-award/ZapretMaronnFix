@@ -79,15 +79,10 @@ namespace ZapretControlHost
         [STAThread]
         private static void Main(string[] args)
         {
-            bool createdNew;
-            singleInstanceMutex = new Mutex(true, "Local\\ZapretControlSingleInstanceMutex", out createdNew);
-            if (!createdNew)
-            {
-                FocusExistingWindow();
-                return;
-            }
-
             bool startMinimized = false;
+            bool relaunchAfterUpdate = false;
+            int preferredPort = 3847;
+
             foreach (string a in args)
             {
                 if (string.Equals(a, "--minimized", StringComparison.OrdinalIgnoreCase) ||
@@ -95,6 +90,44 @@ namespace ZapretControlHost
                 {
                     startMinimized = true;
                 }
+                else if (string.Equals(a, "--relaunch-after-update", StringComparison.OrdinalIgnoreCase))
+                {
+                    relaunchAfterUpdate = true;
+                }
+                else if (a != null && a.StartsWith("--port=", StringComparison.OrdinalIgnoreCase))
+                {
+                    int parsedPort;
+                    if (int.TryParse(a.Substring(7), out parsedPort) && parsedPort > 0 && parsedPort < 65536)
+                    {
+                        preferredPort = parsedPort;
+                    }
+                }
+            }
+
+            bool createdNew = false;
+            int mutexAttempts = relaunchAfterUpdate ? 30 : 1;
+            for (int i = 0; i < mutexAttempts; i++)
+            {
+                singleInstanceMutex = new Mutex(true, "Local\\ZapretControlSingleInstanceMutex", out createdNew);
+                if (createdNew) break;
+                try
+                {
+                    singleInstanceMutex.Dispose();
+                }
+                catch
+                {
+                }
+                singleInstanceMutex = null;
+                if (i + 1 < mutexAttempts)
+                {
+                    Thread.Sleep(150);
+                }
+            }
+
+            if (!createdNew)
+            {
+                FocusExistingWindow();
+                return;
             }
 
             if (!IsAdministrator())
@@ -126,7 +159,7 @@ namespace ZapretControlHost
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new TrayHostContext(startMinimized));
+            Application.Run(new TrayHostContext(startMinimized, preferredPort, relaunchAfterUpdate));
         }
 
         public static void ReleaseSingleInstanceMutex()
@@ -227,10 +260,10 @@ namespace ZapretControlHost
         private bool windowObservedOpen;
         private bool isShuttingDown;
 
-        public TrayHostContext(bool startMinimized)
+        public TrayHostContext(bool startMinimized, int preferredPort, bool waitForPreferredPort)
         {
             repoRoot = ResolveRepoRoot();
-            port = FindAvailablePort(3847);
+            port = FindAvailablePort(preferredPort, waitForPreferredPort);
 
             LoadBrandIcons(repoRoot, out smallIcon, out largeIcon);
 
@@ -433,23 +466,32 @@ namespace ZapretControlHost
             return baseDir;
         }
 
-        private static int FindAvailablePort(int preferred)
+        private static int FindAvailablePort(int preferred, bool waitIfBusy)
         {
-            try
+            int attempts = waitIfBusy ? 30 : 1;
+            for (int i = 0; i < attempts; i++)
             {
-                TcpListener l = new TcpListener(IPAddress.Loopback, preferred);
-                l.Start();
-                l.Stop();
-                return preferred;
+                try
+                {
+                    TcpListener l = new TcpListener(IPAddress.Loopback, preferred);
+                    l.Start();
+                    l.Stop();
+                    return preferred;
+                }
+                catch
+                {
+                    if (i + 1 < attempts)
+                    {
+                        Thread.Sleep(120);
+                    }
+                }
             }
-            catch
-            {
-                TcpListener l = new TcpListener(IPAddress.Loopback, 0);
-                l.Start();
-                int assigned = ((IPEndPoint)l.LocalEndpoint).Port;
-                l.Stop();
-                return assigned;
-            }
+
+            TcpListener fallback = new TcpListener(IPAddress.Loopback, 0);
+            fallback.Start();
+            int assigned = ((IPEndPoint)fallback.LocalEndpoint).Port;
+            fallback.Stop();
+            return assigned;
         }
 
         private void StartBackendServer()

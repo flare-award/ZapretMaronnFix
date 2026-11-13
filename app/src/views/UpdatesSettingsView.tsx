@@ -101,23 +101,23 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     let sawServerDown = false;
     const timer = setInterval(async () => {
       attempts++;
-      if (attempts < 3) return;
+      if (attempts < 2) return;
       try {
         const nextState = await api.getState();
         const bootChanged =
           Boolean(previousBootId && nextState.serverBootId && nextState.serverBootId !== previousBootId);
-        if (bootChanged || sawServerDown || (!previousBootId && attempts >= 6)) {
+        if (bootChanged || (!previousBootId && sawServerDown)) {
           clearInterval(timer);
           window.location.replace(`${window.location.pathname}?updated=${Date.now()}`);
         }
       } catch {
         sawServerDown = true;
-        if (attempts > 55) {
+        if (attempts > 65) {
           clearInterval(timer);
           setInstallingAppUpdate(false);
         }
       }
-    }, 850);
+    }, 650);
   };
 
   const handleInstallFromGitHub = async () => {

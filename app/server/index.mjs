@@ -543,6 +543,7 @@ async function handleApi(req, res, pathname) {
     const result = await installProgramUpdate({
       zipBase64: body.zipBase64 || null,
       activeRunningStrategy: runtime.running ? runtime.activeStrategy : null,
+      targetPort: PORT,
       onBeforeApply: async () => {
         if (runtime.running) {
           await stopStrategyProcess();
@@ -550,6 +551,16 @@ async function handleApi(req, res, pathname) {
       },
     });
     sendJson(res, 200, result);
+    if (result.restarting) {
+      setTimeout(() => {
+        try {
+          server.close();
+        } catch {
+          // ignore
+        }
+        process.exit(0);
+      }, 350);
+    }
     return;
   }
 

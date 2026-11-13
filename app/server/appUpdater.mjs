@@ -716,6 +716,7 @@ function writeUtf8BomCrlf(filePath, content) {
 export async function installProgramUpdate({
   zipBase64 = null,
   activeRunningStrategy = null,
+  targetPort = 3847,
   onBeforeApply = null,
 } = {}) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -809,6 +810,7 @@ export async function installProgramUpdate({
       };
 
   fs.writeFileSync(stagedStateFile, JSON.stringify(nextUpdateState, null, 2), 'utf8');
+  writeLocalAppUpdateState(nextUpdateState);
   lastCheckCache = { ts: 0, result: null };
 
   if (isWin) {
@@ -821,6 +823,7 @@ export async function installProgramUpdate({
     const psTempWork = escapePsSingleQuoted(tempWorkDir);
     const psLog = escapePsSingleQuoted(UPDATE_LOG_FILE);
     const currentServerPid = process.pid;
+    const safePort = Number(targetPort) > 0 ? Number(targetPort) : 3847;
 
     const psScript = `
 $ErrorActionPreference = 'Continue'
@@ -831,6 +834,8 @@ $stateSrc = '${psStateSrc}'
 $stateDst = '${psStateDst}'
 $tempWork = '${psTempWork}'
 $logFile = '${psLog}'
+$targetPort = ${safePort}
+$oldServerPid = ${currentServerPid}
 
 function Write-UpdLog([string]$msg) {
     try {
@@ -839,34 +844,41 @@ function Write-UpdLog([string]$msg) {
     } catch {}
 }
 
-Write-UpdLog 'Starting self-update finalizer'
-Start-Sleep -Milliseconds 900
+Write-UpdLog ('Starting silent restart finalizer (oldServerPid=' + $oldServerPid + ', port=' + $targetPort + ')')
+Start-Sleep -Milliseconds 600
 
+# 1. Stop old tray host process (without killing our own PowerShell process)
 try {
-    Get-CimInstance Win32_Process | Where-Object {
-        $_.CommandLine -and ($_.CommandLine -like '*ui-window-v2*' -or $_.CommandLine -like '*window-profile*')
-    } | ForEach-Object {
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    Get-Process -Name 'ZapretControl' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Wait-Process -Name 'ZapretControl' -Timeout 5 -ErrorAction SilentlyContinue
+} catch {}
+
+# 2. Stop old Node server PID directly (NEVER use taskkill /T, which would kill this child PowerShell!)
+try {
+    $srvProc = Get-Process -Id $oldServerPid -ErrorAction SilentlyContinue
+    if ($null -ne $srvProc) {
+        Stop-Process -Id $oldServerPid -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $oldServerPid -Timeout 4 -ErrorAction SilentlyContinue
     }
 } catch {}
 
-& taskkill.exe /IM ZapretControl.exe /F 2>&1 | Out-Null
-& taskkill.exe /PID ${currentServerPid} /T /F 2>&1 | Out-Null
 & taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
-Start-Sleep -Milliseconds 450
+Start-Sleep -Milliseconds 250
 
+# 3. Ensure old ZapretControl.exe is unlocked so csc.exe can rebuild cleanly
 $exePath = Join-Path $repoRoot 'ZapretControl.exe'
-for ($i = 0; $i -lt 30; $i++) {
+for ($i = 0; $i -lt 25; $i++) {
     if (-not (Test-Path -LiteralPath $exePath)) { break }
     try {
         Remove-Item -LiteralPath $exePath -Force -ErrorAction Stop
         break
     } catch {
-        & taskkill.exe /IM ZapretControl.exe /F 2>&1 | Out-Null
-        Start-Sleep -Milliseconds 250
+        Get-Process -Name 'ZapretControl' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 200
     }
 }
 
+# 4. Mirror updated files to ensure 100% consistency after process unlock
 foreach ($sub in @('server', 'static', 'src', 'host', 'public')) {
     $nested = Join-Path (Join-Path (Join-Path $repoRoot 'app') $sub) $sub
     if (Test-Path -LiteralPath $nested) {
@@ -900,17 +912,6 @@ if (Test-Path -LiteralPath $presZapret) {
     & robocopy.exe $presZapret $dstZapret /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
 }
 
-foreach ($cacheRel in @(
-    'app\\data\\ui-window-v2\\Default\\Cache',
-    'app\\data\\ui-window-v2\\Default\\Code Cache',
-    'app\\data\\ui-window-v2\\Default\\GPUCache'
-)) {
-    $cp = Join-Path $repoRoot $cacheRel
-    if (Test-Path -LiteralPath $cp) {
-        Remove-Item -LiteralPath $cp -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
 if (Test-Path -LiteralPath $stateSrc) {
     $stateDir = [System.IO.Path]::GetDirectoryName($stateDst)
     if (-not (Test-Path -LiteralPath $stateDir)) {
@@ -919,9 +920,47 @@ if (Test-Path -LiteralPath $stateSrc) {
     [System.IO.File]::Copy($stateSrc, $stateDst, $true)
 }
 
-$launcher = Join-Path $repoRoot 'ZapretControl.bat'
-Write-UpdLog ('Relaunching ' + $launcher)
-Start-Process -FilePath $launcher -WorkingDirectory $repoRoot
+# 5. Recompile ZapretControl.exe directly via csc.exe (silent, no .bat console window, no ShellExecute sound)
+$csPath = Join-Path $repoRoot 'app\\host\\ZapretControl.cs'
+$icoPath = Join-Path $repoRoot 'app\\host\\app.ico'
+$csc64 = Join-Path $env:SystemRoot 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'
+$csc32 = Join-Path $env:SystemRoot 'Microsoft.NET\\Framework\\v4.0.30319\\csc.exe'
+$csc = if (Test-Path -LiteralPath $csc64) { $csc64 } elseif (Test-Path -LiteralPath $csc32) { $csc32 } else { $null }
+
+if ($null -ne $csc -and (Test-Path -LiteralPath $csPath)) {
+    $cscArgs = @('/nologo', '/target:winexe', '/optimize+', ("/out:$exePath"), '/r:System.dll', '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll')
+    if (Test-Path -LiteralPath $icoPath) {
+        $cscArgs += ("/win32icon:$icoPath")
+    }
+    $cscArgs += $csPath
+    & $csc @cscArgs 2>&1 | Out-Null
+    Write-UpdLog ('Compiled ZapretControl.exe exit=' + $LASTEXITCODE)
+}
+
+# 6. Launch new host (or fallback node server) via CreateProcess (UseShellExecute=$false -> zero OS error sounds)
+if (Test-Path -LiteralPath $exePath) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exePath
+    $psi.Arguments = ('--relaunch-after-update --port=' + $targetPort)
+    $psi.WorkingDirectory = $repoRoot
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    [System.Diagnostics.Process]::Start($psi) | Out-Null
+    Write-UpdLog 'Launched ZapretControl.exe successfully'
+} else {
+    $nodeCmd = Get-Command 'node.exe' -ErrorAction SilentlyContinue
+    if ($null -ne $nodeCmd) {
+        $psiNode = New-Object System.Diagnostics.ProcessStartInfo
+        $psiNode.FileName = $nodeCmd.Source
+        $psiNode.Arguments = ('"' + (Join-Path $repoRoot 'app\\server\\index.mjs') + '"')
+        $psiNode.WorkingDirectory = $repoRoot
+        $psiNode.UseShellExecute = $false
+        $psiNode.CreateNoWindow = $true
+        $psiNode.EnvironmentVariables['PORT'] = [string]$targetPort
+        [System.Diagnostics.Process]::Start($psiNode) | Out-Null
+        Write-UpdLog 'Launched fallback node.exe server'
+    }
+}
 
 Start-Sleep -Milliseconds 500
 Remove-Item -LiteralPath $tempWork -Recurse -Force -ErrorAction SilentlyContinue
@@ -931,12 +970,16 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
     writeUtf8BomCrlf(applyScriptPath, psScript);
 
     const detached = spawn(
-      'cmd.exe',
+      'powershell.exe',
       [
-        '/d',
-        '/s',
-        '/c',
-        `start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${applyScriptPath}"`,
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-WindowStyle',
+        'Hidden',
+        '-File',
+        applyScriptPath,
       ],
       {
         cwd: os.tmpdir(),
