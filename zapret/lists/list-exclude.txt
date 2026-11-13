@@ -133,4 +133,7 @@ ubisoft.com
 uplay.com
 ubisoft-orbit.akamaized.net
 uplay-shop.akamaized.net
-ubi.com upc-corp.com
+ubi.com
+upc-corp.com
+msftconnecttest.com
+msftncsi.com
