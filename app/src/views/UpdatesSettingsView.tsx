@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   RefreshCw,
   FolderOpen,
@@ -12,15 +12,24 @@ import {
   Calendar,
   Save,
   LayoutPanelLeft,
+  Sparkles,
 } from 'lucide-react';
 import { api } from '../api';
-import type { AppSettings, FullAppState, UpdateCheckResult } from '../types';
+import type {
+  AppProgramUpdateResult,
+  AppSettings,
+  FullAppState,
+  UpdateCheckResult,
+} from '../types';
 
 interface UpdatesSettingsViewProps {
   state: FullAppState;
   updateInfo: UpdateCheckResult | null;
   checkingUpdate: boolean;
   onCheckUpdate: () => void;
+  appUpdateInfo: AppProgramUpdateResult | null;
+  checkingAppUpdate: boolean;
+  onCheckAppUpdate: () => void;
   onUpdateSettings: (patch: Partial<AppSettings>) => void;
   onStateUpdated: (nextState: FullAppState) => void;
   onNotify: (msg: string, isError?: boolean) => void;
@@ -44,13 +53,19 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
   updateInfo,
   checkingUpdate,
   onCheckUpdate,
+  appUpdateInfo,
+  checkingAppUpdate,
+  onCheckAppUpdate,
   onUpdateSettings,
   onStateUpdated,
   onNotify,
 }) => {
-  const { settings, zapretInfo } = state;
+  const { settings, zapretInfo, appUpdateState } = state;
   const [customDir, setCustomDir] = useState<string>(settings.zapretDir);
   const [backupBusy, setBackupBusy] = useState<boolean>(false);
+  const [installingAppUpdate, setInstallingAppUpdate] = useState<boolean>(false);
+  const [installPhaseText, setInstallPhaseText] = useState<string>('');
+  const zipInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setCustomDir(settings.zapretDir);
@@ -58,6 +73,75 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
 
   const handleOpenExternal = (url: string) => {
     api.openExternalUrl(url);
+  };
+
+  const waitForRestartAndReload = () => {
+    let attempts = 0;
+    const timer = setInterval(async () => {
+      attempts++;
+      if (attempts < 2) return;
+      try {
+        await api.getState();
+        clearInterval(timer);
+        window.location.reload();
+      } catch {
+        if (attempts > 45) {
+          clearInterval(timer);
+          setInstallingAppUpdate(false);
+        }
+      }
+    }, 800);
+  };
+
+  const handleInstallFromGitHub = async () => {
+    setInstallingAppUpdate(true);
+    setInstallPhaseText('Скачивание свежей сборки с GitHub и сохранение ваших профилей и списков...');
+    try {
+      const res = await api.installAppUpdate();
+      if (res.restarting) {
+        setInstallPhaseText('Установка файлов и автоматический перезапуск Zapret Control...');
+        waitForRestartAndReload();
+      } else {
+        setInstallPhaseText('Обновление установлено. Перезагрузка интерфейса...');
+        setTimeout(() => {
+          window.location.reload();
+        }, 700);
+      }
+    } catch (err) {
+      setInstallingAppUpdate(false);
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    }
+  };
+
+  const handleZipFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setInstallingAppUpdate(true);
+    setInstallPhaseText(`Чтение архива ${file.name} и сохранение ваших профилей и списков...`);
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Не удалось прочитать выбранный ZIP-файл'));
+        reader.readAsDataURL(file);
+      });
+
+      const res = await api.installAppUpdate(base64);
+      if (res.restarting) {
+        setInstallPhaseText('Установка файлов и автоматический перезапуск Zapret Control...');
+        waitForRestartAndReload();
+      } else {
+        setInstallPhaseText('Обновление из ZIP установлено. Перезагрузка интерфейса...');
+        setTimeout(() => {
+          window.location.reload();
+        }, 700);
+      }
+    } catch (err) {
+      setInstallingAppUpdate(false);
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    }
   };
 
   const handleSaveBackup = async () => {
@@ -131,17 +215,200 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
     },
     {
       key: 'autoCheckUpdates',
-      title: 'Автоматически проверять выход новых версий Zapret',
-      desc: 'При запуске проверяет свежий релиз в официальном репозитории Flowseal на GitHub.',
+      title: 'Автоматически проверять выход обновлений',
+      desc: 'При запуске проверяет наличие обновлений самой программы и новых релизов Zapret на GitHub.',
     },
   ];
 
   const isClassicStackedLayout = settings.connectLayout === 'stacked';
   const showBestCards = settings.showBestStrategyCards !== false;
 
+  const localBuildLabel =
+    appUpdateInfo?.currentShortSha || appUpdateState?.installedShortSha
+      ? `#${appUpdateInfo?.currentShortSha || appUpdateState?.installedShortSha}`
+      : 'Локальная сборка';
+
   return (
     <div className="content-container">
-      {/* Interface & Display Settings */}
+      {/* 1. Self-Update Card for Zapret Control Program */}
+      <div className="m3-card">
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '12px',
+            marginBottom: '16px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '11px' }}>
+            <div className="brand-mark">
+              {appUpdateInfo?.updateAvailable ? (
+                <ArrowUpCircle size={19} />
+              ) : (
+                <Sparkles size={18} />
+              )}
+            </div>
+            <div>
+              <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Обновление программы Zapret Control</div>
+              <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
+                Автоматическая загрузка, замена файлов программы и перезапуск с сохранением ваших профилей, настроек и списков
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            {appUpdateInfo?.updateAvailable && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={installingAppUpdate || checkingAppUpdate}
+                onClick={handleInstallFromGitHub}
+              >
+                <Download size={14} />
+                Скачать, обновить и перезапустить
+              </button>
+            )}
+
+            <button
+              type="button"
+              className={appUpdateInfo?.updateAvailable ? 'btn btn-surface' : 'btn btn-primary'}
+              disabled={checkingAppUpdate || installingAppUpdate}
+              onClick={onCheckAppUpdate}
+            >
+              <RefreshCw size={14} className={checkingAppUpdate ? 'spin-icon' : ''} />
+              {checkingAppUpdate ? 'Проверка GitHub...' : 'Проверить обновление программы'}
+            </button>
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            gap: '12px',
+            marginBottom: '14px',
+          }}
+        >
+          <div className="m3-card-compact" style={{ background: 'var(--m3-surface-low)' }}>
+            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>Текущая ревизия программы</div>
+            <div className="mono" style={{ fontSize: '19px', fontWeight: 700, marginTop: '4px' }}>
+              {localBuildLabel}
+            </div>
+            <div style={{ fontSize: '11.5px', color: 'var(--m3-text-muted)', marginTop: '4px' }}>
+              {appUpdateState?.installedBranch
+                ? `Ветка: ${appUpdateState.installedBranch}`
+                : 'Профили и списки защищены'}
+            </div>
+          </div>
+
+          <div className="m3-card-compact" style={{ background: 'var(--m3-surface-low)' }}>
+            <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>Сборка на GitHub</div>
+            <div
+              className="mono"
+              style={{
+                fontSize: '19px',
+                fontWeight: 700,
+                marginTop: '4px',
+                color: appUpdateInfo
+                  ? appUpdateInfo.updateAvailable
+                    ? 'var(--m3-warn)'
+                    : 'var(--m3-success)'
+                  : 'var(--m3-text)',
+              }}
+            >
+              {appUpdateInfo ? `#${appUpdateInfo.latestShortSha}` : 'Нажмите проверить'}
+            </div>
+            <div style={{ fontSize: '11.5px', color: 'var(--m3-text-muted)', marginTop: '4px' }}>
+              {appUpdateInfo
+                ? appUpdateInfo.updateAvailable
+                  ? `Доступно обновление (файлов: ${appUpdateInfo.changedFilesCount})`
+                  : 'Установлена последняя версия программы'
+                : `Источник: ${zapretInfo.links.userRepo.replace('https://github.com/', '')}`}
+            </div>
+          </div>
+
+          <div className="m3-card-compact" style={{ background: 'var(--m3-surface-low)' }}>
+            <div
+              style={{
+                fontSize: '12px',
+                color: 'var(--m3-text-secondary)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px',
+              }}
+            >
+              <Calendar size={13} />
+              Дата последнего обновления
+            </div>
+            <div style={{ fontSize: '14.5px', fontWeight: 600, marginTop: '7px' }}>
+              {appUpdateInfo
+                ? formatRuDate(appUpdateInfo.publishedAt)
+                : appUpdateState?.commitDate
+                  ? formatRuDate(appUpdateState.commitDate)
+                  : 'Не проверено'}
+            </div>
+            <div
+              style={{
+                fontSize: '11.5px',
+                color: 'var(--m3-text-muted)',
+                marginTop: '5px',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+              title={appUpdateInfo?.commitMessage || appUpdateState?.commitMessage || ''}
+            >
+              {appUpdateInfo?.commitMessage || appUpdateState?.commitMessage || 'Автоматическая пересборка лаунчера'}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+          {!appUpdateInfo?.updateAvailable && (
+            <button
+              type="button"
+              className="btn btn-tonal"
+              disabled={installingAppUpdate || checkingAppUpdate}
+              onClick={handleInstallFromGitHub}
+              title="Скачать свежий архив с GitHub и переустановить файлы программы поверх текущих"
+            >
+              <Download size={14} />
+              Переустановить свежую сборку с GitHub
+            </button>
+          )}
+
+          <input
+            ref={zipInputRef}
+            type="file"
+            accept=".zip,application/zip"
+            style={{ display: 'none' }}
+            onChange={handleZipFileSelected}
+          />
+          <button
+            type="button"
+            className="btn btn-surface"
+            disabled={installingAppUpdate}
+            onClick={() => zipInputRef.current?.click()}
+            title="Обновить программу из скачанного вручную ZIP-архива репозитория без потери настроек"
+          >
+            <Archive size={14} />
+            Обновить из ZIP-файла
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-surface"
+            onClick={() => handleOpenExternal(appUpdateInfo?.htmlUrl || zapretInfo.links.userRepo)}
+          >
+            <ExternalLink size={14} />
+            Репозиторий программы на GitHub
+          </button>
+        </div>
+      </div>
+
+      {/* 2. Interface & Display Settings */}
       <div className="m3-card">
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
           <div className="brand-mark">
@@ -182,7 +449,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
                 Классическое расположение вкладки «Подключение» (список стратегий снизу)
               </div>
               <div className="m3-switch-desc">
-                По умолчанию список стратегий находится справа от кнопки подключения, а 4 плашки фильтров — под кнопкой. Включите, чтобы вернуть прежний вариант.
+                По умолчанию список стратегий находится справа от кнопки подключения, а плашки фильтров и профиля — под кнопкой. Включите, чтобы вернуть прежний вариант.
               </div>
             </div>
             <button
@@ -202,7 +469,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
         </div>
       </div>
 
-      {/* Program Startup & Auto-Enable Strategy Settings */}
+      {/* 3. Program Startup & Auto-Enable Strategy Settings */}
       <div className="m3-card">
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
           <div className="brand-mark">
@@ -211,7 +478,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
           <div>
             <div style={{ fontSize: '15px', fontWeight: 600 }}>Автозапуск и поведение программы</div>
             <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)' }}>
-              Настройки применяются мгновенно и сохраняются между перезапусками и обновлениями Zapret
+              Настройки применяются мгновенно и сохраняются между перезапусками и обновлениями
             </div>
           </div>
         </div>
@@ -240,7 +507,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
         </div>
       </div>
 
-      {/* Zapret Version & Update Checker */}
+      {/* 4. Zapret Version & Update Checker */}
       <div className="m3-card">
         <div
           style={{
@@ -264,9 +531,9 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             </div>
           </div>
 
-          <button type="button" className="btn btn-primary" disabled={checkingUpdate} onClick={onCheckUpdate}>
-            <RefreshCw size={14} />
-            {checkingUpdate ? 'Проверка релизов...' : 'Проверить наличие обновлений'}
+          <button type="button" className="btn btn-tonal" disabled={checkingUpdate} onClick={onCheckUpdate}>
+            <RefreshCw size={14} className={checkingUpdate ? 'spin-icon' : ''} />
+            {checkingUpdate ? 'Проверка релизов...' : 'Проверить релизы Zapret'}
           </button>
         </div>
 
@@ -332,7 +599,6 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
           </div>
         </div>
 
-        {/* External Links opened via OS Default Browser */}
         <div
           style={{
             display: 'flex',
@@ -403,7 +669,7 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
         )}
       </div>
 
-      {/* Isolated Zapret Folder & User List Protection */}
+      {/* 5. Isolated Zapret Folder & User List Protection */}
       <div className="m3-card">
         <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: '4px' }}>
           Изолированная папка файлов Zapret и сохранность ваших списков
@@ -446,6 +712,29 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Modal Overlay while Installing Self-Update */}
+      {installingAppUpdate && (
+        <div className="modal-backdrop">
+          <div
+            className="modal-panel"
+            style={{
+              maxWidth: '430px',
+              alignItems: 'center',
+              textAlign: 'center',
+              padding: '28px 24px',
+            }}
+          >
+            <div className="brand-mark" style={{ width: '46px', height: '46px', borderRadius: '14px' }}>
+              <RefreshCw size={22} className="spin-icon" />
+            </div>
+            <div style={{ fontSize: '16px', fontWeight: 600 }}>Обновление Zapret Control</div>
+            <div style={{ fontSize: '13px', color: 'var(--m3-text-secondary)', lineHeight: 1.5 }}>
+              {installPhaseText}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

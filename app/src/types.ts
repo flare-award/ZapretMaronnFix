@@ -179,6 +179,29 @@ export interface TestJobState {
   error: string | null;
 }
 
+export interface LocalAppUpdateState {
+  installedSha: string | null;
+  installedShortSha: string | null;
+  installedBranch: string | null;
+  commitDate: string | null;
+  commitMessage: string;
+}
+
+export interface AppProgramUpdateResult {
+  repo: string;
+  currentShortSha: string | null;
+  currentDate: string | null;
+  latestSha: string;
+  latestShortSha: string;
+  branch: string;
+  publishedAt: string | null;
+  commitMessage: string;
+  changedFilesCount: number;
+  updateAvailable: boolean;
+  htmlUrl: string;
+  checkedAt: string;
+}
+
 export interface FullAppState {
   platform: {
     os: string;
@@ -196,6 +219,7 @@ export interface FullAppState {
   testHistory: TestHistoryEntry[];
   latestTestRun: TestRunReport | null;
   testJob: TestJobState;
+  appUpdateState?: LocalAppUpdateState;
   zapretFingerprint: string;
 }
 

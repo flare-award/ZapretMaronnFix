@@ -1,4 +1,5 @@
 import type {
+  AppProgramUpdateResult,
   AppSettings,
   DiagnosticCheck,
   FullAppState,
@@ -130,6 +131,17 @@ export const api = {
     }),
 
   checkUpdates: () => request<UpdateCheckResult>('/api/updates/check'),
+
+  checkAppUpdate: () => request<AppProgramUpdateResult>('/api/app-update/check'),
+
+  installAppUpdate: (zipBase64?: string) =>
+    request<{ ok: boolean; restarting: boolean; installedShortSha: string; message: string }>(
+      '/api/app-update/install',
+      {
+        method: 'POST',
+        body: JSON.stringify(zipBase64 ? { zipBase64 } : {}),
+      }
+    ),
 
   getTestHistoryReport: (fileName: string) =>
     request<TestRunReport>(`/api/tests/history/${encodeURIComponent(fileName)}`),

@@ -336,6 +336,19 @@ pre,
   }
 }
 
+@keyframes spinLinear {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin-icon {
+  animation: spinLinear 1s linear infinite;
+}
+
 /* Cards & Surfaces */
 .m3-card {
   background: var(--m3-surface);

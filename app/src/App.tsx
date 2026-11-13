@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { api, type CreateProfilePayload } from './api';
 import type {
+  AppProgramUpdateResult,
   AppSettings,
   FullAppState,
   GameFilterMode,
@@ -51,6 +52,8 @@ export const App: React.FC = () => {
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState<boolean>(false);
+  const [appUpdateInfo, setAppUpdateInfo] = useState<AppProgramUpdateResult | null>(null);
+  const [checkingAppUpdate, setCheckingAppUpdate] = useState<boolean>(false);
   const [toast, setToast] = useState<{ msg: string; isError: boolean } | null>(null);
 
   // Lifted test history state so switching tabs never resets test results
@@ -105,14 +108,37 @@ export const App: React.FC = () => {
     [notify]
   );
 
+  const handleCheckAppUpdate = useCallback(
+    async (silent = false) => {
+      setCheckingAppUpdate(true);
+      try {
+        const res = await api.checkAppUpdate();
+        setAppUpdateInfo(res);
+        if (!silent) {
+          notify(
+            res.updateAvailable
+              ? `Доступно обновление программы (#${res.latestShortSha})`
+              : `Установлена последняя сборка программы (#${res.latestShortSha})`
+          );
+        }
+      } catch (err) {
+        if (!silent) notify(err instanceof Error ? err.message : String(err), true);
+      } finally {
+        setCheckingAppUpdate(false);
+      }
+    },
+    [notify]
+  );
+
   // Initial load + optional background update check
   useEffect(() => {
     refreshState().then((initial) => {
       if (initial?.settings.autoCheckUpdates) {
         handleCheckUpdate(true);
+        handleCheckAppUpdate(true);
       }
     });
-  }, [refreshState, handleCheckUpdate]);
+  }, [refreshState, handleCheckUpdate, handleCheckAppUpdate]);
 
   // Live SSE subscription to /api/events for instant UI updates when files in zapret/ or tray actions change state
   useEffect(() => {
@@ -455,7 +481,7 @@ export const App: React.FC = () => {
       id: 'settings',
       label: TAB_LABELS.settings,
       icon: <Settings size={17} strokeWidth={1.9} />,
-      showUpdateIcon: Boolean(updateInfo?.updateAvailable),
+      showUpdateIcon: Boolean(updateInfo?.updateAvailable || appUpdateInfo?.updateAvailable),
     },
   ];
 
@@ -488,9 +514,11 @@ export const App: React.FC = () => {
                 <span
                   className="nav-update-icon"
                   title={
-                    updateInfo
-                      ? `Доступна новая версия Zapret v${updateInfo.latestVersion}`
-                      : 'Доступно обновление Zapret'
+                    appUpdateInfo?.updateAvailable
+                      ? `Доступно обновление программы (#${appUpdateInfo.latestShortSha})`
+                      : updateInfo?.updateAvailable
+                        ? `Доступна новая версия Zapret v${updateInfo.latestVersion}`
+                        : 'Доступно обновление'
                   }
                 >
                   <ArrowUpCircle size={14} strokeWidth={2.1} />
@@ -637,6 +665,9 @@ export const App: React.FC = () => {
               updateInfo={updateInfo}
               checkingUpdate={checkingUpdate}
               onCheckUpdate={() => handleCheckUpdate(false)}
+              appUpdateInfo={appUpdateInfo}
+              checkingAppUpdate={checkingAppUpdate}
+              onCheckAppUpdate={() => handleCheckAppUpdate(false)}
               onUpdateSettings={handleUpdateSettings}
               onStateUpdated={setState}
               onNotify={notify}

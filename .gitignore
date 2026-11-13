@@ -3,6 +3,9 @@ app/node_modules/
 app/data/runtime.json
 app/data/settings.json
 app/data/profiles.json
+app/data/app-update-state.json
+app/data/resume-after-update.json
+app/data/staging-update/
 app/data/window-profile/
 app/data/ui-window-v2/
 ZapretControl.exe

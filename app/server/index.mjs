@@ -47,6 +47,12 @@ import {
   startTestSuite,
   stopTestSuite,
 } from './runnerAndTester.mjs';
+import {
+  readLocalAppUpdateState,
+  checkProgramUpdate,
+  installProgramUpdate,
+  consumeResumeAfterUpdateFlag,
+} from './appUpdater.mjs';
 
 const STATIC_DIR = path.join(APP_DIR, 'static');
 const PORT = Number(process.env.PORT || 3847);
@@ -91,7 +97,7 @@ function readJsonBody(req) {
     req.setEncoding('utf8');
     req.on('data', (chunk) => {
       raw += chunk;
-      if (raw.length > 8 * 1024 * 1024) {
+      if (raw.length > 64 * 1024 * 1024) {
         reject(new Error('Превышен допустимый размер тела запроса'));
         req.destroy();
       }
@@ -166,6 +172,7 @@ function buildFullState() {
     testHistory,
     latestTestRun: effectiveLatestRun,
     testJob,
+    appUpdateState: readLocalAppUpdateState(),
     zapretFingerprint: lastZapretFingerprint || computeZapretDirectoryFingerprint(zapretDir),
   };
 }
@@ -328,7 +335,7 @@ async function handleApi(req, res, pathname) {
     activateProfile(settings.zapretDir, String(body.id || ''));
     const nextSettings = loadSettings();
     if (body.startNow) {
-      await startStrategyDirect(nextSettings.selectedStrategy);
+      await startStrategyProcess(nextSettings.selectedStrategy);
     } else if (nextSettings.autoRestartOnFilterChange) {
       await restartIfRunning();
     }
@@ -483,6 +490,23 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (method === 'GET' && pathname === '/api/app-update/check') {
+    const appUpdate = await checkProgramUpdate();
+    sendJson(res, 200, appUpdate);
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/app-update/install') {
+    const body = await readJsonBody(req);
+    const runtime = getRuntimeState();
+    const result = await installProgramUpdate({
+      zipBase64: body.zipBase64 || null,
+      activeRunningStrategy: runtime.running ? runtime.activeStrategy : null,
+    });
+    sendJson(res, 200, result);
+    return;
+  }
+
   const histMatch = pathname.match(/^\/api\/tests\/history\/(.+)$/);
   if (method === 'GET' && histMatch) {
     const settings = loadSettings();
@@ -624,7 +648,11 @@ server.listen(PORT, HOST, async () => {
       backupUserLists(settings.zapretDir);
       const { activeProfileId } = readProfiles(settings.zapretDir);
       activateProfile(settings.zapretDir, activeProfileId);
-      if (settings.autoStartStrategyOnLaunch) {
+      const resumedStrategy = consumeResumeAfterUpdateFlag();
+      if (resumedStrategy) {
+        console.log(`Resuming active strategy after program self-update: ${resumedStrategy}`);
+        await startStrategyProcess(resumedStrategy);
+      } else if (settings.autoStartStrategyOnLaunch) {
         const refreshed = loadSettings();
         console.log(`Auto-starting last selected strategy on launch: ${refreshed.selectedStrategy}`);
         await startStrategyProcess(refreshed.selectedStrategy);

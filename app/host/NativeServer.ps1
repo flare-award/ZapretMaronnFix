@@ -166,8 +166,100 @@ function Start-WinwsDirect($strategyName) {
     $script:StartedAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 }
 
+$ResumeFlagFile = Join-Path $DataDir "resume-after-update.json"
+$UpdateStateFile = Join-Path $DataDir "app-update-state.json"
+
+function Get-GitBlobSha1([byte[]]$bytes) {
+    $header = [System.Text.Encoding]::UTF8.GetBytes("blob $($bytes.Length)`0")
+    $combined = New-Object byte[] ($header.Length + $bytes.Length)
+    [System.Buffer]::BlockCopy($header, 0, $combined, 0, $header.Length)
+    [System.Buffer]::BlockCopy($bytes, 0, $combined, $header.Length, $bytes.Length)
+    $sha1 = [System.Security.Cryptography.SHA1]::Create()
+    $hash = $sha1.ComputeHash($combined)
+    return ([System.BitConverter]::ToString($hash)).Replace("-", "").ToLower()
+}
+
+function Get-LatestAppCommit {
+    $headers = @{ "User-Agent" = "ZapretControl/1.2"; "Accept" = "application/vnd.github+json" }
+    $branches = Invoke-RestMethod -Uri "https://api.github.com/repos/flare-award/ZapretMaronnFix/branches?per_page=20" -Headers $headers -TimeoutSec 15
+    $best = $null
+    foreach ($b in ($branches | Select-Object -First 8)) {
+        try {
+            $c = Invoke-RestMethod -Uri "https://api.github.com/repos/flare-award/ZapretMaronnFix/commits/$($b.commit.sha)" -Headers $headers -TimeoutSec 15
+            $tree = Invoke-RestMethod -Uri "https://api.github.com/repos/flare-award/ZapretMaronnFix/git/trees/$($c.commit.tree.sha)?recursive=1" -Headers $headers -TimeoutSec 15
+            $hasApp = $false
+            foreach ($e in $tree.tree) { if ($e.path -eq "app/server/index.mjs") { $hasApp = $true; break } }
+            if (-not $hasApp) { continue }
+            $dt = [DateTimeOffset]::Parse($c.commit.committer.date).ToUnixTimeMilliseconds()
+            if ($null -eq $best -or $dt -gt $best.ts) {
+                $best = @{
+                    branch = $b.name
+                    sha = $c.sha
+                    shortSha = $c.sha.Substring(0, 7)
+                    publishedAt = $c.commit.committer.date
+                    ts = $dt
+                    message = ($c.commit.message -split "`r?`n")[0]
+                    htmlUrl = $c.html_url
+                    entries = $tree.tree
+                }
+            }
+        } catch {}
+    }
+    if ($null -eq $best) { throw "В репозитории на GitHub не найдена сборка Zapret Control" }
+    return $best
+}
+
+function Check-AppUpdatePs {
+    $latest = Get-LatestAppCommit
+    $changed = 0
+    foreach ($e in $latest.entries) {
+        if ($e.type -ne "blob") { continue }
+        $p = [string]$e.path
+        if ($p -ne "ZapretControl.bat" -and (-not $p.StartsWith("app/") -or $p.StartsWith("app/data/") -or $p.StartsWith("app/node_modules/"))) { continue }
+        $localFile = Join-Path $RepoRoot ($p -replace "/", "\")
+        if (-not (Test-Path -LiteralPath $localFile)) { $changed++; continue }
+        $raw = [System.IO.File]::ReadAllBytes($localFile)
+        $shaRaw = Get-GitBlobSha1 $raw
+        if ($shaRaw -eq $e.sha) { continue }
+        $lfText = [System.Text.Encoding]::GetEncoding("ISO-8859-1").GetString($raw) -replace "`r`n", "`n"
+        $shaLf = Get-GitBlobSha1 ([System.Text.Encoding]::GetEncoding("ISO-8859-1").GetBytes($lfText))
+        if ($shaLf -eq $e.sha) { continue }
+        $changed++
+    }
+    if ($changed -eq 0) {
+        (@{
+            installedSha = $latest.sha
+            installedShortSha = $latest.shortSha
+            installedBranch = $latest.branch
+            commitDate = $latest.publishedAt
+            commitMessage = $latest.message
+        } | ConvertTo-Json) | Set-Content -Path $UpdateStateFile -Encoding UTF8
+    }
+    $localState = if (Test-Path $UpdateStateFile) { Get-Content $UpdateStateFile -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
+    return @{
+        repo = "flare-award/ZapretMaronnFix"
+        currentShortSha = if ($changed -eq 0) { $latest.shortSha } elseif ($localState) { $localState.installedShortSha } else { $null }
+        currentDate = if ($changed -eq 0) { $latest.publishedAt } elseif ($localState) { $localState.commitDate } else { $null }
+        latestSha = $latest.sha
+        latestShortSha = $latest.shortSha
+        branch = $latest.branch
+        publishedAt = $latest.publishedAt
+        commitMessage = $latest.message
+        changedFilesCount = $changed
+        updateAvailable = ($changed -gt 0)
+        htmlUrl = $latest.htmlUrl
+        checkedAt = [DateTime]::UtcNow.ToString("o")
+    }
+}
+
 $initSettings = Get-AppSettings
-if ($initSettings.autoStartStrategyOnLaunch) {
+if (Test-Path $ResumeFlagFile) {
+    try {
+        $resumeObj = Get-Content $ResumeFlagFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        Remove-Item -LiteralPath $ResumeFlagFile -Force -ErrorAction SilentlyContinue
+        if ($resumeObj.strategy) { Start-WinwsDirect $resumeObj.strategy }
+    } catch {}
+} elseif ($initSettings.autoStartStrategyOnLaunch) {
     try { Start-WinwsDirect $initSettings.selectedStrategy } catch {}
 }
 
@@ -201,6 +293,97 @@ while ($listener.IsListening) {
                 $reader = New-Object System.IO.StreamReader($req.InputStream, [System.Text.Encoding]::UTF8)
                 $rawBody = $reader.ReadToEnd()
                 if ($rawBody.Trim()) { $bodyObj = $rawBody | ConvertFrom-Json }
+            }
+
+            if ($urlPath -eq "/api/app-update/check" -and $req.HttpMethod -eq "GET") {
+                $chk = Check-AppUpdatePs
+                $chkBytes = [System.Text.Encoding]::UTF8.GetBytes(($chk | ConvertTo-Json -Depth 6))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($chkBytes, 0, $chkBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            if ($urlPath -eq "/api/app-update/install" -and $req.HttpMethod -eq "POST") {
+                $staging = Join-Path $DataDir "staging-update"
+                if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+                New-Item -ItemType Directory -Force -Path $staging | Out-Null
+                $zipPath = Join-Path $staging "update.zip"
+                $extractDir = Join-Path $staging "extracted"
+                $preserveDir = Join-Path $staging "preserve"
+                New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+                New-Item -ItemType Directory -Force -Path $preserveDir | Out-Null
+
+                if ($bodyObj -and $bodyObj.zipBase64) {
+                    $b64 = ([string]$bodyObj.zipBase64) -replace "^data:[^;]+;base64,", ""
+                    [System.IO.File]::WriteAllBytes($zipPath, [Convert]::FromBase64String($b64))
+                } else {
+                    $latest = Get-LatestAppCommit
+                    Invoke-WebRequest -Uri "https://codeload.github.com/flare-award/ZapretMaronnFix/zip/$($latest.sha)" -OutFile $zipPath -UseBasicParsing -TimeoutSec 45
+                    (@{
+                        installedSha = $latest.sha
+                        installedShortSha = $latest.shortSha
+                        installedBranch = $latest.branch
+                        commitDate = $latest.publishedAt
+                        commitMessage = $latest.message
+                    } | ConvertTo-Json) | Set-Content -Path $UpdateStateFile -Encoding UTF8
+                }
+
+                Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
+                $srcRoot = $extractDir
+                Get-ChildItem -LiteralPath $extractDir -Directory | ForEach-Object {
+                    if (Test-Path (Join-Path $_.FullName "ZapretControl.bat")) { $srcRoot = $_.FullName }
+                }
+
+                foreach ($rel in @("zapret\lists\list-general-user.txt","zapret\lists\list-exclude-user.txt","zapret\lists\ipset-exclude-user.txt","zapret\lists\ipset-all.txt","zapret\lists\ipset-all.txt.backup","zapret\utils\game_filter.enabled","zapret\utils\targets.txt","zapret\bin\ACTIVE_DISCORD_UDP.bin","zapret\bin\ACTIVE_GAME_UDP.bin")) {
+                    $sFile = Join-Path $RepoRoot $rel
+                    if (Test-Path -LiteralPath $sFile) {
+                        $dFile = Join-Path $preserveDir $rel
+                        New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($dFile)) | Out-Null
+                        Copy-Item -LiteralPath $sFile -Destination $dFile -Force
+                    }
+                }
+
+                if ($null -ne $script:ActiveWinws -and -not $script:ActiveWinws.HasExited -and $script:ActiveStrategy) {
+                    (@{ strategy = $script:ActiveStrategy } | ConvertTo-Json) | Set-Content -Path $ResumeFlagFile -Encoding UTF8
+                }
+
+                $applyScript = Join-Path $staging "apply-update.ps1"
+                $scriptBody = @"
+Start-Sleep -Milliseconds 700
+Get-CimInstance Win32_Process | Where-Object { `$_.CommandLine -and (`$_.CommandLine -like '*ui-window-v2*' -or `$_.CommandLine -like '*window-profile*') } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }
+Stop-Process -Name 'ZapretControl' -Force -ErrorAction SilentlyContinue
+Stop-Process -Id $PID -Force -ErrorAction SilentlyContinue
+Stop-Process -Name 'winws' -Force -ErrorAction SilentlyContinue
+`$exePath = Join-Path '$($RepoRoot.Replace("'", "''"))' 'ZapretControl.exe'
+for (`$i = 0; `$i -lt 25; `$i++) { if (-not (Test-Path -LiteralPath `$exePath)) { break }; try { Remove-Item -LiteralPath `$exePath -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 200 } }
+`$oldAssets = Join-Path '$($RepoRoot.Replace("'", "''"))' 'app\static\assets'
+if (Test-Path -LiteralPath `$oldAssets) { Remove-Item -LiteralPath `$oldAssets -Recurse -Force -ErrorAction SilentlyContinue }
+Get-ChildItem -LiteralPath '$($srcRoot.Replace("'", "''"))' -Force | ForEach-Object {
+    if (`$_.Name -eq '.git') { return }
+    if (`$_.Name -eq 'app') {
+        Get-ChildItem -LiteralPath `$_.FullName -Force | Where-Object { `$_.Name -ne 'data' -and `$_.Name -ne 'node_modules' } | ForEach-Object { Copy-Item -LiteralPath `$_.FullName -Destination (Join-Path '$($RepoRoot.Replace("'", "''"))' 'app') -Recurse -Force }
+    } else {
+        Copy-Item -LiteralPath `$_.FullName -Destination '$($RepoRoot.Replace("'", "''"))' -Recurse -Force
+    }
+}
+if (Test-Path -LiteralPath '$($preserveDir.Replace("'", "''"))') {
+    Get-ChildItem -LiteralPath '$($preserveDir.Replace("'", "''"))' -Force | ForEach-Object { Copy-Item -LiteralPath `$_.FullName -Destination '$($RepoRoot.Replace("'", "''"))' -Recurse -Force }
+}
+Start-Sleep -Milliseconds 250
+Remove-Item -LiteralPath '$($staging.Replace("'", "''"))' -Recurse -Force -ErrorAction SilentlyContinue
+Start-Process -FilePath (Join-Path '$($RepoRoot.Replace("'", "''"))' 'ZapretControl.bat') -WorkingDirectory '$($RepoRoot.Replace("'", "''"))'
+"@
+                Set-Content -Path $applyScript -Value $scriptBody -Encoding UTF8
+                Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$applyScript`"" -WindowStyle Hidden | Out-Null
+
+                $okBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ ok = $true; restarting = $true; message = "Обновление установлено, выполняется перезапуск..." } | ConvertTo-Json))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($okBytes, 0, $okBytes.Length)
+                $res.Close()
+                continue
             }
 
             if ($urlPath -eq "/api/system/open-url" -and $req.HttpMethod -eq "POST") {
