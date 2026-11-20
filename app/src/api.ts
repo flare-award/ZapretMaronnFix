@@ -12,6 +12,7 @@ import type {
   QuickProbeResult,
   SiteDiagnosisReport,
   SmartListAddResult,
+  SteamSpeedJobState,
   TestJobState,
   TestRunReport,
   UpdateCheckResult,
@@ -219,6 +220,17 @@ export const api = {
 
   stopTests: () =>
     request<{ testJob: TestJobState }>('/api/tests/stop', {
+      method: 'POST',
+    }),
+
+  startSteamSpeedTest: () =>
+    request<{ steamSpeedJob: SteamSpeedJobState }>('/api/steam-speed/start', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  stopSteamSpeedTest: () =>
+    request<{ steamSpeedJob: SteamSpeedJobState }>('/api/steam-speed/stop', {
       method: 'POST',
     }),
 

@@ -3,6 +3,7 @@ import {
   Shield,
   Bookmark,
   Gauge,
+  Download,
   SlidersHorizontal,
   ListFilter,
   Wrench,
@@ -26,18 +27,20 @@ import type {
 import { ConnectView } from './views/ConnectView';
 import { ProfilesView } from './views/ProfilesView';
 import { TestsView } from './views/TestsView';
+import { SpeedView } from './views/SpeedView';
 import { FiltersView } from './views/FiltersView';
 import { ListsView } from './views/ListsView';
 import { ToolsView } from './views/ToolsView';
 import { UpdatesSettingsView } from './views/UpdatesSettingsView';
 import { formatDuration } from './utils/metrics';
 
-type NavTab = 'connect' | 'profiles' | 'tests' | 'filters' | 'lists' | 'tools' | 'settings';
+type NavTab = 'connect' | 'profiles' | 'tests' | 'speed' | 'filters' | 'lists' | 'tools' | 'settings';
 
 const TAB_LABELS: Record<NavTab, string> = {
   connect: 'Подключение',
   profiles: 'Профили',
   tests: 'Тесты',
+  speed: 'Скорость',
   filters: 'Фильтры',
   lists: 'Списки',
   tools: 'Инструменты',
@@ -213,9 +216,9 @@ export const App: React.FC = () => {
     return () => clearInterval(id);
   }, [state?.runtime.running]);
 
-  // Poll test progress only while test suite is active
+  // Poll active benchmark progress as a fallback if SSE is temporarily unavailable.
   useEffect(() => {
-    if (!state?.testJob.running) return;
+    if (!state?.testJob.running && !state?.steamSpeedJob.running) return;
     const id = setInterval(() => {
       api
         .getState()
@@ -223,7 +226,7 @@ export const App: React.FC = () => {
         .catch(() => {});
     }, 550);
     return () => clearInterval(id);
-  }, [state?.testJob.running]);
+  }, [state?.testJob.running, state?.steamSpeedJob.running]);
 
   const handleTogglePower = async () => {
     if (!state) return;
@@ -477,6 +480,12 @@ export const App: React.FC = () => {
       badge: state.testJob.running ? `${state.testJob.progressPct}%` : undefined,
     },
     {
+      id: 'speed',
+      label: TAB_LABELS.speed,
+      icon: <Download size={17} strokeWidth={1.9} />,
+      badge: state.steamSpeedJob.running ? `${state.steamSpeedJob.progressPct}%` : undefined,
+    },
+    {
       id: 'filters',
       label: TAB_LABELS.filters,
       icon: <SlidersHorizontal size={17} strokeWidth={1.9} />,
@@ -552,7 +561,11 @@ export const App: React.FC = () => {
           <div className="status-inline">
             <span
               className={`status-dot ${
-                state.testJob.running ? 'testing' : state.runtime.running ? 'active' : ''
+                state.testJob.running || state.steamSpeedJob.running
+                  ? 'testing'
+                  : state.runtime.running
+                    ? 'active'
+                    : ''
               }`}
             />
             <span
@@ -564,9 +577,11 @@ export const App: React.FC = () => {
                 textOverflow: 'ellipsis',
               }}
             >
-              {state.testJob.running
-                ? 'Идёт проверка'
-                : state.runtime.running
+              {state.steamSpeedJob.running
+                ? 'Тест скорости'
+                : state.testJob.running
+                  ? 'Идёт проверка'
+                  : state.runtime.running
                   ? 'Запущен'
                   : 'Остановлен'}
             </span>
@@ -648,6 +663,15 @@ export const App: React.FC = () => {
               onStartTests={(cats, mode) => handleStartTests(undefined, cats, mode)}
               onStopTests={handleStopTests}
               onApplyStrategy={handleSelectStrategy}
+            />
+          )}
+
+          {tab === 'speed' && (
+            <SpeedView
+              state={state}
+              onStateUpdated={setState}
+              onApplyStrategy={handleSelectStrategy}
+              onNotify={notify}
             />
           )}
 

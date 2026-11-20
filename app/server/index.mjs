@@ -61,6 +61,13 @@ import {
   stopTestSuite,
 } from './runnerAndTester.mjs';
 import {
+  setSteamSpeedChangeListener,
+  getSteamSpeedJobState,
+  readSteamSpeedHistory,
+  startSteamSpeedTest,
+  stopSteamSpeedTest,
+} from './steamSpeedTester.mjs';
+import {
   readLocalAppUpdateState,
   checkProgramUpdate,
   installProgramUpdate,
@@ -186,6 +193,8 @@ function buildFullState() {
     testHistory,
     latestTestRun: effectiveLatestRun,
     testJob,
+    steamSpeedJob: getSteamSpeedJobState(),
+    steamSpeedHistory: readSteamSpeedHistory(),
     appUpdateState: readLocalAppUpdateState(),
     serverBootId: SERVER_BOOT_ID,
     zapretFingerprint: lastZapretFingerprint || computeZapretDirectoryFingerprint(zapretDir),
@@ -295,6 +304,9 @@ async function handleApi(req, res, pathname, urlObj) {
   }
 
   if (method === 'POST' && pathname === '/api/runner/start') {
+    if (getSteamSpeedJobState().running) {
+      throw new Error('Сначала остановите тест скорости Steam');
+    }
     const body = await readJsonBody(req);
     await startStrategyProcess(body.strategy);
     if (body.strategy) {
@@ -321,6 +333,9 @@ async function handleApi(req, res, pathname, urlObj) {
   }
 
   if (method === 'POST' && pathname === '/api/settings') {
+    if (getSteamSpeedJobState().running) {
+      throw new Error('Настройки нельзя менять во время теста скорости Steam');
+    }
     const body = await readJsonBody(req);
     const prev = loadSettings();
     const updated = saveSettings(body);
@@ -348,6 +363,9 @@ async function handleApi(req, res, pathname, urlObj) {
 
   // Profiles API
   if (method === 'POST' && pathname === '/api/profiles/activate') {
+    if (getSteamSpeedJobState().running) {
+      throw new Error('Профиль нельзя переключить во время теста скорости Steam');
+    }
     const body = await readJsonBody(req);
     const settings = loadSettings();
     activateProfile(settings.zapretDir, String(body.id || ''));
@@ -378,6 +396,9 @@ async function handleApi(req, res, pathname, urlObj) {
 
   const profileMatch = pathname.match(/^\/api\/profiles\/([a-z0-9-]+)$/i);
   if (profileMatch) {
+    if (getSteamSpeedJobState().running) {
+      throw new Error('Профили нельзя менять во время теста скорости Steam');
+    }
     const profileId = profileMatch[1];
     const settings = loadSettings();
     if (method === 'PUT') {
@@ -405,6 +426,7 @@ async function handleApi(req, res, pathname, urlObj) {
   }
 
   if (method === 'POST' && pathname === '/api/filters/game') {
+    if (getSteamSpeedJobState().running) throw new Error('Сначала остановите тест скорости Steam');
     const body = await readJsonBody(req);
     const settings = loadSettings();
     writeGameFilter(settings.zapretDir, body);
@@ -419,6 +441,7 @@ async function handleApi(req, res, pathname, urlObj) {
   }
 
   if (method === 'POST' && pathname === '/api/filters/ipset') {
+    if (getSteamSpeedJobState().running) throw new Error('Сначала остановите тест скорости Steam');
     const body = await readJsonBody(req);
     const settings = loadSettings();
     switchIpsetFilter(settings.zapretDir, body.mode);
@@ -446,6 +469,7 @@ async function handleApi(req, res, pathname, urlObj) {
   }
 
   if (method === 'POST' && pathname === '/api/filters/fakes') {
+    if (getSteamSpeedJobState().running) throw new Error('Сначала остановите тест скорости Steam');
     const body = await readJsonBody(req);
     const settings = loadSettings();
     replaceActiveFake(settings.zapretDir, body.target, body.binFileName);
@@ -552,6 +576,7 @@ async function handleApi(req, res, pathname, urlObj) {
   }
 
   if (method === 'POST' && pathname === '/api/system/shutdown') {
+    stopSteamSpeedTest();
     await shutdownBypassServicesAndDriver();
     sendJson(res, 200, { ok: true });
     return;
@@ -617,6 +642,9 @@ async function handleApi(req, res, pathname, urlObj) {
   }
 
   if (method === 'POST' && pathname === '/api/tests/start') {
+    if (getSteamSpeedJobState().running) {
+      throw new Error('Сначала остановите тест скорости Steam');
+    }
     const body = await readJsonBody(req);
     const job = await startTestSuite(body);
     sendJson(res, 200, { testJob: job });
@@ -626,6 +654,22 @@ async function handleApi(req, res, pathname, urlObj) {
   if (method === 'POST' && pathname === '/api/tests/stop') {
     const job = stopTestSuite();
     sendJson(res, 200, { testJob: job });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/steam-speed/start') {
+    if (getTestJobState().running) {
+      throw new Error('Сначала остановите обычное тестирование стратегий');
+    }
+    const body = await readJsonBody(req);
+    const job = await startSteamSpeedTest(body);
+    sendJson(res, 200, { steamSpeedJob: job });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/steam-speed/stop') {
+    const job = stopSteamSpeedTest();
+    sendJson(res, 200, { steamSpeedJob: job });
     return;
   }
 
@@ -834,6 +878,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 setRuntimeChangeListener(broadcastStateChange);
+setSteamSpeedChangeListener(broadcastStateChange);
 
 server.listen(PORT, HOST, async () => {
   console.log(`Zapret Control UI server listening on http://${HOST}:${PORT}`);
@@ -865,6 +910,7 @@ server.listen(PORT, HOST, async () => {
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
+    stopSteamSpeedTest();
     shutdownBypassServicesAndDriver().finally(() => process.exit(0));
   });
 }

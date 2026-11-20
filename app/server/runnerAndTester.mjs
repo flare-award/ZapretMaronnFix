@@ -171,7 +171,7 @@ export async function enableTcpTimestampsAction() {
   return { ok: true, message: 'Глобальные TCP Timestamps включены' };
 }
 
-export async function stopStrategyProcess() {
+export async function stopStrategyProcess(options = {}) {
   stoppingIntentionally = true;
   if (activeChild) {
     try {
@@ -184,7 +184,9 @@ export async function stopStrategyProcess() {
     activeChild = null;
   }
   await killExistingWinwsOnWindows();
-  await unloadWinDivertDriverIfIdle();
+  if (!options.keepDriver) {
+    await unloadWinDivertDriverIfIdle();
+  }
   runtimeState = {
     ...runtimeState,
     running: false,
@@ -246,13 +248,17 @@ export async function startStrategyProcess(strategyFileOverride, options = {}) {
   const parsed = parseBatWinwsArgs(zapretDir, strategyFile);
   const ipset = readIpsetFilter(zapretDir);
 
-  await stopStrategyProcess();
+  await stopStrategyProcess({ keepDriver: Boolean(options.keepDriver) });
 
   if (!options.isAutoRecovery) {
     crashTimestamps = [];
   }
 
-  if (strategyFileOverride && strategyFileOverride !== settings.selectedStrategy) {
+  if (
+    strategyFileOverride &&
+    strategyFileOverride !== settings.selectedStrategy &&
+    !options.preserveSelectedStrategy
+  ) {
     saveSettings({ selectedStrategy: strategyFileOverride });
   }
 

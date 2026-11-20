@@ -188,6 +188,43 @@ export interface TestJobState {
   error: string | null;
 }
 
+export interface SteamSpeedResult {
+  fileName: string;
+  ok: boolean;
+  megabytesPerSecond: number;
+  megabitsPerSecond: number;
+  latencyMs: number | null;
+  bytesDownloaded: number;
+  durationMs: number;
+  endpointHost: string | null;
+  error: string | null;
+}
+
+export interface SteamSpeedJobState {
+  running: boolean;
+  aborted: boolean;
+  startedAt: number | null;
+  finishedAt: number | null;
+  currentStrategy: string | null;
+  completedCount: number;
+  totalCount: number;
+  progressPct: number;
+  results: SteamSpeedResult[];
+  error: string | null;
+  sourceLabel: string;
+  sampleBytesPerStrategy: number;
+}
+
+export interface SteamSpeedRun {
+  id: string;
+  startedAt: number;
+  finishedAt: number;
+  aborted: boolean;
+  sourceLabel: string;
+  sampleBytesPerStrategy: number;
+  results: SteamSpeedResult[];
+}
+
 export interface LocalAppUpdateState {
   installedSha: string | null;
   installedShortSha: string | null;
@@ -228,6 +265,8 @@ export interface FullAppState {
   testHistory: TestHistoryEntry[];
   latestTestRun: TestRunReport | null;
   testJob: TestJobState;
+  steamSpeedJob: SteamSpeedJobState;
+  steamSpeedHistory: SteamSpeedRun[];
   appUpdateState?: LocalAppUpdateState;
   serverBootId?: string;
   zapretFingerprint: string;

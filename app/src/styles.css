@@ -677,6 +677,329 @@ pre,
   color: var(--m3-text);
 }
 
+/* Steam speed benchmark */
+.speed-container {
+  max-width: 1180px;
+}
+
+.speed-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.speed-hero-copy {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  min-width: 0;
+}
+
+.speed-icon-box,
+.speed-winner-mark {
+  width: 46px;
+  height: 46px;
+  border-radius: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--m3-primary-container);
+  color: var(--m3-primary);
+}
+
+.speed-hero h2,
+.section-heading-row h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.speed-hero p,
+.section-heading-row p {
+  margin: 4px 0 0;
+  color: var(--m3-text-secondary);
+  max-width: 680px;
+}
+
+.speed-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.speed-traffic-note,
+.speed-progress-meta,
+.section-date {
+  color: var(--m3-text-muted);
+  font-size: 11.5px;
+}
+
+.inline-notice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--m3-outline);
+  background: var(--m3-surface-low);
+  color: var(--m3-text-secondary);
+}
+
+.inline-notice.warn {
+  color: var(--m3-on-warn-container);
+  background: var(--m3-warn-container);
+  border-color: rgba(243, 201, 105, 0.2);
+}
+
+.speed-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.speed-progress-head,
+.section-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.section-kicker {
+  color: var(--m3-text-muted);
+  font-size: 11.5px;
+  margin-bottom: 2px;
+}
+
+.speed-progress-value {
+  color: var(--m3-primary);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.speed-progress-track {
+  height: 6px;
+}
+
+.speed-winner {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  background: linear-gradient(105deg, rgba(29, 52, 88, 0.62), var(--m3-surface) 58%);
+  border-color: rgba(168, 199, 250, 0.2);
+}
+
+.speed-winner-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.speed-winner-copy span,
+.speed-winner-copy small,
+.speed-winner-rate small {
+  color: var(--m3-text-secondary);
+  font-size: 11.5px;
+}
+
+.speed-winner-copy strong {
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.speed-winner-rate {
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 5px;
+  align-items: baseline;
+  min-width: 130px;
+}
+
+.speed-winner-rate strong {
+  font-size: 22px;
+  color: var(--m3-primary);
+}
+
+.speed-winner-rate small {
+  grid-column: 1 / -1;
+}
+
+.speed-results-card {
+  padding-bottom: 10px;
+}
+
+.speed-table-wrap {
+  margin: 15px -10px 0;
+  overflow-x: auto;
+}
+
+.speed-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 760px;
+}
+
+.speed-table th {
+  padding: 8px 10px;
+  color: var(--m3-text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  text-align: left;
+  border-bottom: 1px solid var(--m3-outline);
+}
+
+.speed-table td {
+  padding: 11px 10px;
+  border-bottom: 1px solid var(--m3-outline);
+  color: var(--m3-text-secondary);
+  vertical-align: middle;
+}
+
+.speed-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.speed-table tbody tr.is-best td {
+  background: rgba(168, 199, 250, 0.045);
+}
+
+.speed-rank {
+  display: inline-flex;
+  width: 27px;
+  height: 27px;
+  border-radius: 9px;
+  align-items: center;
+  justify-content: center;
+  background: var(--m3-surface-high);
+  color: var(--m3-text-secondary);
+}
+
+.is-best .speed-rank {
+  background: var(--m3-primary-container);
+  color: var(--m3-primary);
+}
+
+.speed-strategy-name {
+  max-width: 280px;
+  color: var(--m3-text);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.speed-table td small {
+  color: var(--m3-text-muted);
+  font-size: 10.5px;
+}
+
+.speed-rate-cell {
+  display: flex;
+  flex-direction: column;
+}
+
+.speed-rate-cell strong {
+  color: var(--m3-text);
+}
+
+.speed-rate-cell span {
+  color: var(--m3-text-muted);
+  font-size: 11px;
+}
+
+.result-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.result-status.ok {
+  color: var(--m3-on-success-container);
+  background: var(--m3-success-container);
+}
+
+.result-status.error {
+  color: var(--m3-on-danger-container);
+  background: var(--m3-danger-container);
+}
+
+.speed-empty {
+  min-height: 185px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  text-align: center;
+  color: var(--m3-text-muted);
+}
+
+.speed-empty strong {
+  color: var(--m3-text-secondary);
+}
+
+.speed-empty span {
+  max-width: 460px;
+  font-size: 12px;
+}
+
+.speed-method-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.speed-method-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--m3-primary);
+}
+
+.speed-method-item div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.speed-method-item strong {
+  color: var(--m3-text);
+  font-size: 12.5px;
+}
+
+.speed-method-item span {
+  color: var(--m3-text-muted);
+  font-size: 11.5px;
+}
+
+@media (max-width: 900px) {
+  .speed-hero {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .speed-actions {
+    align-items: flex-start;
+  }
+  .speed-method-grid {
+    grid-template-columns: 1fr;
+  }
+  .speed-winner {
+    flex-wrap: wrap;
+  }
+}
+
 /* Inputs & Selects */
 .input-wrap {
   position: relative;

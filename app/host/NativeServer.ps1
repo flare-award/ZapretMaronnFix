@@ -170,7 +170,30 @@ function Start-WinwsDirect($strategyName) {
 
 $ResumeFlagFile = Join-Path $DataDir "resume-after-update.json"
 $UpdateStateFile = Join-Path $DataDir "app-update-state.json"
+$SteamSpeedStateFile = Join-Path $DataDir "steam-speed-state.json"
+$SteamSpeedHistoryFile = Join-Path $DataDir "steam-speed-history.json"
+$SteamSpeedStopFile = Join-Path $DataDir "steam-speed-stop.flag"
+$script:SteamSpeedProcess = $null
+$script:SteamRestoreStrategy = $null
 $ServerBootId = [guid]::NewGuid().ToString()
+
+function Get-SteamSpeedState {
+    if (Test-Path $SteamSpeedStateFile) {
+        try { return Get-Content $SteamSpeedStateFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+    }
+    return [ordered]@{
+        running = $false; aborted = $false; startedAt = $null; finishedAt = $null
+        currentStrategy = $null; completedCount = 0; totalCount = 0; progressPct = 0
+        results = @(); error = $null; sourceLabel = "Официальная CDN Steam"; sampleBytesPerStrategy = 8388608
+    }
+}
+
+function Get-SteamSpeedHistory {
+    if (Test-Path $SteamSpeedHistoryFile) {
+        try { return @(Get-Content $SteamSpeedHistoryFile -Raw -Encoding UTF8 | ConvertFrom-Json) } catch {}
+    }
+    return @()
+}
 
 function Get-GitBlobSha1([byte[]]$bytes) {
     $header = [System.Text.Encoding]::UTF8.GetBytes("blob $($bytes.Length)`0")
@@ -393,6 +416,9 @@ while ($listener.IsListening) {
             }
 
             if ($urlPath -eq "/api/system/shutdown" -and $req.HttpMethod -eq "POST") {
+                if ($script:SteamSpeedProcess -and -not $script:SteamSpeedProcess.HasExited) {
+                    & taskkill.exe /PID $script:SteamSpeedProcess.Id /T /F 2>&1 | Out-Null
+                }
                 Stop-WinwsDirect
                 foreach ($svc in @("zapret","GoodbyeDPI","discordfix_zapret","winws1","winws2")) { & sc.exe stop $svc 2>&1 | Out-Null }
                 & taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
@@ -403,6 +429,47 @@ while ($listener.IsListening) {
                 $res.StatusCode = 200
                 $res.ContentType = "application/json; charset=utf-8"
                 $res.OutputStream.Write($okBytes, 0, $okBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            if ($urlPath -eq "/api/steam-speed/start" -and $req.HttpMethod -eq "POST") {
+                $existingSteam = Get-SteamSpeedState
+                if ($existingSteam.running) { throw "Тест скорости Steam уже выполняется" }
+                $stCur = Get-AppSettings
+                $script:SteamRestoreStrategy = if ($script:ActiveWinws -and -not $script:ActiveWinws.HasExited) { $script:ActiveStrategy } else { $null }
+                Stop-WinwsDirect
+                Remove-Item -LiteralPath $SteamSpeedStopFile -Force -ErrorAction SilentlyContinue
+                $strategyCount = @(Get-ChildItem -LiteralPath $stCur.zapretDir -Filter "*.bat" | Where-Object { $_.Name -ne "service.bat" }).Count
+                $initialSteam = [ordered]@{ running = $true; aborted = $false; startedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); finishedAt = $null; currentStrategy = $null; completedCount = 0; totalCount = $strategyCount; progressPct = 0; results = @(); error = $null; sourceLabel = "Официальная CDN Steam"; sampleBytesPerStrategy = 8388608 }
+                ($initialSteam | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $SteamSpeedStateFile -Encoding UTF8
+                $steamScript = Join-Path $PSScriptRoot "SteamSpeedTest.ps1"
+                $steamArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$steamScript`" -RepoRoot `"$RepoRoot`" -ZapretDir `"$($stCur.zapretDir)`""
+                $script:SteamSpeedProcess = Start-Process "powershell.exe" -ArgumentList $steamArgs -WindowStyle Hidden -PassThru
+                $speedBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ steamSpeedJob = $initialSteam } | ConvertTo-Json -Depth 8))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($speedBytes, 0, $speedBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            if ($urlPath -eq "/api/steam-speed/stop" -and $req.HttpMethod -eq "POST") {
+                New-Item -ItemType File -Force -Path $SteamSpeedStopFile | Out-Null
+                if ($script:SteamSpeedProcess -and -not $script:SteamSpeedProcess.HasExited) {
+                    & taskkill.exe /PID $script:SteamSpeedProcess.Id /T /F 2>&1 | Out-Null
+                }
+                Stop-WinwsDirect
+                $stoppedSteam = Get-SteamSpeedState
+                $stoppedSteam.running = $false
+                $stoppedSteam.aborted = $true
+                $stoppedSteam.currentStrategy = $null
+                $stoppedSteam.finishedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                ($stoppedSteam | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $SteamSpeedStateFile -Encoding UTF8
+                $speedBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ steamSpeedJob = $stoppedSteam } | ConvertTo-Json -Depth 8))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($speedBytes, 0, $speedBytes.Length)
                 $res.Close()
                 continue
             }
@@ -689,6 +756,7 @@ Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction Silen
             }
 
             if ($urlPath -eq "/api/runner/start" -and $req.HttpMethod -eq "POST") {
+                if ((Get-SteamSpeedState).running) { throw "Сначала остановите тест скорости Steam" }
                 Start-WinwsDirect $bodyObj.strategy
             } elseif ($urlPath -eq "/api/runner/stop" -and $req.HttpMethod -eq "POST") {
                 Stop-WinwsDirect
@@ -710,6 +778,12 @@ Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction Silen
                 }
             }
 
+            $steamState = Get-SteamSpeedState
+            if (-not $steamState.running -and $script:SteamRestoreStrategy) {
+                $restoreName = $script:SteamRestoreStrategy
+                $script:SteamRestoreStrategy = $null
+                try { Start-WinwsDirect $restoreName } catch {}
+            }
             $st = Get-AppSettings
             $zDir = $st.zapretDir
             $svcFile = Join-Path $zDir "service.bat"
@@ -776,6 +850,8 @@ Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction Silen
                 listsMeta = @()
                 testHistory = @()
                 latestTestRun = $null
+                steamSpeedJob = $steamState
+                steamSpeedHistory = @(Get-SteamSpeedHistory)
                 appUpdateState = if (Test-Path $UpdateStateFile) { try { Get-Content $UpdateStateFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $null } } else { $null }
                 serverBootId = $ServerBootId
                 zapretFingerprint = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString())

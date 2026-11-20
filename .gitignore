@@ -5,6 +5,9 @@ app/data/settings.json
 app/data/profiles.json
 app/data/app-update-state.json
 app/data/resume-after-update.json
+app/data/steam-speed-state.json
+app/data/steam-speed-history.json
+app/data/steam-speed-stop.flag
 app/data/last-update.log
 app/data/staging-update/
 app/data/window-profile/
