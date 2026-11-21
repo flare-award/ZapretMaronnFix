@@ -190,7 +190,7 @@ function Get-SteamSpeedState {
     return [ordered]@{
         running = $false; aborted = $false; startedAt = $null; finishedAt = $null
         currentStrategy = $null; completedCount = 0; totalCount = 0; progressPct = 0
-        results = @(); error = $null; sourceLabel = "Официальная CDN Steam"; sampleBytesPerStrategy = 8388608
+results = @(); error = $null; sourceLabel = "Официальная CDN Steam"; sampleBytesPerStrategy = 209715200
     }
 }
 
@@ -253,33 +253,80 @@ function Apply-ProblemFixLists($settings) {
     }
 }
 
+function Get-ProblemFixRecord([string]$id) {
+    if (Test-Path $ProblemFixesFile) {
+        try {
+            $raw = Get-Content $ProblemFixesFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $raw.fixes) {
+                $property = $raw.fixes.PSObject.Properties[$id]
+                if ($null -ne $property) { return $property.Value }
+            }
+        } catch {}
+    }
+    return [pscustomobject]@{ enabled = $false; enabledAt = $null; addedDomains = @(); removedExclusions = @() }
+}
+
+function Restore-ProblemExclusions([string]$listsDir, $entries) {
+    foreach ($fileName in @("list-exclude.txt", "list-exclude-user.txt")) {
+        $selected = @($entries | Where-Object { $_.fileName -eq $fileName } | Sort-Object index)
+        if ($selected.Count -eq 0) { continue }
+        $filePath = Join-Path $listsDir $fileName
+        $lines = New-Object System.Collections.ArrayList
+        if (Test-Path $filePath) { @(Get-Content $filePath -Encoding UTF8) | ForEach-Object { [void]$lines.Add($_) } }
+        foreach ($entry in $selected) {
+            $exists = @($lines | Where-Object { ($_.Trim().TrimStart('^')).ToLower() -eq ($entry.line.Trim().TrimStart('^')).ToLower() }).Count -gt 0
+            if ($exists) { continue }
+            $insertAt = if ($null -ne $entry.index) { [Math]::Max(0, [Math]::Min([int]$entry.index, $lines.Count)) } else { $lines.Count }
+            $lines.Insert($insertAt, [string]$entry.line)
+        }
+        $text = (($lines.ToArray() -join "`r`n").TrimEnd() + "`r`n")
+        [System.IO.File]::WriteAllText($filePath, $text, (New-Object System.Text.UTF8Encoding($false)))
+    }
+}
+
 function Set-ProblemFixPs([string]$id, [bool]$enabled, $settings) {
+    if ($id -notin @("discord-media", "steam-web")) { throw "Неизвестное исправление" }
     $config = Get-ProblemFixConfig
-    if ($id -eq "discord-media") { $config.discordMedia = $enabled }
-    elseif ($id -eq "steam-web") { $config.steamWeb = $enabled }
-    else { throw "Неизвестное исправление" }
-    $discordAdded = if ($config.discordMedia) { @("discordapp.net", "media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net") } else { @() }
-    $steamAdded = if ($config.steamWeb) { @("steampowered.com", "steamcommunity.com", "steamstatic.com", "cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com") } else { @() }
-    $steamRemoved = if ($config.steamWeb) { @(
-        [ordered]@{ fileName = "list-exclude.txt"; line = "steampowered.com" },
-        [ordered]@{ fileName = "list-exclude.txt"; line = "steamcommunity.com" }
-    ) } else { @() }
-    $savedConfig = [ordered]@{
-        fixes = [ordered]@{
-            "discord-media" = [ordered]@{ enabled = [bool]$config.discordMedia; enabledAt = $null; addedDomains = $discordAdded; removedExclusions = @() }
-            "steam-web" = [ordered]@{ enabled = [bool]$config.steamWeb; enabledAt = $null; addedDomains = $steamAdded; removedExclusions = $steamRemoved }
-        }
+    $discordRecord = Get-ProblemFixRecord "discord-media"
+    $steamRecord = Get-ProblemFixRecord "steam-web"
+    $targetRecord = if ($id -eq "discord-media") { $discordRecord } else { $steamRecord }
+    $domains = if ($id -eq "discord-media") {
+        @("discordapp.net", "media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net")
+    } else {
+        @("steampowered.com", "steamcommunity.com", "steamstatic.com", "cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com")
     }
+    $excludeDomains = if ($id -eq "discord-media") { @("discordapp.net", "discordapp.com") } else { @("steampowered.com", "steamcommunity.com", "steamstatic.com") }
+    $lists = Join-Path $settings.zapretDir "lists"
+
+    if ($enabled) {
+        $userGeneral = Join-Path $lists "list-general-user.txt"
+        $present = @{}
+        if (Test-Path $userGeneral) {
+            Get-Content $userGeneral -Encoding UTF8 | ForEach-Object { $present[($_.Trim().TrimStart('^')).ToLower()] = $true }
+        }
+        $addedDomains = @($domains | Where-Object { -not $present.ContainsKey($_.ToLower()) })
+        $removed = @()
+        foreach ($fileName in @("list-exclude.txt", "list-exclude-user.txt")) {
+            $filePath = Join-Path $lists $fileName
+            $lines = if (Test-Path $filePath) { @(Get-Content $filePath -Encoding UTF8) } else { @() }
+            for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
+                $normalized = ($lines[$lineIndex].Trim().TrimStart('^')).ToLower()
+                if ($excludeDomains -contains $normalized) {
+                    $removed += [ordered]@{ fileName = $fileName; line = $lines[$lineIndex].Trim(); index = $lineIndex }
+                }
+            }
+        }
+        $targetRecord = [pscustomobject]@{ enabled = $true; enabledAt = [DateTime]::UtcNow.ToString("o"); addedDomains = $addedDomains; removedExclusions = $removed }
+    } else {
+        Set-DomainFileEntries (Join-Path $lists "list-general-user.txt") @() @($targetRecord.addedDomains)
+        Restore-ProblemExclusions $lists @($targetRecord.removedExclusions)
+        $targetRecord = [pscustomobject]@{ enabled = $false; enabledAt = $null; addedDomains = @(); removedExclusions = @() }
+    }
+
+    if ($id -eq "discord-media") { $discordRecord = $targetRecord; $config.discordMedia = $enabled }
+    else { $steamRecord = $targetRecord; $config.steamWeb = $enabled }
+    $savedConfig = [ordered]@{ fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $steamRecord } }
     ($savedConfig | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ProblemFixesFile -Encoding UTF8
-    if (-not $enabled) {
-        $lists = Join-Path $settings.zapretDir "lists"
-        if ($id -eq "discord-media") {
-            Set-DomainFileEntries (Join-Path $lists "list-general-user.txt") @() @("media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net")
-        } else {
-            Set-DomainFileEntries (Join-Path $lists "list-general-user.txt") @() @("steampowered.com", "steamcommunity.com", "steamstatic.com", "cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com")
-            Set-DomainFileEntries (Join-Path $lists "list-exclude.txt") @("steampowered.com", "steamcommunity.com") @()
-        }
-    }
     Apply-ProblemFixLists $settings
 }
 
@@ -564,7 +611,7 @@ while ($listener.IsListening) {
                 Stop-WinwsDirect
                 Remove-Item -LiteralPath $SteamSpeedStopFile -Force -ErrorAction SilentlyContinue
                 $strategyCount = @(Get-ChildItem -LiteralPath $stCur.zapretDir -Filter "*.bat" | Where-Object { $_.Name -ne "service.bat" }).Count
-                $initialSteam = [ordered]@{ running = $true; aborted = $false; startedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); finishedAt = $null; currentStrategy = $null; completedCount = 0; totalCount = $strategyCount; progressPct = 0; results = @(); error = $null; sourceLabel = "Официальная CDN Steam"; sampleBytesPerStrategy = 8388608 }
+                $initialSteam = [ordered]@{ running = $true; aborted = $false; startedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); finishedAt = $null; currentStrategy = $null; completedCount = 0; totalCount = $strategyCount; progressPct = 0; results = @(); error = $null; sourceLabel = "Официальная CDN Steam"; sampleBytesPerStrategy = 209715200 }
                 ($initialSteam | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $SteamSpeedStateFile -Encoding UTF8
                 $steamScript = Join-Path $PSScriptRoot "SteamSpeedTest.ps1"
                 $steamArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$steamScript`" -RepoRoot `"$RepoRoot`" -ZapretDir `"$($stCur.zapretDir)`""

@@ -24,7 +24,9 @@ interface SpeedViewProps {
 
 function formatTraffic(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 МБ';
-  return `${Math.round(bytes / 1024 / 1024)} МБ`;
+  const megabytes = bytes / 1024 / 1024;
+  if (megabytes >= 1024) return `${(megabytes / 1024).toFixed(1)} ГБ`;
+  return `${Math.round(megabytes)} МБ`;
 }
 
 function formatDate(timestamp: number | null): string {
@@ -111,8 +113,8 @@ export const SpeedView: React.FC<SpeedViewProps> = ({
           <div>
             <h2>Скорость загрузки Steam</h2>
             <p>
-              Каждая стратегия проверяется реальной параллельной загрузкой с официальной CDN Steam.
-              Лучшая определяется по фактической скорости передачи данных.
+              Каждая стратегия проверяется загрузкой 200 МБ с официальной CDN Steam.
+              Лучшая определяется по фактической скорости четырёх параллельных потоков.
             </p>
           </div>
         </div>
@@ -250,7 +252,7 @@ export const SpeedView: React.FC<SpeedViewProps> = ({
       <section className="speed-method-grid">
         <div className="m3-card-compact speed-method-item">
           <Activity size={17} />
-          <div><strong>Реальный трафик</strong><span>Два параллельных потока, как при загрузке блоков игры.</span></div>
+          <div><strong>Реальный трафик</strong><span>Четыре параллельных потока и 200 МБ на каждую стратегию.</span></div>
         </div>
         <div className="m3-card-compact speed-method-item">
           <Timer size={17} />
@@ -258,7 +260,7 @@ export const SpeedView: React.FC<SpeedViewProps> = ({
         </div>
         <div className="m3-card-compact speed-method-item">
           <Server size={17} />
-          <div><strong>Без файлов на диске</strong><span>Тестовые данные сразу удаляются и не занимают место.</span></div>
+          <div><strong>Без файлов на диске</strong><span>Данные сразу отбрасываются после загрузки и не занимают место.</span></div>
         </div>
       </section>
     </div>

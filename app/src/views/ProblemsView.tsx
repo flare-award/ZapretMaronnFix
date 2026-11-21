@@ -50,7 +50,7 @@ export const ProblemsView: React.FC<ProblemsViewProps> = ({
       onNotify(
         enabled
           ? `Исправление "${fix.title}" применено`
-          : `Исправление "${fix.title}" отключено`
+          : `Исправление "${fix.title}" откачено`
       );
     } catch (err) {
       onNotify(err instanceof Error ? err.message : String(err), true);
@@ -151,7 +151,7 @@ export const ProblemsView: React.FC<ProblemsViewProps> = ({
                   onClick={() => setFix(fix, !fix.enabled)}
                 >
                   {busyId === fix.id ? <RefreshCw size={15} className="spin-icon" /> : <ShieldCheck size={15} />}
-                  {fix.enabled ? 'Отключить' : 'Применить исправление'}
+                  {fix.enabled ? 'Откатить исправление' : 'Применить исправление'}
                 </button>
                 <button
                   type="button"
@@ -171,7 +171,7 @@ export const ProblemsView: React.FC<ProblemsViewProps> = ({
       <div className="inline-notice">
         <ShieldCheck size={16} />
         <span>
-          Исправления добавляют только точечные правила. Они не меняют выбранную стратегию и сохраняются после обновления программы.
+          Исправления добавляют только точечные правила. При откате исходные списки и исключения восстанавливаются автоматически.
         </span>
       </div>
     </div>

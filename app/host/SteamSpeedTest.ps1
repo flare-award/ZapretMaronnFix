@@ -9,8 +9,9 @@ $DataDir = Join-Path $RepoRoot "app\data"
 $StateFile = Join-Path $DataDir "steam-speed-state.json"
 $HistoryFile = Join-Path $DataDir "steam-speed-history.json"
 $StopFile = Join-Path $DataDir "steam-speed-stop.flag"
-$BytesPerStream = 4194304
-$Streams = 2
+$TargetBytesPerStrategy = 209715200
+$Streams = 4
+$BytesPerStream = [Math]::Ceiling($TargetBytesPerStrategy / $Streams)
 $Urls = @(
     "https://client-update.akamai.steamstatic.com/client/steam_client_win32",
     "https://media.steampowered.com/client/installer/SteamSetup.exe"
@@ -58,31 +59,41 @@ function Measure-SteamCdn {
     $lastError = "Steam CDN недоступна"
     foreach ($url in $Urls) {
         $tempFiles = @()
-        $processes = @()
         $started = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $totalBytes = 0.0
+        $totalLatency = 0.0
+        $valid = 0
+        $round = 0
         try {
-            for ($i = 0; $i -lt $Streams; $i++) {
-                $outFile = Join-Path $env:TEMP "zapret-steam-$PID-$i.txt"
-                $errFile = Join-Path $env:TEMP "zapret-steam-$PID-$i.err"
-                $tempFiles += @($outFile, $errFile)
-                $target = "$url`?zapret_speed_test=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())-$i"
-                $curlArgs = @("-fsSL", "--connect-timeout", "6", "--max-time", "18", "--retry", "1", "--range", "0-$($BytesPerStream - 1)", "-H", "Accept-Encoding:identity", "-o", "NUL", "-w", "%{http_code}|%{size_download}|%{time_starttransfer}", $target)
-                $processes += Start-Process -FilePath $curl -ArgumentList $curlArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+            while ($totalBytes -lt $TargetBytesPerStrategy) {
+                if (Test-Path $StopFile) { throw "Тест остановлен" }
+                if ($round -ge 100) { throw "Steam CDN возвращает слишком маленькие фрагменты данных" }
+                $remaining = $TargetBytesPerStrategy - $totalBytes
+                $requestBytes = [Math]::Min($BytesPerStream, [Math]::Ceiling($remaining / $Streams))
+                $processes = @()
+                $roundFiles = @()
+                for ($i = 0; $i -lt $Streams; $i++) {
+                    $outFile = Join-Path $env:TEMP "zapret-steam-$PID-$round-$i.txt"
+                    $errFile = Join-Path $env:TEMP "zapret-steam-$PID-$round-$i.err"
+                    $roundFiles += @($outFile, $errFile)
+                    $tempFiles += @($outFile, $errFile)
+                    $curlArgs = @("-fsSL", "--connect-timeout", "6", "--max-time", "240", "--retry", "1", "--range", "0-$($requestBytes - 1)", "-H", "Accept-Encoding:identity", "-o", "NUL", "-w", "%{http_code}|%{size_download}|%{time_starttransfer}", $url)
+                    $processes += Start-Process -FilePath $curl -ArgumentList $curlArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+                }
+                $processes | ForEach-Object { $_.WaitForExit() }
+                for ($i = 0; $i -lt $processes.Count; $i++) {
+                    if ($processes[$i].ExitCode -ne 0) { throw "Ошибка загрузки Steam CDN" }
+                    $metric = (Get-Content $roundFiles[$i * 2] -Raw -ErrorAction Stop).Trim()
+                    $parts = $metric.Split('|')
+                    if ($parts.Count -lt 3 -or [int]$parts[0] -lt 200 -or [int]$parts[0] -ge 400) { throw "Некорректный ответ Steam CDN" }
+                    $totalBytes += [double]::Parse($parts[1], [Globalization.CultureInfo]::InvariantCulture)
+                    $totalLatency += [double]::Parse($parts[2], [Globalization.CultureInfo]::InvariantCulture) * 1000
+                    $valid++
+                }
+                $roundFiles | ForEach-Object { Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue }
+                $round++
             }
-            $processes | ForEach-Object { $_.WaitForExit() }
             $elapsed = [Math]::Max(0.001, ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $started) / 1000.0)
-            $totalBytes = 0.0
-            $totalLatency = 0.0
-            $valid = 0
-            for ($i = 0; $i -lt $processes.Count; $i++) {
-                if ($processes[$i].ExitCode -ne 0) { throw "Ошибка загрузки Steam CDN" }
-                $metric = (Get-Content $tempFiles[$i * 2] -Raw -ErrorAction Stop).Trim()
-                $parts = $metric.Split('|')
-                if ($parts.Count -lt 3 -or [int]$parts[0] -lt 200 -or [int]$parts[0] -ge 400) { throw "Некорректный ответ Steam CDN" }
-                $totalBytes += [double]::Parse($parts[1], [Globalization.CultureInfo]::InvariantCulture)
-                $totalLatency += [double]::Parse($parts[2], [Globalization.CultureInfo]::InvariantCulture) * 1000
-                $valid++
-            }
             $mbps = ($totalBytes / 1MB) / $elapsed
             return [ordered]@{
                 ok = $true
@@ -109,7 +120,7 @@ $state = [ordered]@{
     running = $true; aborted = $false; startedAt = $startedAt; finishedAt = $null
     currentStrategy = if ($strategies.Count) { $strategies[0].Name } else { $null }
     completedCount = 0; totalCount = $strategies.Count; progressPct = 0; results = @(); error = $null
-    sourceLabel = "Официальная CDN Steam"; sampleBytesPerStrategy = $Streams * $BytesPerStream
+    sourceLabel = "Официальная CDN Steam"; sampleBytesPerStrategy = $TargetBytesPerStrategy
 }
 Write-State $state
 

@@ -11,8 +11,10 @@ const STEAM_CDN_URLS = [
   'https://client-update.akamai.steamstatic.com/client/steam_client_win32',
   'https://media.steampowered.com/client/installer/SteamSetup.exe',
 ];
-const STREAMS = 2;
-const BYTES_PER_STREAM = 4 * 1024 * 1024;
+const STREAMS = 4;
+const TARGET_BYTES_PER_STRATEGY = 200 * 1024 * 1024;
+const BYTES_PER_STREAM = Math.ceil(TARGET_BYTES_PER_STRATEGY / STREAMS);
+const MAX_REQUEST_BYTES = 50 * 1024 * 1024;
 const MAX_HISTORY_RUNS = 8;
 
 let activeCurlChildren = new Set();
@@ -32,7 +34,7 @@ function createIdleJob() {
     results: [],
     error: null,
     sourceLabel: 'Официальная CDN Steam',
-    sampleBytesPerStrategy: STREAMS * BYTES_PER_STREAM,
+    sampleBytesPerStrategy: TARGET_BYTES_PER_STRATEGY,
   };
 }
 
@@ -83,17 +85,16 @@ function saveCompletedRun() {
   fs.writeFileSync(HISTORY_PATH, JSON.stringify(history, null, 2), 'utf8');
 }
 
-function runCurlSample(url, rangeEnd, sequence) {
+function runCurlSample(url, rangeEnd) {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
     const separator = '__ZAPRET_STEAM_METRIC__';
-    const target = `${url}?zapret_speed_test=${Date.now()}-${sequence}`;
     const args = [
       '-fsSL',
       '--connect-timeout',
       '6',
       '--max-time',
-      '18',
+      '240',
       '--retry',
       '1',
       '--retry-delay',
@@ -106,7 +107,7 @@ function runCurlSample(url, rangeEnd, sequence) {
       'NUL',
       '-w',
       `${separator}%{http_code}|%{size_download}|%{time_total}|%{time_starttransfer}`,
-      target,
+      url,
     ];
     const child = spawn('curl.exe', args, {
       windowsHide: true,
@@ -151,13 +152,38 @@ function runCurlSample(url, rangeEnd, sequence) {
   });
 }
 
+async function downloadSteamStream(url, targetBytes) {
+  let bytes = 0;
+  let ttfbTotal = 0;
+  let requestCount = 0;
+  while (bytes < targetBytes) {
+    if (steamSpeedJob.aborted) throw new Error('Тест остановлен');
+    const remaining = targetBytes - bytes;
+    const requestBytes = Math.min(MAX_REQUEST_BYTES, remaining);
+    const sample = await runCurlSample(url, requestBytes - 1);
+    bytes += sample.bytes;
+    if (sample.ttfbMs !== null) ttfbTotal += sample.ttfbMs;
+    requestCount += 1;
+    if (requestCount > 100) {
+      throw new Error('Steam CDN возвращает слишком маленькие фрагменты данных');
+    }
+  }
+  return {
+    bytes,
+    ttfbMs: requestCount > 0 ? Math.round(ttfbTotal / requestCount) : null,
+    requestCount,
+  };
+}
+
 async function measureSteamCdn() {
   let lastError = null;
   for (const url of STEAM_CDN_URLS) {
     try {
       const wallStartedAt = Date.now();
       const settled = await Promise.allSettled(
-        Array.from({ length: STREAMS }, (_, index) => runCurlSample(url, BYTES_PER_STREAM - 1, index))
+        Array.from({ length: STREAMS }, () =>
+          downloadSteamStream(url, BYTES_PER_STREAM)
+        )
       );
       const failed = settled.find((item) => item.status === 'rejected');
       if (failed && failed.status === 'rejected') throw failed.reason;
