@@ -196,6 +196,7 @@ export interface ProblemFixState {
   applied: boolean;
   enabledAt: string | null;
   domains: string[];
+  systemError?: string | null;
 }
 
 export interface SteamSpeedResult {

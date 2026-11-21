@@ -101,7 +101,7 @@ export const ProblemsView: React.FC<ProblemsViewProps> = ({
           <h2>Исправления подключений</h2>
           <p>
             Готовые правила для сервисов, которые начали блокироваться или загружаться не полностью.
-            Активная стратегия перезапускается автоматически.
+            Активная стратегия перезапускается автоматически. Steam использует выбранную стратегию, поэтому при неудачной проверке попробуйте другую.
           </p>
         </div>
       </section>
@@ -134,8 +134,8 @@ export const ProblemsView: React.FC<ProblemsViewProps> = ({
                   {isDiscord
                     ? 'discord.com, media.discordapp.net и images-ext-1 через адреса Cloudflare в системном hosts.'
                     : isWorkshop
-                      ? 'Только CDN мастерской, изображений и пользовательского контента. Загрузка игр не меняется.'
-                      : 'Только три Akamai CDN со стилями и изображениями. Основные сайты и загрузка игр не меняются.'}
+                      ? 'Проверяет адреса Akamai через публичный DNS и закрепляет доступные маршруты для Workshop. Загрузка игр не меняется.'
+                      : 'Проверяет адреса трёх Akamai CDN и исключает заблокированные IP. Основные сайты и загрузка игр не меняются.'}
                 </span>
               </div>
 
@@ -144,6 +144,13 @@ export const ProblemsView: React.FC<ProblemsViewProps> = ({
                   <code key={domain}>{domain}</code>
                 ))}
               </div>
+
+              {fix.systemError && (
+                <div className="problem-check-result error">
+                  <XCircle size={15} />
+                  {fix.systemError}
+                </div>
+              )}
 
               {check && (
                 <div className={`problem-check-result ${check.passed === check.total ? 'ok' : 'error'}`}>
@@ -162,6 +169,17 @@ export const ProblemsView: React.FC<ProblemsViewProps> = ({
                   {busyId === fix.id ? <RefreshCw size={15} className="spin-icon" /> : <ShieldCheck size={15} />}
                   {fix.enabled ? 'Откатить исправление' : 'Применить исправление'}
                 </button>
+                {!isDiscord && fix.enabled && (
+                  <button
+                    type="button"
+                    className="btn btn-surface"
+                    disabled={busyId !== null || checkingId !== null}
+                    onClick={() => setFix(fix, true)}
+                  >
+                    <RefreshCw size={15} className={busyId === fix.id ? 'spin-icon' : ''} />
+                    Обновить адреса
+                  </button>
+                )}
                 <button
                   type="button"
                   className="btn btn-surface"

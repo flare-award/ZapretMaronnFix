@@ -182,6 +182,8 @@ $ProblemFixesFile = Join-Path $DataDir "problem-fixes.json"
 $SystemHostsFile = Join-Path $env:SystemRoot "System32\drivers\etc\hosts"
 $script:SteamSpeedProcess = $null
 $script:SteamRestoreStrategy = $null
+$script:SteamHostsChecked = $false
+$script:SteamHostsError = $null
 $ServerBootId = [guid]::NewGuid().ToString()
 
 function Get-SteamSpeedState {
@@ -203,10 +205,11 @@ function Get-SteamSpeedHistory {
 }
 
 function Get-ProblemFixConfig {
-    $default = [ordered]@{ discordMedia = $false; steamWeb = $false; steamWorkshop = $false }
+    $default = [ordered]@{ discordMedia = $false; steamWeb = $false; steamWorkshop = $false; steamHostsError = $null }
     if (Test-Path $ProblemFixesFile) {
         try {
             $loaded = Get-Content $ProblemFixesFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $loaded.steamHostsError) { $default.steamHostsError = [string]$loaded.steamHostsError }
             if ($null -ne $loaded.fixes) {
                 $discordFix = $loaded.fixes.PSObject.Properties['discord-media']
                 $steamFix = $loaded.fixes.PSObject.Properties['steam-web']
@@ -271,7 +274,87 @@ function Test-DiscordHostsFixPs {
     } catch { return $false }
 }
 
-function Apply-ProblemFixLists($settings) {
+function Get-SteamHostsDomainsPs($config) {
+    $domains = @()
+    if ($config.steamWeb) {
+        $domains += @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com")
+    }
+    if ($config.steamWorkshop) {
+        $domains += @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com")
+    }
+    return @($domains | Select-Object -Unique)
+}
+
+function Get-SteamDohIpsPs([string]$domain) {
+    $curl = (Get-Command "curl.exe" -ErrorAction Stop).Source
+    $encoded = [Uri]::EscapeDataString($domain)
+    $urls = @(
+        "https://cloudflare-dns.com/dns-query?name=$encoded&type=A",
+        "https://dns.google/resolve?name=$encoded&type=A"
+    )
+    $ips = @()
+    foreach ($url in $urls) {
+        try {
+            $json = (& $curl -fsSL --connect-timeout 2 --max-time 5 -H "Accept: application/dns-json" $url 2>$null | Out-String) | ConvertFrom-Json
+            foreach ($answer in @($json.Answer)) {
+                $candidate = [string]$answer.data
+                $parsed = $null
+                if ([int]$answer.type -eq 1 -and [Net.IPAddress]::TryParse($candidate, [ref]$parsed) -and $parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) {
+                    $ips += $candidate
+                }
+            }
+        } catch {}
+    }
+    return @($ips | Select-Object -Unique | Select-Object -First 8)
+}
+
+function Find-WorkingSteamEdgePs([string]$domain) {
+    $curl = (Get-Command "curl.exe" -ErrorAction Stop).Source
+    foreach ($ip in @(Get-SteamDohIpsPs $domain)) {
+        & $curl -sS -I --connect-timeout 2 --max-time 4 --resolve "$domain`:443`:$ip" -o NUL "https://$domain/" 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { return $ip }
+    }
+    return $null
+}
+
+function Refresh-SteamHostsFixPs($config) {
+    $begin = "# Zapret Control: Steam Akamai route"
+    $end = "# Zapret Control: end Steam Akamai route"
+    $domains = @(Get-SteamHostsDomainsPs $config)
+    try {
+        $content = if (Test-Path $SystemHostsFile) { [IO.File]::ReadAllText($SystemHostsFile) } else { "" }
+        $pattern = "(?ms)(?:^|\r?\n)" + [regex]::Escape($begin) + "\r?\n.*?\r?\n" + [regex]::Escape($end) + "(?=\r?\n|$)"
+        $clean = ([regex]::Replace($content, $pattern, "")).TrimEnd()
+        $routes = @()
+        $missing = @()
+        foreach ($domain in $domains) {
+            $ip = Find-WorkingSteamEdgePs $domain
+            if ($ip) { $routes += "$ip $domain" } else { $missing += $domain }
+        }
+        $parts = @()
+        if ($clean) { $parts += $clean }
+        if ($routes.Count -gt 0) { $parts += ((@($begin) + $routes + @($end)) -join "`r`n") }
+        [IO.File]::WriteAllText($SystemHostsFile, (($parts -join "`r`n") + "`r`n"), (New-Object Text.UTF8Encoding($false)))
+        & ipconfig.exe /flushdns 2>&1 | Out-Null
+        return $missing
+    } catch {
+        throw "Не удалось обновить маршруты Steam в системном hosts. Запустите Zapret Control от имени администратора."
+    }
+}
+
+function Test-SteamHostsFixPs([string[]]$domains) {
+    if ($domains.Count -eq 0) { return $true }
+    try {
+        $content = [IO.File]::ReadAllText($SystemHostsFile)
+        if (-not $content.Contains("# Zapret Control: Steam Akamai route") -or -not $content.Contains("# Zapret Control: end Steam Akamai route")) { return $false }
+        foreach ($domain in $domains) {
+            if ($content -notmatch "(?m)^\s*\d{1,3}(?:\.\d{1,3}){3}\s+$([regex]::Escape($domain))\s*$") { return $false }
+        }
+        return $true
+    } catch { return $false }
+}
+
+function Apply-ProblemFixLists($settings, [bool]$refreshRoutes = $true) {
     $config = Get-ProblemFixConfig
     $lists = Join-Path $settings.zapretDir "lists"
     $userGeneral = Join-Path $lists "list-general-user.txt"
@@ -292,6 +375,15 @@ function Apply-ProblemFixLists($settings) {
     }
     if ($config.steamWorkshop) {
         Set-DomainFileEntries $userGeneral $workshopDomains @()
+        Set-DomainFileEntries $baseExclude @() @("steamusercontent.com")
+        Set-DomainFileEntries $userExclude @() @("steamusercontent.com")
+    }
+    if ($refreshRoutes) {
+        try {
+            $missing = @(Refresh-SteamHostsFixPs $config)
+            $script:SteamHostsError = if ($missing.Count -gt 0) { "Не найдены доступные Akamai-адреса: " + ($missing -join ", ") } else { $null }
+        } catch { $script:SteamHostsError = $_.Exception.Message }
+        $script:SteamHostsChecked = $true
     }
 }
 
@@ -340,7 +432,7 @@ function Set-ProblemFixPs([string]$id, [bool]$enabled, $settings) {
     } else {
         @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com")
     }
-    $excludeDomains = if ($id -eq "discord-media") { @("discord.com", "discordapp.net", "discordapp.com") } else { @() }
+    $excludeDomains = if ($id -eq "discord-media") { @("discord.com", "discordapp.net", "discordapp.com") } elseif ($id -eq "steam-workshop") { @("steamusercontent.com") } else { @() }
     $lists = Join-Path $settings.zapretDir "lists"
     if ($id -eq "discord-media") { Set-DiscordHostsFixPs $enabled }
 
@@ -350,8 +442,8 @@ function Set-ProblemFixPs([string]$id, [bool]$enabled, $settings) {
         if (Test-Path $userGeneral) {
             Get-Content $userGeneral -Encoding UTF8 | ForEach-Object { $present[($_.Trim().TrimStart('^')).ToLower()] = $true }
         }
-        $addedDomains = @($domains | Where-Object { -not $present.ContainsKey($_.ToLower()) })
-        $removed = @()
+        $addedDomains = @((@($targetRecord.addedDomains) + @($domains | Where-Object { -not $present.ContainsKey($_.ToLower()) })) | Select-Object -Unique)
+        $removed = @($targetRecord.removedExclusions)
         foreach ($fileName in @("list-exclude.txt", "list-exclude-user.txt")) {
             $filePath = Join-Path $lists $fileName
             $lines = if (Test-Path $filePath) { @(Get-Content $filePath -Encoding UTF8) } else { @() }
@@ -362,7 +454,8 @@ function Set-ProblemFixPs([string]$id, [bool]$enabled, $settings) {
                 }
             }
         }
-        $targetRecord = [pscustomobject]@{ enabled = $true; enabledAt = [DateTime]::UtcNow.ToString("o"); addedDomains = $addedDomains; removedExclusions = $removed; version = 2 }
+        $recordVersion = if ($id -eq "steam-workshop") { 3 } else { 2 }
+        $targetRecord = [pscustomobject]@{ enabled = $true; enabledAt = [DateTime]::UtcNow.ToString("o"); addedDomains = $addedDomains; removedExclusions = $removed; version = $recordVersion }
     } else {
         Set-DomainFileEntries (Join-Path $lists "list-general-user.txt") @() @($targetRecord.addedDomains)
         Restore-ProblemExclusions $lists @($targetRecord.removedExclusions)
@@ -372,9 +465,19 @@ function Set-ProblemFixPs([string]$id, [bool]$enabled, $settings) {
     if ($id -eq "discord-media") { $discordRecord = $targetRecord; $config.discordMedia = $enabled }
     elseif ($id -eq "steam-web") { $steamRecord = $targetRecord; $config.steamWeb = $enabled }
     else { $workshopRecord = $targetRecord; $config.steamWorkshop = $enabled }
-    $savedConfig = [ordered]@{ fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $steamRecord; "steam-workshop" = $workshopRecord } }
+    $savedConfig = [ordered]@{ steamHostsError = $config.steamHostsError; fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $steamRecord; "steam-workshop" = $workshopRecord } }
     ($savedConfig | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ProblemFixesFile -Encoding UTF8
-    Apply-ProblemFixLists $settings
+    Apply-ProblemFixLists $settings $false
+    if ($id -eq "steam-web" -or $id -eq "steam-workshop") {
+        try {
+            $missing = @(Refresh-SteamHostsFixPs $config)
+            $config.steamHostsError = if ($missing.Count -gt 0) { "Не найдены доступные Akamai-адреса: " + ($missing -join ", ") } else { $null }
+        } catch { $config.steamHostsError = $_.Exception.Message }
+        $script:SteamHostsError = $config.steamHostsError
+        $script:SteamHostsChecked = $true
+        $savedConfig.steamHostsError = $config.steamHostsError
+        ($savedConfig | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ProblemFixesFile -Encoding UTF8
+    }
 }
 
 function Migrate-ProblemFixesPs($settings) {
@@ -395,7 +498,36 @@ function Migrate-ProblemFixesPs($settings) {
     }
     $discordRecord = Get-ProblemFixRecord "discord-media"
     $workshopRecord = Get-ProblemFixRecord "steam-workshop"
-    $savedConfig = [ordered]@{ fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $newRecord; "steam-workshop" = $workshopRecord } }
+    $savedConfig = [ordered]@{ steamHostsError = $null; fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $newRecord; "steam-workshop" = $workshopRecord } }
+    ($savedConfig | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ProblemFixesFile -Encoding UTF8
+}
+
+function Migrate-WorkshopFixPs($settings) {
+    $workshopRecord = Get-ProblemFixRecord "steam-workshop"
+    if (-not [bool]$workshopRecord.enabled -or [int]$workshopRecord.version -ge 3) { return }
+    $lists = Join-Path $settings.zapretDir "lists"
+    $removed = @($workshopRecord.removedExclusions)
+    foreach ($fileName in @("list-exclude.txt", "list-exclude-user.txt")) {
+        $filePath = Join-Path $lists $fileName
+        $lines = if (Test-Path $filePath) { @(Get-Content $filePath -Encoding UTF8) } else { @() }
+        for ($index = 0; $index -lt $lines.Count; $index++) {
+            if (($lines[$index].Trim().TrimStart('^')).ToLower() -ne "steamusercontent.com") { continue }
+            if (@($removed | Where-Object { $_.fileName -eq $fileName -and $_.line -eq $lines[$index].Trim() }).Count -eq 0) {
+                $removed += [ordered]@{ fileName = $fileName; line = $lines[$index].Trim(); index = $index }
+            }
+        }
+    }
+    $newWorkshopRecord = [pscustomobject]@{
+        enabled = $true
+        enabledAt = $workshopRecord.enabledAt
+        addedDomains = @($workshopRecord.addedDomains)
+        removedExclusions = $removed
+        version = 3
+    }
+    $discordRecord = Get-ProblemFixRecord "discord-media"
+    $steamRecord = Get-ProblemFixRecord "steam-web"
+    $config = Get-ProblemFixConfig
+    $savedConfig = [ordered]@{ steamHostsError = $config.steamHostsError; fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $steamRecord; "steam-workshop" = $newWorkshopRecord } }
     ($savedConfig | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ProblemFixesFile -Encoding UTF8
 }
 
@@ -403,8 +535,8 @@ function Get-ProblemFixesPs {
     $config = Get-ProblemFixConfig
     return @(
         [ordered]@{ id = "discord-media"; title = "Изображения Discord"; description = "Восстанавливает загрузку превью и вложений с media.discordapp.net."; enabled = [bool]$config.discordMedia; applied = ([bool]$config.discordMedia -and (Test-DiscordHostsFixPs)); enabledAt = $null; domains = @("discordapp.net", "media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net") },
-        [ordered]@{ id = "steam-web"; title = "Сайты Steam"; description = "Восстанавливает стили и изображения с трёх проблемных CDN Steam."; enabled = [bool]$config.steamWeb; applied = [bool]$config.steamWeb; enabledAt = $null; domains = @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com") },
-        [ordered]@{ id = "steam-workshop"; title = "Мастерская Steam"; description = "Восстанавливает страницы, превью и файлы контента Workshop с Akamai CDN."; enabled = [bool]$config.steamWorkshop; applied = [bool]$config.steamWorkshop; enabledAt = $null; domains = @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com") }
+        [ordered]@{ id = "steam-web"; title = "Сайты Steam"; description = "Восстанавливает стили и изображения с трёх проблемных CDN Steam."; enabled = [bool]$config.steamWeb; applied = ([bool]$config.steamWeb -and (Test-SteamHostsFixPs @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com"))); enabledAt = $null; domains = @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com"); systemError = $(if ($script:SteamHostsChecked) { $script:SteamHostsError } else { $config.steamHostsError }) },
+        [ordered]@{ id = "steam-workshop"; title = "Мастерская Steam"; description = "Восстанавливает страницы, превью и файлы контента Workshop с Akamai CDN."; enabled = [bool]$config.steamWorkshop; applied = ([bool]$config.steamWorkshop -and (Test-SteamHostsFixPs @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com"))); enabledAt = $null; domains = @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com"); systemError = $(if ($script:SteamHostsChecked) { $script:SteamHostsError } else { $config.steamHostsError }) }
     )
 }
 
@@ -417,16 +549,7 @@ function Get-ProblemLaunchPrefix([string]$zapretDir) {
         $parts += "--filter-udp=443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-repeats=11 --dpi-desync-fake-quic=`"$($bin)quic_initial_4pda_to.bin`" --new"
         $parts += "--filter-tcp=80,443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-fake-tls-mod=none --dpi-desync-repeats=6 --dpi-desync-fooling=badseq,hopbyhop2 --new"
     }
-    if ($config.steamWeb) {
-        $domains = "cdn.akamai.steamstatic.com,store.akamai.steamstatic.com,community.akamai.steamstatic.com"
-        $parts += "--filter-udp=443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-repeats=11 --dpi-desync-fake-quic=`"$($bin)quic_initial_steamstatic_com.bin`" --new"
-        $parts += "--filter-tcp=80,443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-fake-tls=`"$($bin)tls_clienthello_steamstatic_com.bin`" --dpi-desync-repeats=6 --dpi-desync-fooling=badseq,hopbyhop2 --new"
-    }
-    if ($config.steamWorkshop) {
-        $domains = "steamusercontent-a.akamaihd.net,steamuserimages-a.akamaihd.net,images.steamusercontent.com,shared.akamai.steamstatic.com"
-        $parts += "--filter-udp=443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-repeats=11 --dpi-desync-fake-quic=`"$($bin)quic_initial_steamstatic_com.bin`" --new"
-        $parts += "--filter-tcp=80,443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-fake-tls=`"$($bin)tls_clienthello_steamstatic_com.bin`" --dpi-desync-repeats=6 --dpi-desync-fooling=badseq,hopbyhop2 --new"
-    }
+    # Steam uses the currently selected strategy through list-general-user.txt.
     return ($parts -join " ")
 }
 
@@ -580,6 +703,7 @@ function Check-ZapretReleasePs([string]$zDir) {
 
 $initSettings = Get-AppSettings
 Migrate-ProblemFixesPs $initSettings
+Migrate-WorkshopFixPs $initSettings
 Apply-ProblemFixLists $initSettings
 if (Test-Path $ResumeFlagFile) {
     try {

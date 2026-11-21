@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import dns from 'node:dns';
 import net from 'node:net';
-import { spawn, execFile } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import https from 'node:https';
 import tls from 'node:tls';
@@ -53,12 +53,14 @@ const PROBLEM_FIX_DEFINITIONS = {
       'images.steamusercontent.com',
       'shared.akamai.steamstatic.com',
     ],
-    removeFromExclusions: [],
+    removeFromExclusions: ['steamusercontent.com'],
   },
 };
 
 const DISCORD_HOSTS_BEGIN = '# Zapret Control: Discord media fix';
 const DISCORD_HOSTS_END = '# Zapret Control: end Discord media fix';
+const STEAM_HOSTS_BEGIN = '# Zapret Control: Steam Akamai route';
+const STEAM_HOSTS_END = '# Zapret Control: end Steam Akamai route';
 const DISCORD_MEDIA_IPS = [
   '162.159.138.232',
   '162.159.137.232',
@@ -237,13 +239,17 @@ function getSystemHostsPath() {
   return path.join(windowsRoot, 'System32', 'drivers', 'etc', 'hosts');
 }
 
-function stripManagedDiscordHostsBlock(content) {
+function stripManagedHostsBlock(content, begin, end) {
   const normalized = String(content || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  const escapedBegin = DISCORD_HOSTS_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const escapedEnd = DISCORD_HOSTS_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapedBegin = begin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapedEnd = end.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return normalized
     .replace(new RegExp(`(?:^|\\n)${escapedBegin}\\n[\\s\\S]*?\\n${escapedEnd}(?=\\n|$)`, 'g'), '')
     .replace(/^\n+|\n+$/g, '');
+}
+
+function stripManagedDiscordHostsBlock(content) {
+  return stripManagedHostsBlock(content, DISCORD_HOSTS_BEGIN, DISCORD_HOSTS_END);
 }
 
 function hasDiscordHostsFix() {
@@ -288,6 +294,105 @@ function setDiscordHostsFix(enabled) {
     throw new Error('Не удалось изменить системный hosts. Запустите Zapret Control от имени администратора.');
   }
   execFile('ipconfig.exe', ['/flushdns'], { windowsHide: true }, () => {});
+}
+
+function steamHostsDomainsForConfig(config) {
+  const domains = [];
+  for (const id of ['steam-web', 'steam-workshop']) {
+    if (!config?.fixes?.[id]?.enabled) continue;
+    domains.push(...PROBLEM_FIX_DEFINITIONS[id].bypassDomains);
+  }
+  return Array.from(new Set(domains));
+}
+
+function queryDohIpv4(domain, url) {
+  try {
+    const output = execFileSync(
+      'curl.exe',
+      ['-fsSL', '--connect-timeout', '2', '--max-time', '5', '-H', 'Accept: application/dns-json', url],
+      { windowsHide: true, encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 }
+    );
+    const parsed = JSON.parse(output);
+    return Array.isArray(parsed.Answer)
+      ? parsed.Answer
+          .filter((answer) => answer?.type === 1 && net.isIPv4(String(answer.data || '').trim()))
+          .map((answer) => String(answer.data).trim())
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function findWorkingSteamEdge(domain) {
+  const encoded = encodeURIComponent(domain);
+  const candidates = [
+    ...queryDohIpv4(domain, `https://cloudflare-dns.com/dns-query?name=${encoded}&type=A`),
+    ...queryDohIpv4(domain, `https://dns.google/resolve?name=${encoded}&type=A`),
+  ];
+  for (const ip of Array.from(new Set(candidates)).slice(0, 8)) {
+    try {
+      execFileSync(
+        'curl.exe',
+        [
+          '-sS', '-I', '--connect-timeout', '2', '--max-time', '4',
+          '--resolve', `${domain}:443:${ip}`, '-o', 'NUL', `https://${domain}/`,
+        ],
+        { windowsHide: true, stdio: 'ignore' }
+      );
+      return ip;
+    } catch {
+      // Try the next DNS answer: this edge may be blocked by address.
+    }
+  }
+  return null;
+}
+
+function hasSteamHostsFix(domains) {
+  if (os.platform() !== 'win32') return true;
+  if (!domains.length) return true;
+  try {
+    const content = fs.readFileSync(getSystemHostsPath(), 'utf8');
+    const routes = content
+      .split(/\r?\n/)
+      .map((line) => line.trim().split(/\s+/))
+      .filter(([ip, domain]) => net.isIPv4(ip) && domain);
+    return (
+      content.includes(STEAM_HOSTS_BEGIN) &&
+      content.includes(STEAM_HOSTS_END) &&
+      domains.every((domain) => routes.some(([, routeDomain]) => routeDomain === domain))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function refreshSteamHostsFix(config) {
+  if (os.platform() !== 'win32') return [];
+  const hostsPath = getSystemHostsPath();
+  const domains = steamHostsDomainsForConfig(config);
+  let content;
+  try {
+    content = fs.readFileSync(hostsPath, 'utf8').replace(/^\uFEFF/, '');
+  } catch (err) {
+    throw new Error(`Не удалось прочитать системный hosts: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const clean = stripManagedHostsBlock(content, STEAM_HOSTS_BEGIN, STEAM_HOSTS_END);
+  const routes = [];
+  const missing = [];
+  for (const domain of domains) {
+    const ip = findWorkingSteamEdge(domain);
+    if (ip) routes.push(`${ip} ${domain}`);
+    else missing.push(domain);
+  }
+  const managedLines = routes.length ? [STEAM_HOSTS_BEGIN, ...routes, STEAM_HOSTS_END] : [];
+  const next = [...(clean ? [clean] : []), ...managedLines].join('\n') + '\n';
+  try {
+    fs.writeFileSync(hostsPath, next.replace(/\n/g, '\r\n'), 'utf8');
+  } catch {
+    throw new Error('Не удалось изменить системный hosts. Запустите Zapret Control от имени администратора.');
+  }
+  execFileSync('ipconfig.exe', ['/flushdns'], { windowsHide: true, stdio: 'ignore' });
+  return missing;
 }
 
 function ensureBypassDomains(zapretDir, fixState, domains) {
@@ -388,6 +493,16 @@ export function applyEnabledProblemFixes(zapretDir) {
     }
     changed = true;
   }
+  if (changed && os.platform() === 'win32') {
+    try {
+      const missing = refreshSteamHostsFix(config);
+      config.steamHostsError = missing.length
+        ? `Не найдены доступные Akamai-адреса: ${missing.join(', ')}`
+        : null;
+    } catch (err) {
+      config.steamHostsError = err instanceof Error ? err.message : String(err);
+    }
+  }
   if (changed) saveProblemFixConfig(config);
   return readProblemFixesState(zapretDir);
 }
@@ -419,6 +534,16 @@ export function setProblemFixEnabled(zapretDir, id, enabled) {
     current.removedExclusions = [];
   }
   config.fixes[id] = current;
+  if (id === 'steam-web' || id === 'steam-workshop') {
+    try {
+      const missing = refreshSteamHostsFix(config);
+      config.steamHostsError = missing.length
+        ? `Не найдены доступные Akamai-адреса: ${missing.join(', ')}`
+        : null;
+    } catch (err) {
+      config.steamHostsError = err instanceof Error ? err.message : String(err);
+    }
+  }
   saveProblemFixConfig(config);
   return readProblemFixesState(zapretDir);
 }
@@ -441,7 +566,11 @@ export function readProblemFixesState(zapretDir) {
     const enabled = Boolean(fixState.enabled);
     const domainsReady = definition.bypassDomains.every((domain) => bypassLines.has(domain));
     const exclusionsCleared = definition.removeFromExclusions.every((domain) => !excludeLines.has(domain));
-    const systemReady = id !== 'discord-media' || hasDiscordHostsFix();
+    const systemReady = id === 'discord-media'
+      ? hasDiscordHostsFix()
+      : (id === 'steam-web' || id === 'steam-workshop')
+        ? hasSteamHostsFix(definition.bypassDomains)
+        : true;
     return {
       id,
       title: definition.title,
@@ -450,6 +579,7 @@ export function readProblemFixesState(zapretDir) {
       applied: enabled && domainsReady && exclusionsCleared && systemReady,
       enabledAt: fixState.enabledAt || null,
       domains: definition.bypassDomains,
+      systemError: (id === 'steam-web' || id === 'steam-workshop') ? config.steamHostsError || null : fixState.systemError || null,
     };
   });
 }
@@ -497,25 +627,9 @@ export function getProblemFixLaunchArgs(zapretDir) {
       true
     );
   }
-  if (enabled.has('steam-web')) {
-    addWebRule(
-      ['cdn.akamai.steamstatic.com', 'store.akamai.steamstatic.com', 'community.akamai.steamstatic.com'],
-      'tls_clienthello_steamstatic_com.bin',
-      'quic_initial_steamstatic_com.bin'
-    );
-  }
-  if (enabled.has('steam-workshop')) {
-    addWebRule(
-      [
-        'steamusercontent-a.akamaihd.net',
-        'steamuserimages-a.akamaihd.net',
-        'images.steamusercontent.com',
-        'shared.akamai.steamstatic.com',
-      ],
-      'tls_clienthello_steamstatic_com.bin',
-      'quic_initial_steamstatic_com.bin'
-    );
-  }
+  // Steam domains stay in the selected strategy's host list, so changing the
+  // strategy genuinely changes their desynchronization method. Only the
+  // address-level Akamai route is managed separately in the system hosts file.
   return rules;
 }
 
