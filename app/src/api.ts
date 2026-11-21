@@ -9,6 +9,7 @@ import type {
   HostsCheckReport,
   IpsetFilterMode,
   ListDocument,
+  ProblemFixState,
   QuickProbeResult,
   SiteDiagnosisReport,
   SmartListAddResult,
@@ -95,6 +96,15 @@ export const api = {
     request<FullAppState>(`/api/profiles/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     }),
+
+  setProblemFix: (id: ProblemFixState['id'], enabled: boolean) =>
+    request<{ problemFixes: ProblemFixState[]; state: FullAppState }>(
+      `/api/problems/${encodeURIComponent(id)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      }
+    ),
 
   setGameFilter: (payload: { mode?: GameFilterMode; tcpRange?: string; udpRange?: string }) =>
     request<FullAppState>('/api/filters/game', {

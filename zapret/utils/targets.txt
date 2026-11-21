@@ -11,6 +11,7 @@
 DiscordMain           = "https://discord.com"
 DiscordGateway        = "https://gateway.discord.gg"
 DiscordCDN            = "https://cdn.discordapp.com"
+DiscordMedia          = "https://media.discordapp.net"
 DiscordUpdates        = "https://updates.discord.com"
 
 ### YouTube
@@ -30,6 +31,11 @@ CloudflareCDN         = "https://cdnjs.cloudflare.com"
 ### GitHub
 GitHubMain            = "https://github.com"
 GitHubAPI             = "https://api.github.com"
+
+### Steam
+SteamStore            = "https://store.steampowered.com"
+SteamCommunity        = "https://steamcommunity.com"
+SteamStaticCDN        = "https://cdn.akamai.steamstatic.com"
 
 ### Public DNS (PING-only)
 CloudflareDNS1111     = "PING:1.1.1.1"

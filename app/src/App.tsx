@@ -4,6 +4,7 @@ import {
   Bookmark,
   Gauge,
   Download,
+  CircleAlert,
   SlidersHorizontal,
   ListFilter,
   Wrench,
@@ -28,19 +29,21 @@ import { ConnectView } from './views/ConnectView';
 import { ProfilesView } from './views/ProfilesView';
 import { TestsView } from './views/TestsView';
 import { SpeedView } from './views/SpeedView';
+import { ProblemsView } from './views/ProblemsView';
 import { FiltersView } from './views/FiltersView';
 import { ListsView } from './views/ListsView';
 import { ToolsView } from './views/ToolsView';
 import { UpdatesSettingsView } from './views/UpdatesSettingsView';
 import { formatDuration } from './utils/metrics';
 
-type NavTab = 'connect' | 'profiles' | 'tests' | 'speed' | 'filters' | 'lists' | 'tools' | 'settings';
+type NavTab = 'connect' | 'profiles' | 'tests' | 'speed' | 'problems' | 'filters' | 'lists' | 'tools' | 'settings';
 
 const TAB_LABELS: Record<NavTab, string> = {
   connect: 'Подключение',
   profiles: 'Профили',
   tests: 'Тесты',
   speed: 'Скорость',
+  problems: 'Проблемы',
   filters: 'Фильтры',
   lists: 'Списки',
   tools: 'Инструменты',
@@ -486,6 +489,14 @@ export const App: React.FC = () => {
       badge: state.steamSpeedJob.running ? `${state.steamSpeedJob.progressPct}%` : undefined,
     },
     {
+      id: 'problems',
+      label: TAB_LABELS.problems,
+      icon: <CircleAlert size={17} strokeWidth={1.9} />,
+      badge: state.problemFixes.filter((fix) => fix.enabled).length > 0
+        ? String(state.problemFixes.filter((fix) => fix.enabled).length)
+        : undefined,
+    },
+    {
       id: 'filters',
       label: TAB_LABELS.filters,
       icon: <SlidersHorizontal size={17} strokeWidth={1.9} />,
@@ -671,6 +682,14 @@ export const App: React.FC = () => {
               state={state}
               onStateUpdated={setState}
               onApplyStrategy={handleSelectStrategy}
+              onNotify={notify}
+            />
+          )}
+
+          {tab === 'problems' && (
+            <ProblemsView
+              state={state}
+              onStateUpdated={setState}
               onNotify={notify}
             />
           )}

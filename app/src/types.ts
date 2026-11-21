@@ -188,6 +188,16 @@ export interface TestJobState {
   error: string | null;
 }
 
+export interface ProblemFixState {
+  id: 'discord-media' | 'steam-web';
+  title: string;
+  description: string;
+  enabled: boolean;
+  applied: boolean;
+  enabledAt: string | null;
+  domains: string[];
+}
+
 export interface SteamSpeedResult {
   fileName: string;
   ok: boolean;
@@ -265,6 +275,7 @@ export interface FullAppState {
   testHistory: TestHistoryEntry[];
   latestTestRun: TestRunReport | null;
   testJob: TestJobState;
+  problemFixes: ProblemFixState[];
   steamSpeedJob: SteamSpeedJobState;
   steamSpeedHistory: SteamSpeedRun[];
   appUpdateState?: LocalAppUpdateState;

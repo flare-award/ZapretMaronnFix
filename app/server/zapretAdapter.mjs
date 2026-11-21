@@ -19,6 +19,39 @@ export const DATA_DIR = path.join(APP_DIR, 'data');
 export const BACKUPS_DIR = path.join(DATA_DIR, 'user-lists-backup');
 const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json');
 const PROFILES_PATH = path.join(DATA_DIR, 'profiles.json');
+const PROBLEM_FIXES_PATH = path.join(DATA_DIR, 'problem-fixes.json');
+
+const PROBLEM_FIX_DEFINITIONS = {
+  'discord-media': {
+    title: 'Изображения Discord',
+    description: 'Восстанавливает загрузку превью и вложений с media.discordapp.net.',
+    bypassDomains: [
+      'discordapp.net',
+      'media.discordapp.net',
+      'cdn.discordapp.com',
+      'images-ext-1.discordapp.net',
+      'images-ext-2.discordapp.net',
+    ],
+    removeFromExclusions: ['discordapp.net', 'discordapp.com'],
+  },
+  'steam-web': {
+    title: 'Сайты Steam',
+    description: 'Исправляет медленную загрузку магазина, сообщества и ресурсов Steam.',
+    bypassDomains: [
+      'steampowered.com',
+      'steamcommunity.com',
+      'steamstatic.com',
+      'cdn.akamai.steamstatic.com',
+      'store.akamai.steamstatic.com',
+      'community.akamai.steamstatic.com',
+    ],
+    removeFromExclusions: [
+      'steampowered.com',
+      'steamcommunity.com',
+      'steamstatic.com',
+    ],
+  },
+};
 
 const DEFAULT_SETTINGS = {
   zapretDir: path.join(REPO_ROOT, 'zapret'),
@@ -154,6 +187,222 @@ function writeCrlfFile(filePath, content) {
   const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const trimmedEnd = normalized.endsWith('\n') ? normalized : normalized + '\n';
   fs.writeFileSync(filePath, trimmedEnd.replace(/\n/g, '\r\n'), 'utf8');
+}
+
+function loadProblemFixConfig() {
+  ensureDirs();
+  try {
+    if (fs.existsSync(PROBLEM_FIXES_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(PROBLEM_FIXES_PATH, 'utf8'));
+      if (parsed && typeof parsed === 'object' && parsed.fixes && typeof parsed.fixes === 'object') {
+        return parsed;
+      }
+    }
+  } catch {
+    // Restore a valid state below.
+  }
+  return { fixes: {} };
+}
+
+function saveProblemFixConfig(config) {
+  ensureDirs();
+  fs.writeFileSync(PROBLEM_FIXES_PATH, JSON.stringify(config, null, 2), 'utf8');
+}
+
+function readMeaningfulLines(filePath) {
+  if (!fs.existsSync(filePath)) return [];
+  return fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/);
+}
+
+function normalizedDomainLine(line) {
+  return String(line || '').trim().replace(/^\^/, '').toLowerCase();
+}
+
+function ensureBypassDomains(zapretDir, fixState, domains) {
+  const userListPath = path.join(zapretDir, 'lists', 'list-general-user.txt');
+  const lines = readMeaningfulLines(userListPath);
+  while (lines.length > 0 && !lines[lines.length - 1].trim()) lines.pop();
+  const present = new Set(lines.map(normalizedDomainLine).filter(Boolean));
+  const added = new Set(Array.isArray(fixState.addedDomains) ? fixState.addedDomains : []);
+  for (const domain of domains) {
+    if (!present.has(domain)) {
+      lines.push(domain);
+      present.add(domain);
+      added.add(domain);
+    }
+  }
+  writeCrlfFile(userListPath, lines.filter((line, index, all) => index < all.length - 1 || line.trim()).join('\n'));
+  fixState.addedDomains = Array.from(added);
+}
+
+function removeProblemExclusions(zapretDir, fixState, domains) {
+  const wanted = new Set(domains.map((domain) => domain.toLowerCase()));
+  const removedEntries = Array.isArray(fixState.removedExclusions) ? fixState.removedExclusions : [];
+  for (const fileName of ['list-exclude.txt', 'list-exclude-user.txt']) {
+    const filePath = path.join(zapretDir, 'lists', fileName);
+    const lines = readMeaningfulLines(filePath);
+    const kept = [];
+    let changed = false;
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      const line = lines[lineIndex];
+      if (wanted.has(normalizedDomainLine(line))) {
+        if (!removedEntries.some((entry) => entry.fileName === fileName && entry.line === line.trim())) {
+          removedEntries.push({ fileName, line: line.trim(), index: lineIndex });
+        }
+        changed = true;
+      } else {
+        kept.push(line);
+      }
+    }
+    while (kept.length > 0 && !kept[kept.length - 1].trim()) kept.pop();
+    if (changed) writeCrlfFile(filePath, kept.join('\n'));
+  }
+  fixState.removedExclusions = removedEntries;
+}
+
+function undoProblemListChanges(zapretDir, fixState) {
+  const added = new Set((fixState.addedDomains || []).map((domain) => domain.toLowerCase()));
+  if (added.size > 0) {
+    const userListPath = path.join(zapretDir, 'lists', 'list-general-user.txt');
+    const lines = readMeaningfulLines(userListPath).filter((line) => !added.has(normalizedDomainLine(line)));
+    while (lines.length > 0 && !lines[lines.length - 1].trim()) lines.pop();
+    writeCrlfFile(userListPath, lines.join('\n'));
+  }
+  const grouped = new Map();
+  for (const entry of fixState.removedExclusions || []) {
+    if (!entry || !entry.fileName || !entry.line) continue;
+    if (!grouped.has(entry.fileName)) grouped.set(entry.fileName, []);
+    grouped.get(entry.fileName).push(entry);
+  }
+  for (const [fileName, restoreEntries] of grouped) {
+    const filePath = path.join(zapretDir, 'lists', path.basename(fileName));
+    const lines = readMeaningfulLines(filePath);
+    while (lines.length > 0 && !lines[lines.length - 1].trim()) lines.pop();
+    const present = new Set(lines.map(normalizedDomainLine).filter(Boolean));
+    restoreEntries.sort((a, b) => (a.index ?? lines.length) - (b.index ?? lines.length));
+    for (const entry of restoreEntries) {
+      if (present.has(normalizedDomainLine(entry.line))) continue;
+      const insertAt = Number.isInteger(entry.index)
+        ? Math.max(0, Math.min(entry.index, lines.length))
+        : lines.length;
+      lines.splice(insertAt, 0, entry.line);
+      present.add(normalizedDomainLine(entry.line));
+    }
+    writeCrlfFile(filePath, lines.join('\n'));
+  }
+}
+
+export function applyEnabledProblemFixes(zapretDir) {
+  const config = loadProblemFixConfig();
+  let changed = false;
+  for (const [id, definition] of Object.entries(PROBLEM_FIX_DEFINITIONS)) {
+    const fixState = config.fixes[id];
+    if (!fixState || !fixState.enabled) continue;
+    ensureBypassDomains(zapretDir, fixState, definition.bypassDomains);
+    removeProblemExclusions(zapretDir, fixState, definition.removeFromExclusions);
+    changed = true;
+  }
+  if (changed) saveProblemFixConfig(config);
+  return readProblemFixesState(zapretDir);
+}
+
+export function setProblemFixEnabled(zapretDir, id, enabled) {
+  const definition = PROBLEM_FIX_DEFINITIONS[id];
+  if (!definition) throw new Error('Неизвестное исправление');
+  const config = loadProblemFixConfig();
+  const current = config.fixes[id] || {
+    enabled: false,
+    enabledAt: null,
+    addedDomains: [],
+    removedExclusions: [],
+  };
+  if (enabled) {
+    current.enabled = true;
+    current.enabledAt = new Date().toISOString();
+    ensureBypassDomains(zapretDir, current, definition.bypassDomains);
+    removeProblemExclusions(zapretDir, current, definition.removeFromExclusions);
+  } else {
+    undoProblemListChanges(zapretDir, current);
+    current.enabled = false;
+    current.enabledAt = null;
+    current.addedDomains = [];
+    current.removedExclusions = [];
+  }
+  config.fixes[id] = current;
+  saveProblemFixConfig(config);
+  return readProblemFixesState(zapretDir);
+}
+
+export function readProblemFixesState(zapretDir) {
+  const config = loadProblemFixConfig();
+  const bypassLines = new Set(
+    readMeaningfulLines(path.join(zapretDir, 'lists', 'list-general-user.txt'))
+      .map(normalizedDomainLine)
+      .filter(Boolean)
+  );
+  const excludeLines = new Set(
+    [
+      ...readMeaningfulLines(path.join(zapretDir, 'lists', 'list-exclude.txt')),
+      ...readMeaningfulLines(path.join(zapretDir, 'lists', 'list-exclude-user.txt')),
+    ].map(normalizedDomainLine).filter(Boolean)
+  );
+  return Object.entries(PROBLEM_FIX_DEFINITIONS).map(([id, definition]) => {
+    const fixState = config.fixes[id] || {};
+    const enabled = Boolean(fixState.enabled);
+    const domainsReady = definition.bypassDomains.every((domain) => bypassLines.has(domain));
+    const exclusionsCleared = definition.removeFromExclusions.every((domain) => !excludeLines.has(domain));
+    return {
+      id,
+      title: definition.title,
+      description: definition.description,
+      enabled,
+      applied: enabled && domainsReady && exclusionsCleared,
+      enabledAt: fixState.enabledAt || null,
+      domains: definition.bypassDomains,
+    };
+  });
+}
+
+export function getProblemFixLaunchArgs(zapretDir) {
+  const enabled = new Set(
+    readProblemFixesState(zapretDir).filter((fix) => fix.enabled).map((fix) => fix.id)
+  );
+  const rules = [];
+  const addWebRule = (domains, tlsPattern, quicPattern) => {
+    const domainArg = domains.join(',');
+    rules.push(
+      '--filter-udp=443',
+      `--hostlist-domains=${domainArg}`,
+      '--dpi-desync=fake',
+      '--dpi-desync-repeats=11',
+      `--dpi-desync-fake-quic=${path.join(zapretDir, 'bin', quicPattern)}`,
+      '--new',
+      '--filter-tcp=80,443',
+      `--hostlist-domains=${domainArg}`,
+      '--dpi-desync=fake,multisplit',
+      '--dpi-desync-repeats=6',
+      '--dpi-desync-split-seqovl=568',
+      '--dpi-desync-split-pos=1,midsld',
+      `--dpi-desync-fake-tls=${path.join(zapretDir, 'bin', tlsPattern)}`,
+      `--dpi-desync-split-seqovl-pattern=${path.join(zapretDir, 'bin', tlsPattern)}`,
+      '--new'
+    );
+  };
+  if (enabled.has('discord-media')) {
+    addWebRule(
+      ['media.discordapp.net', 'cdn.discordapp.com', 'images-ext-1.discordapp.net', 'images-ext-2.discordapp.net'],
+      'tls_clienthello_4pda_to.bin',
+      'quic_initial_4pda_to.bin'
+    );
+  }
+  if (enabled.has('steam-web')) {
+    addWebRule(
+      ['steamcommunity.com', 'store.steampowered.com', 'cdn.akamai.steamstatic.com', 'store.akamai.steamstatic.com', 'community.akamai.steamstatic.com'],
+      'tls_clienthello_steamstatic_com.bin',
+      'quic_initial_steamstatic_com.bin'
+    );
+  }
+  return rules;
 }
 
 function naturalCompare(a, b) {
@@ -441,12 +690,19 @@ export function parseBatWinwsArgs(zapretDir, batFileName) {
     if (tok === '^') continue;
     args.push(tok.replace(/"/g, ''));
   }
+  const problemArgs = getProblemFixLaunchArgs(zapretDir);
+  if (problemArgs.length > 0) {
+    const firstFilterIndex = args.findIndex((arg) => arg.startsWith('--filter-'));
+    args.splice(firstFilterIndex >= 0 ? firstFilterIndex : args.length, 0, ...problemArgs);
+  }
 
   return {
     winwsPath: path.join(zapretDir, 'bin', 'winws.exe'),
     cwd: path.join(zapretDir, 'bin'),
     args,
-    expandedPreview: `"${path.join(zapretDir, 'bin', 'winws.exe')}" ` + rawTokens.join(' '),
+    expandedPreview:
+      `"${path.join(zapretDir, 'bin', 'winws.exe')}" ` +
+      args.map((arg) => arg.includes(' ') ? `"${arg}"` : arg).join(' '),
     appliedGameFilter: gf.mode,
   };
 }

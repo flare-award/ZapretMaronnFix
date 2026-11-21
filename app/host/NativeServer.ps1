@@ -152,6 +152,11 @@ function Start-WinwsDirect($strategyName) {
     $argLine = $argLine.Replace("%GameFilterTCP%", $effTcp).Replace("!GameFilterTCP!", $effTcp)
     $argLine = $argLine.Replace("%GameFilterUDP%", $effUdp).Replace("!GameFilterUDP!", $effUdp)
     $argLine = $argLine.Replace("%GameFilter%", $effUdp).Replace("!GameFilter!", $effUdp)
+    $problemPrefix = Get-ProblemLaunchPrefix $zDir
+    if ($problemPrefix) {
+        $firstFilter = New-Object System.Text.RegularExpressions.Regex('(?=--filter-)')
+        $argLine = $firstFilter.Replace($argLine, "$problemPrefix ", 1)
+    }
 
     Stop-WinwsDirect
     & netsh interface tcp set global timestamps=enabled | Out-Null
@@ -173,6 +178,7 @@ $UpdateStateFile = Join-Path $DataDir "app-update-state.json"
 $SteamSpeedStateFile = Join-Path $DataDir "steam-speed-state.json"
 $SteamSpeedHistoryFile = Join-Path $DataDir "steam-speed-history.json"
 $SteamSpeedStopFile = Join-Path $DataDir "steam-speed-stop.flag"
+$ProblemFixesFile = Join-Path $DataDir "problem-fixes.json"
 $script:SteamSpeedProcess = $null
 $script:SteamRestoreStrategy = $null
 $ServerBootId = [guid]::NewGuid().ToString()
@@ -193,6 +199,113 @@ function Get-SteamSpeedHistory {
         try { return @(Get-Content $SteamSpeedHistoryFile -Raw -Encoding UTF8 | ConvertFrom-Json) } catch {}
     }
     return @()
+}
+
+function Get-ProblemFixConfig {
+    $default = [ordered]@{ discordMedia = $false; steamWeb = $false }
+    if (Test-Path $ProblemFixesFile) {
+        try {
+            $loaded = Get-Content $ProblemFixesFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $loaded.fixes) {
+                $discordFix = $loaded.fixes.PSObject.Properties['discord-media']
+                $steamFix = $loaded.fixes.PSObject.Properties['steam-web']
+                if ($null -ne $discordFix) { $default.discordMedia = [bool]$discordFix.Value.enabled }
+                if ($null -ne $steamFix) { $default.steamWeb = [bool]$steamFix.Value.enabled }
+            } else {
+                if ($null -ne $loaded.discordMedia) { $default.discordMedia = [bool]$loaded.discordMedia }
+                if ($null -ne $loaded.steamWeb) { $default.steamWeb = [bool]$loaded.steamWeb }
+            }
+        } catch {}
+    }
+    return $default
+}
+
+function Set-DomainFileEntries([string]$filePath, [string[]]$add, [string[]]$remove) {
+    $lines = if (Test-Path $filePath) { @(Get-Content $filePath -Encoding UTF8) } else { @() }
+    $removeSet = @{}
+    foreach ($domain in $remove) { $removeSet[$domain.ToLower()] = $true }
+    $kept = @($lines | Where-Object { -not $removeSet.ContainsKey(($_.Trim().TrimStart('^')).ToLower()) })
+    $present = @{}
+    foreach ($line in $kept) { $present[($line.Trim().TrimStart('^')).ToLower()] = $true }
+    foreach ($domain in $add) {
+        if (-not $present.ContainsKey($domain.ToLower())) { $kept += $domain }
+    }
+    $text = (($kept -join "`r`n").TrimEnd() + "`r`n")
+    [System.IO.File]::WriteAllText($filePath, $text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Apply-ProblemFixLists($settings) {
+    $config = Get-ProblemFixConfig
+    $lists = Join-Path $settings.zapretDir "lists"
+    $userGeneral = Join-Path $lists "list-general-user.txt"
+    $baseExclude = Join-Path $lists "list-exclude.txt"
+    $userExclude = Join-Path $lists "list-exclude-user.txt"
+    $discordDomains = @("discordapp.net", "media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net")
+    $steamDomains = @("steampowered.com", "steamcommunity.com", "steamstatic.com", "cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com")
+    if ($config.discordMedia) {
+        Set-DomainFileEntries $userGeneral $discordDomains @()
+        Set-DomainFileEntries $userExclude @() @("discordapp.net", "discordapp.com")
+    }
+    if ($config.steamWeb) {
+        Set-DomainFileEntries $userGeneral $steamDomains @()
+        Set-DomainFileEntries $baseExclude @() @("steampowered.com", "steamcommunity.com", "steamstatic.com")
+        Set-DomainFileEntries $userExclude @() @("steampowered.com", "steamcommunity.com", "steamstatic.com")
+    }
+}
+
+function Set-ProblemFixPs([string]$id, [bool]$enabled, $settings) {
+    $config = Get-ProblemFixConfig
+    if ($id -eq "discord-media") { $config.discordMedia = $enabled }
+    elseif ($id -eq "steam-web") { $config.steamWeb = $enabled }
+    else { throw "Неизвестное исправление" }
+    $discordAdded = if ($config.discordMedia) { @("discordapp.net", "media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net") } else { @() }
+    $steamAdded = if ($config.steamWeb) { @("steampowered.com", "steamcommunity.com", "steamstatic.com", "cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com") } else { @() }
+    $steamRemoved = if ($config.steamWeb) { @(
+        [ordered]@{ fileName = "list-exclude.txt"; line = "steampowered.com" },
+        [ordered]@{ fileName = "list-exclude.txt"; line = "steamcommunity.com" }
+    ) } else { @() }
+    $savedConfig = [ordered]@{
+        fixes = [ordered]@{
+            "discord-media" = [ordered]@{ enabled = [bool]$config.discordMedia; enabledAt = $null; addedDomains = $discordAdded; removedExclusions = @() }
+            "steam-web" = [ordered]@{ enabled = [bool]$config.steamWeb; enabledAt = $null; addedDomains = $steamAdded; removedExclusions = $steamRemoved }
+        }
+    }
+    ($savedConfig | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ProblemFixesFile -Encoding UTF8
+    if (-not $enabled) {
+        $lists = Join-Path $settings.zapretDir "lists"
+        if ($id -eq "discord-media") {
+            Set-DomainFileEntries (Join-Path $lists "list-general-user.txt") @() @("media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net")
+        } else {
+            Set-DomainFileEntries (Join-Path $lists "list-general-user.txt") @() @("steampowered.com", "steamcommunity.com", "steamstatic.com", "cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com")
+            Set-DomainFileEntries (Join-Path $lists "list-exclude.txt") @("steampowered.com", "steamcommunity.com") @()
+        }
+    }
+    Apply-ProblemFixLists $settings
+}
+
+function Get-ProblemFixesPs {
+    $config = Get-ProblemFixConfig
+    return @(
+        [ordered]@{ id = "discord-media"; title = "Изображения Discord"; description = "Восстанавливает загрузку превью и вложений с media.discordapp.net."; enabled = [bool]$config.discordMedia; applied = [bool]$config.discordMedia; enabledAt = $null; domains = @("discordapp.net", "media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net") },
+        [ordered]@{ id = "steam-web"; title = "Сайты Steam"; description = "Исправляет медленную загрузку магазина, сообщества и ресурсов Steam."; enabled = [bool]$config.steamWeb; applied = [bool]$config.steamWeb; enabledAt = $null; domains = @("steampowered.com", "steamcommunity.com", "steamstatic.com", "cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com") }
+    )
+}
+
+function Get-ProblemLaunchPrefix([string]$zapretDir) {
+    $config = Get-ProblemFixConfig
+    $bin = (Join-Path $zapretDir "bin") + "\"
+    $parts = @()
+    if ($config.discordMedia) {
+        $domains = "media.discordapp.net,cdn.discordapp.com,images-ext-1.discordapp.net,images-ext-2.discordapp.net"
+        $parts += "--filter-udp=443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-repeats=11 --dpi-desync-fake-quic=`"$($bin)quic_initial_4pda_to.bin`" --new"
+        $parts += "--filter-tcp=80,443 --hostlist-domains=$domains --dpi-desync=fake,multisplit --dpi-desync-repeats=6 --dpi-desync-split-seqovl=568 --dpi-desync-split-pos=1,midsld --dpi-desync-fake-tls=`"$($bin)tls_clienthello_4pda_to.bin`" --dpi-desync-split-seqovl-pattern=`"$($bin)tls_clienthello_4pda_to.bin`" --new"
+    }
+    if ($config.steamWeb) {
+        $domains = "steamcommunity.com,store.steampowered.com,cdn.akamai.steamstatic.com,store.akamai.steamstatic.com,community.akamai.steamstatic.com"
+        $parts += "--filter-udp=443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-repeats=11 --dpi-desync-fake-quic=`"$($bin)quic_initial_steamstatic_com.bin`" --new"
+        $parts += "--filter-tcp=80,443 --hostlist-domains=$domains --dpi-desync=fake,multisplit --dpi-desync-repeats=6 --dpi-desync-split-seqovl=568 --dpi-desync-split-pos=1,midsld --dpi-desync-fake-tls=`"$($bin)tls_clienthello_steamstatic_com.bin`" --dpi-desync-split-seqovl-pattern=`"$($bin)tls_clienthello_steamstatic_com.bin`" --new"
+    }
+    return ($parts -join " ")
 }
 
 function Get-GitBlobSha1([byte[]]$bytes) {
@@ -344,6 +457,7 @@ function Check-ZapretReleasePs([string]$zDir) {
 }
 
 $initSettings = Get-AppSettings
+Apply-ProblemFixLists $initSettings
 if (Test-Path $ResumeFlagFile) {
     try {
         $resumeObj = Get-Content $ResumeFlagFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -431,6 +545,15 @@ while ($listener.IsListening) {
                 $res.OutputStream.Write($okBytes, 0, $okBytes.Length)
                 $res.Close()
                 continue
+            }
+
+            if ($urlPath -match '^/api/problems/(discord-media|steam-web)$' -and $req.HttpMethod -eq "POST") {
+                $stCur = Get-AppSettings
+                $enabled = if ($null -ne $bodyObj.enabled) { [bool]$bodyObj.enabled } else { $true }
+                Set-ProblemFixPs $Matches[1] $enabled $stCur
+                if ($script:ActiveWinws -and -not $script:ActiveWinws.HasExited) {
+                    Start-WinwsDirect $script:ActiveStrategy
+                }
             }
 
             if ($urlPath -eq "/api/steam-speed/start" -and $req.HttpMethod -eq "POST") {
@@ -850,6 +973,7 @@ Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction Silen
                 listsMeta = @()
                 testHistory = @()
                 latestTestRun = $null
+                problemFixes = @(Get-ProblemFixesPs)
                 steamSpeedJob = $steamState
                 steamSpeedHistory = @(Get-SteamSpeedHistory)
                 appUpdateState = if (Test-Path $UpdateStateFile) { try { Get-Content $UpdateStateFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $null } } else { $null }

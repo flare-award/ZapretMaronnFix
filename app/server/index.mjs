@@ -43,6 +43,9 @@ import {
   updateProfile,
   deleteProfile,
   computeZapretDirectoryFingerprint,
+  applyEnabledProblemFixes,
+  readProblemFixesState,
+  setProblemFixEnabled,
 } from './zapretAdapter.mjs';
 import {
   setRuntimeChangeListener,
@@ -193,6 +196,7 @@ function buildFullState() {
     testHistory,
     latestTestRun: effectiveLatestRun,
     testJob,
+    problemFixes: readProblemFixesState(zapretDir),
     steamSpeedJob: getSteamSpeedJobState(),
     steamSpeedHistory: readSteamSpeedHistory(),
     appUpdateState: readLocalAppUpdateState(),
@@ -423,6 +427,27 @@ async function handleApi(req, res, pathname, urlObj) {
       sendJson(res, 200, buildFullState());
       return;
     }
+  }
+
+  const problemFixMatch = pathname.match(/^\/api\/problems\/(discord-media|steam-web)$/);
+  if (method === 'POST' && problemFixMatch) {
+    if (getSteamSpeedJobState().running || getTestJobState().running) {
+      throw new Error('Сначала остановите активное тестирование');
+    }
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    const problemFixes = setProblemFixEnabled(
+      settings.zapretDir,
+      problemFixMatch[1],
+      body.enabled !== false
+    );
+    if (getRuntimeState().running) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { problemFixes, state: buildFullState() });
+    return;
   }
 
   if (method === 'POST' && pathname === '/api/filters/game') {
@@ -890,6 +915,7 @@ server.listen(PORT, HOST, async () => {
 
     const info = readZapretInfo(settings.zapretDir);
     if (info.valid) {
+      applyEnabledProblemFixes(settings.zapretDir);
       backupUserLists(settings.zapretDir);
       const { activeProfileId } = readProfiles(settings.zapretDir);
       activateProfile(settings.zapretDir, activeProfileId);

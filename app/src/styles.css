@@ -677,6 +677,163 @@ pre,
   color: var(--m3-text);
 }
 
+/* Known service problems */
+.problems-container {
+  max-width: 1120px;
+}
+
+.problems-intro {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+}
+
+.problems-intro-icon,
+.problem-service-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--m3-primary);
+  background: var(--m3-primary-container);
+}
+
+.problems-intro h2,
+.problem-card h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.problems-intro p {
+  margin: 4px 0 0;
+  max-width: 760px;
+  color: var(--m3-text-secondary);
+}
+
+.problem-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.problem-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  transition: border-color 180ms var(--ease-m3), background-color 180ms var(--ease-m3);
+}
+
+.problem-card.enabled {
+  border-color: rgba(127, 209, 155, 0.22);
+  background: linear-gradient(150deg, rgba(23, 53, 37, 0.28), var(--m3-surface) 42%);
+}
+
+.problem-card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.problem-card-title {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.problem-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--m3-text-muted);
+  font-size: 11.5px;
+}
+
+.problem-state.active {
+  color: var(--m3-success);
+}
+
+.problem-description {
+  margin: 0;
+  color: var(--m3-text-secondary);
+  min-height: 39px;
+}
+
+.problem-detail-box {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 11px 13px;
+  border: 1px solid var(--m3-outline);
+  border-radius: var(--radius-md);
+  background: var(--m3-surface-low);
+}
+
+.problem-detail-box strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.problem-detail-box span {
+  color: var(--m3-text-muted);
+  font-size: 11.5px;
+}
+
+.problem-domains {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.problem-domains code {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--m3-surface-high);
+  color: var(--m3-text-secondary);
+  font-size: 10.5px;
+}
+
+.problem-check-result {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.problem-check-result.ok {
+  color: var(--m3-on-success-container);
+  background: var(--m3-success-container);
+}
+
+.problem-check-result.error {
+  color: var(--m3-on-danger-container);
+  background: var(--m3-danger-container);
+}
+
+.problem-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: auto;
+}
+
+@media (max-width: 880px) {
+  .problem-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Steam speed benchmark */
 .speed-container {
   max-width: 1180px;
