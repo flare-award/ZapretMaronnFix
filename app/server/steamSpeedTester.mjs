@@ -7,14 +7,16 @@ import { getRuntimeState, startStrategyProcess, stopStrategyProcess } from './ru
 
 const isWin = os.platform() === 'win32';
 const HISTORY_PATH = path.join(DATA_DIR, 'steam-speed-history.json');
-const STEAM_CDN_URLS = [
-  'https://client-update.akamai.steamstatic.com/client/steam_client_win32',
-  'https://media.steampowered.com/client/installer/SteamSetup.exe',
+const STEAM_CDN_ORIGIN = 'https://client-update.akamai.steamstatic.com';
+const STEAM_MANIFEST_URLS = [
+  `${STEAM_CDN_ORIGIN}/steam_client_win64`,
+  `${STEAM_CDN_ORIGIN}/steam_client_win32`,
 ];
 const STREAMS = 4;
 const TARGET_BYTES_PER_STRATEGY = 200 * 1024 * 1024;
 const BYTES_PER_STREAM = Math.ceil(TARGET_BYTES_PER_STRATEGY / STREAMS);
-const MAX_REQUEST_BYTES = 50 * 1024 * 1024;
+const MAX_REQUEST_BYTES = 16 * 1024 * 1024;
+const MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 const MAX_HISTORY_RUNS = 8;
 
 let activeCurlChildren = new Set();
@@ -85,30 +87,8 @@ function saveCompletedRun() {
   fs.writeFileSync(HISTORY_PATH, JSON.stringify(history, null, 2), 'utf8');
 }
 
-function runCurlSample(url, rangeEnd) {
+function spawnCurl(args, { collectBody = false } = {}) {
   return new Promise((resolve, reject) => {
-    const startedAt = Date.now();
-    const separator = '__ZAPRET_STEAM_METRIC__';
-    const args = [
-      '-fsSL',
-      '--connect-timeout',
-      '6',
-      '--max-time',
-      '240',
-      '--retry',
-      '1',
-      '--retry-delay',
-      '0',
-      '--range',
-      `0-${rangeEnd}`,
-      '-H',
-      'Accept-Encoding: identity',
-      '-o',
-      'NUL',
-      '-w',
-      `${separator}%{http_code}|%{size_download}|%{time_total}|%{time_starttransfer}`,
-      url,
-    ];
     const child = spawn('curl.exe', args, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -116,57 +96,147 @@ function runCurlSample(url, rangeEnd) {
     activeCurlChildren.add(child);
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    const finish = (handler) => {
+      if (settled) return;
+      settled = true;
+      activeCurlChildren.delete(child);
+      handler();
+    };
     child.stdout.on('data', (chunk) => {
       stdout += chunk.toString();
+      if (collectBody && Buffer.byteLength(stdout) > MAX_MANIFEST_BYTES) {
+        child.kill('SIGTERM');
+        finish(() => reject(new Error('Манифест Steam слишком большой')));
+      }
     });
     child.stderr.on('data', (chunk) => {
       stderr += chunk.toString();
     });
-    child.on('error', (err) => {
-      activeCurlChildren.delete(child);
-      reject(err);
-    });
-    child.on('exit', (code) => {
-      activeCurlChildren.delete(child);
+    child.on('error', (err) => finish(() => reject(err)));
+    child.on('exit', (code) => finish(() => {
       if (steamSpeedJob.aborted) {
         reject(new Error('Тест остановлен'));
-        return;
+      } else if (code !== 0) {
+        reject(new Error(stderr.trim() || `curl завершился с кодом ${code}`));
+      } else {
+        resolve({ stdout, stderr });
       }
-      const metricAt = stdout.lastIndexOf(separator);
-      const metric = metricAt >= 0 ? stdout.slice(metricAt + separator.length).trim() : '';
-      const [statusRaw, bytesRaw, secondsRaw, ttfbRaw] = metric.split('|');
-      const status = Number(statusRaw);
-      const bytes = Number(bytesRaw);
-      const seconds = Number(secondsRaw);
-      const ttfbSeconds = Number(ttfbRaw);
-      if (code !== 0 || status < 200 || status >= 400 || !Number.isFinite(bytes) || bytes <= 0) {
-        reject(new Error(stderr.trim() || `Steam CDN вернула HTTP ${status || 0}`));
-        return;
-      }
-      resolve({
-        bytes,
-        seconds: Number.isFinite(seconds) && seconds > 0 ? seconds : (Date.now() - startedAt) / 1000,
-        ttfbMs: Number.isFinite(ttfbSeconds) ? Math.round(ttfbSeconds * 1000) : null,
-      });
-    });
+    }));
   });
 }
 
-async function downloadSteamStream(url, targetBytes) {
+export function parseSteamClientManifest(text) {
+  const tokens = String(text).match(/"[^"\r\n]*"|[{}]/g) || [];
+  let position = 0;
+  function parseObject(nested = false) {
+    const result = {};
+    while (position < tokens.length) {
+      const rawKey = tokens[position++];
+      if (rawKey === '}') {
+        if (!nested) throw new Error('Лишняя закрывающая скобка в манифесте Steam');
+        return result;
+      }
+      if (!rawKey.startsWith('"') || position >= tokens.length) {
+        throw new Error('Некорректный манифест Steam');
+      }
+      const key = rawKey.slice(1, -1);
+      const rawValue = tokens[position++];
+      if (rawValue === '{') result[key] = parseObject(true);
+      else if (rawValue.startsWith('"')) result[key] = rawValue.slice(1, -1);
+      else throw new Error('Некорректное значение в манифесте Steam');
+    }
+    if (nested) throw new Error('Незакрытый раздел в манифесте Steam');
+    return result;
+  }
+  const parsed = parseObject();
+  const packages = [];
+  function visit(value) {
+    if (!value || typeof value !== 'object') return;
+    if (typeof value.file === 'string' && /^[-A-Za-z0-9_.]+$/.test(value.file)) {
+      const size = Number(value.size);
+      if (Number.isSafeInteger(size) && size > 0 && size < 1024 ** 3) {
+        packages.push({ file: value.file, size });
+      }
+    }
+    for (const child of Object.values(value)) visit(child);
+  }
+  visit(parsed);
+  const unique = new Map(packages.map((item) => [item.file, item]));
+  return [...unique.values()].sort((a, b) => b.size - a.size);
+}
+
+async function resolveSteamPackages() {
+  let lastError = null;
+  for (const manifestUrl of STEAM_MANIFEST_URLS) {
+    try {
+      const { stdout } = await spawnCurl([
+        '-fsSL', '--connect-timeout', '8', '--max-time', '25', '--retry', '1',
+        '-H', 'Accept-Encoding: identity', manifestUrl,
+      ], { collectBody: true });
+      const packages = parseSteamClientManifest(stdout);
+      if (!packages.length) throw new Error('В манифесте Steam не найдены пакеты');
+      return packages;
+    } catch (err) {
+      lastError = err;
+      if (steamSpeedJob.aborted) throw err;
+    }
+  }
+  throw lastError || new Error('Не удалось получить манифест Steam');
+}
+
+async function runCurlSample(url, rangeStart, rangeEnd) {
+  const separator = '__ZAPRET_STEAM_METRIC__';
+  const startedAt = Date.now();
+  const { stdout } = await spawnCurl([
+    '-fsSL',
+    '--connect-timeout', '8',
+    '--max-time', '240',
+    '--retry', '2',
+    '--retry-delay', '0',
+    '--range', `${rangeStart}-${rangeEnd}`,
+    '-H', 'Accept-Encoding: identity',
+    '-o', 'NUL',
+    '-w', `${separator}%{http_code}|%{size_download}|%{time_total}|%{time_starttransfer}`,
+    url,
+  ]);
+  const metricAt = stdout.lastIndexOf(separator);
+  const metric = metricAt >= 0 ? stdout.slice(metricAt + separator.length).trim() : '';
+  const [statusRaw, bytesRaw, secondsRaw, ttfbRaw] = metric.split('|');
+  const status = Number(statusRaw);
+  const bytes = Number(bytesRaw);
+  const expectedBytes = rangeEnd - rangeStart + 1;
+  const seconds = Number(secondsRaw);
+  const ttfbSeconds = Number(ttfbRaw);
+  if ((status !== 206 && !(status === 200 && bytes === expectedBytes)) || bytes !== expectedBytes) {
+    throw new Error(`Steam CDN некорректно обработала диапазон: HTTP ${status || 0}, ${bytes || 0} из ${expectedBytes} байт`);
+  }
+  return {
+    bytes,
+    seconds: Number.isFinite(seconds) && seconds > 0 ? seconds : (Date.now() - startedAt) / 1000,
+    ttfbMs: Number.isFinite(ttfbSeconds) ? Math.round(ttfbSeconds * 1000) : null,
+  };
+}
+
+async function downloadSteamStream(packages, targetBytes, streamIndex) {
   let bytes = 0;
   let ttfbTotal = 0;
   let requestCount = 0;
   while (bytes < targetBytes) {
     if (steamSpeedJob.aborted) throw new Error('Тест остановлен');
-    const remaining = targetBytes - bytes;
-    const requestBytes = Math.min(MAX_REQUEST_BYTES, remaining);
-    const sample = await runCurlSample(url, requestBytes - 1);
+    const packageInfo = packages[(streamIndex + requestCount) % packages.length];
+    const requestBytes = Math.min(MAX_REQUEST_BYTES, targetBytes - bytes, packageInfo.size);
+    if (requestBytes <= 0) throw new Error('Пакет Steam имеет некорректный размер');
+    const availableStart = packageInfo.size - requestBytes;
+    const rangeStart = availableStart > 0
+      ? (streamIndex * BYTES_PER_STREAM + bytes) % (availableStart + 1)
+      : 0;
+    const url = `${STEAM_CDN_ORIGIN}/${encodeURIComponent(packageInfo.file)}`;
+    const sample = await runCurlSample(url, rangeStart, rangeStart + requestBytes - 1);
     bytes += sample.bytes;
     if (sample.ttfbMs !== null) ttfbTotal += sample.ttfbMs;
     requestCount += 1;
-    if (requestCount > 100) {
-      throw new Error('Steam CDN возвращает слишком маленькие фрагменты данных');
-    }
+    if (requestCount > 100) throw new Error('Steam CDN возвращает слишком маленькие фрагменты данных');
   }
   return {
     bytes,
@@ -176,48 +246,43 @@ async function downloadSteamStream(url, targetBytes) {
 }
 
 async function measureSteamCdn() {
-  let lastError = null;
-  for (const url of STEAM_CDN_URLS) {
-    try {
-      const wallStartedAt = Date.now();
-      const settled = await Promise.allSettled(
-        Array.from({ length: STREAMS }, () =>
-          downloadSteamStream(url, BYTES_PER_STREAM)
-        )
-      );
-      const failed = settled.find((item) => item.status === 'rejected');
-      if (failed && failed.status === 'rejected') throw failed.reason;
-      const samples = settled.map((item) => item.status === 'fulfilled' ? item.value : null).filter(Boolean);
-      const wallSeconds = Math.max(0.001, (Date.now() - wallStartedAt) / 1000);
-      const bytes = samples.reduce((sum, sample) => sum + sample.bytes, 0);
-      const megabytesPerSecond = bytes / 1024 / 1024 / wallSeconds;
-      return {
-        ok: true,
-        megabytesPerSecond: Math.round(megabytesPerSecond * 100) / 100,
-        megabitsPerSecond: Math.round(megabytesPerSecond * 8 * 10) / 10,
-        latencyMs: Math.round(
-          samples.reduce((sum, sample) => sum + (sample.ttfbMs || 0), 0) / samples.length
-        ),
-        bytesDownloaded: bytes,
-        durationMs: Math.round(wallSeconds * 1000),
-        endpointHost: new URL(url).hostname,
-        error: null,
-      };
-    } catch (err) {
-      lastError = err;
-      if (steamSpeedJob.aborted) throw err;
-    }
+  try {
+    const packages = await resolveSteamPackages();
+    const wallStartedAt = Date.now();
+    const settled = await Promise.allSettled(
+      Array.from({ length: STREAMS }, (_, index) =>
+        downloadSteamStream(packages, BYTES_PER_STREAM, index)
+      )
+    );
+    const failed = settled.find((item) => item.status === 'rejected');
+    if (failed && failed.status === 'rejected') throw failed.reason;
+    const samples = settled.map((item) => item.status === 'fulfilled' ? item.value : null).filter(Boolean);
+    const wallSeconds = Math.max(0.001, (Date.now() - wallStartedAt) / 1000);
+    const bytes = samples.reduce((sum, sample) => sum + sample.bytes, 0);
+    const megabytesPerSecond = bytes / 1024 / 1024 / wallSeconds;
+    return {
+      ok: true,
+      megabytesPerSecond: Math.round(megabytesPerSecond * 100) / 100,
+      megabitsPerSecond: Math.round(megabytesPerSecond * 8 * 10) / 10,
+      latencyMs: Math.round(samples.reduce((sum, sample) => sum + (sample.ttfbMs || 0), 0) / samples.length),
+      bytesDownloaded: bytes,
+      durationMs: Math.round(wallSeconds * 1000),
+      endpointHost: new URL(STEAM_CDN_ORIGIN).hostname,
+      error: null,
+    };
+  } catch (err) {
+    if (steamSpeedJob.aborted) throw err;
+    return {
+      ok: false,
+      megabytesPerSecond: 0,
+      megabitsPerSecond: 0,
+      latencyMs: null,
+      bytesDownloaded: 0,
+      durationMs: 0,
+      endpointHost: new URL(STEAM_CDN_ORIGIN).hostname,
+      error: err instanceof Error ? err.message : 'Steam CDN недоступна',
+    };
   }
-  return {
-    ok: false,
-    megabytesPerSecond: 0,
-    megabitsPerSecond: 0,
-    latencyMs: null,
-    bytesDownloaded: 0,
-    durationMs: 0,
-    endpointHost: null,
-    error: lastError instanceof Error ? lastError.message : 'Steam CDN недоступна',
-  };
 }
 
 export function stopSteamSpeedTest() {

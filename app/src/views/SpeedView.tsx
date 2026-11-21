@@ -223,7 +223,10 @@ export const SpeedView: React.FC<SpeedViewProps> = ({
                     <td><span className="speed-rank mono">{index + 1}</span></td>
                     <td>
                       <div className="speed-strategy-name">{result.fileName.replace(/\.bat$/i, '')}</div>
-                      {result.endpointHost && <small className="mono">{result.endpointHost}</small>}
+                      {result.ok && result.endpointHost && <small className="mono">{result.endpointHost}</small>}
+                      {!result.ok && result.error && (
+                        <small className="speed-result-error" title={result.error}>{result.error}</small>
+                      )}
                     </td>
                     <td>
                       {result.ok ? (
