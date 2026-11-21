@@ -203,18 +203,21 @@ function Get-SteamSpeedHistory {
 }
 
 function Get-ProblemFixConfig {
-    $default = [ordered]@{ discordMedia = $false; steamWeb = $false }
+    $default = [ordered]@{ discordMedia = $false; steamWeb = $false; steamWorkshop = $false }
     if (Test-Path $ProblemFixesFile) {
         try {
             $loaded = Get-Content $ProblemFixesFile -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($null -ne $loaded.fixes) {
                 $discordFix = $loaded.fixes.PSObject.Properties['discord-media']
                 $steamFix = $loaded.fixes.PSObject.Properties['steam-web']
+                $workshopFix = $loaded.fixes.PSObject.Properties['steam-workshop']
                 if ($null -ne $discordFix) { $default.discordMedia = [bool]$discordFix.Value.enabled }
                 if ($null -ne $steamFix) { $default.steamWeb = [bool]$steamFix.Value.enabled }
+                if ($null -ne $workshopFix) { $default.steamWorkshop = [bool]$workshopFix.Value.enabled }
             } else {
                 if ($null -ne $loaded.discordMedia) { $default.discordMedia = [bool]$loaded.discordMedia }
                 if ($null -ne $loaded.steamWeb) { $default.steamWeb = [bool]$loaded.steamWeb }
+                if ($null -ne $loaded.steamWorkshop) { $default.steamWorkshop = [bool]$loaded.steamWorkshop }
             }
         } catch {}
     }
@@ -246,6 +249,7 @@ function Set-DiscordHostsFixPs([bool]$enabled) {
         $managed = @()
         if ($enabled) {
             $managed += $begin
+            foreach ($ip in $ips) { $managed += "$ip discord.com" }
             foreach ($ip in $ips) { $managed += "$ip media.discordapp.net" }
             foreach ($ip in $ips) { $managed += "$ip images-ext-1.discordapp.net" }
             $managed += $end
@@ -263,7 +267,7 @@ function Set-DiscordHostsFixPs([bool]$enabled) {
 function Test-DiscordHostsFixPs {
     try {
         $content = [System.IO.File]::ReadAllText($SystemHostsFile)
-        return $content.Contains("# Zapret Control: Discord media fix") -and $content.Contains("# Zapret Control: end Discord media fix")
+        return $content.Contains("# Zapret Control: Discord media fix") -and $content.Contains("# Zapret Control: end Discord media fix") -and $content.Contains("discord.com") -and $content.Contains("media.discordapp.net") -and $content.Contains("images-ext-1.discordapp.net")
     } catch { return $false }
 }
 
@@ -275,15 +279,19 @@ function Apply-ProblemFixLists($settings) {
     $userExclude = Join-Path $lists "list-exclude-user.txt"
     $discordDomains = @("discordapp.net", "media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net")
     $steamDomains = @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com")
+    $workshopDomains = @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com")
     if ($config.discordMedia) {
         try { Set-DiscordHostsFixPs $true } catch {}
         Set-DomainFileEntries $userGeneral $discordDomains @()
-        Set-DomainFileEntries $userExclude @() @("discordapp.net", "discordapp.com")
+        Set-DomainFileEntries $userExclude @() @("discord.com", "discordapp.net", "discordapp.com")
     }
     if ($config.steamWeb) {
         Set-DomainFileEntries $userGeneral $steamDomains @()
         Set-DomainFileEntries $baseExclude @() @()
         Set-DomainFileEntries $userExclude @() @()
+    }
+    if ($config.steamWorkshop) {
+        Set-DomainFileEntries $userGeneral $workshopDomains @()
     }
 }
 
@@ -319,17 +327,20 @@ function Restore-ProblemExclusions([string]$listsDir, $entries) {
 }
 
 function Set-ProblemFixPs([string]$id, [bool]$enabled, $settings) {
-    if ($id -notin @("discord-media", "steam-web")) { throw "Неизвестное исправление" }
+    if ($id -notin @("discord-media", "steam-web", "steam-workshop")) { throw "Неизвестное исправление" }
     $config = Get-ProblemFixConfig
     $discordRecord = Get-ProblemFixRecord "discord-media"
     $steamRecord = Get-ProblemFixRecord "steam-web"
-    $targetRecord = if ($id -eq "discord-media") { $discordRecord } else { $steamRecord }
+    $workshopRecord = Get-ProblemFixRecord "steam-workshop"
+    $targetRecord = if ($id -eq "discord-media") { $discordRecord } elseif ($id -eq "steam-web") { $steamRecord } else { $workshopRecord }
     $domains = if ($id -eq "discord-media") {
         @("discordapp.net", "media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net")
-    } else {
+    } elseif ($id -eq "steam-web") {
         @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com")
+    } else {
+        @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com")
     }
-    $excludeDomains = if ($id -eq "discord-media") { @("discordapp.net", "discordapp.com") } else { @() }
+    $excludeDomains = if ($id -eq "discord-media") { @("discord.com", "discordapp.net", "discordapp.com") } else { @() }
     $lists = Join-Path $settings.zapretDir "lists"
     if ($id -eq "discord-media") { Set-DiscordHostsFixPs $enabled }
 
@@ -359,8 +370,9 @@ function Set-ProblemFixPs([string]$id, [bool]$enabled, $settings) {
     }
 
     if ($id -eq "discord-media") { $discordRecord = $targetRecord; $config.discordMedia = $enabled }
-    else { $steamRecord = $targetRecord; $config.steamWeb = $enabled }
-    $savedConfig = [ordered]@{ fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $steamRecord } }
+    elseif ($id -eq "steam-web") { $steamRecord = $targetRecord; $config.steamWeb = $enabled }
+    else { $workshopRecord = $targetRecord; $config.steamWorkshop = $enabled }
+    $savedConfig = [ordered]@{ fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $steamRecord; "steam-workshop" = $workshopRecord } }
     ($savedConfig | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ProblemFixesFile -Encoding UTF8
     Apply-ProblemFixLists $settings
 }
@@ -382,7 +394,8 @@ function Migrate-ProblemFixesPs($settings) {
         version = 2
     }
     $discordRecord = Get-ProblemFixRecord "discord-media"
-    $savedConfig = [ordered]@{ fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $newRecord } }
+    $workshopRecord = Get-ProblemFixRecord "steam-workshop"
+    $savedConfig = [ordered]@{ fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $newRecord; "steam-workshop" = $workshopRecord } }
     ($savedConfig | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ProblemFixesFile -Encoding UTF8
 }
 
@@ -390,7 +403,8 @@ function Get-ProblemFixesPs {
     $config = Get-ProblemFixConfig
     return @(
         [ordered]@{ id = "discord-media"; title = "Изображения Discord"; description = "Восстанавливает загрузку превью и вложений с media.discordapp.net."; enabled = [bool]$config.discordMedia; applied = ([bool]$config.discordMedia -and (Test-DiscordHostsFixPs)); enabledAt = $null; domains = @("discordapp.net", "media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net") },
-        [ordered]@{ id = "steam-web"; title = "Сайты Steam"; description = "Восстанавливает стили и изображения с трёх проблемных CDN Steam."; enabled = [bool]$config.steamWeb; applied = [bool]$config.steamWeb; enabledAt = $null; domains = @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com") }
+        [ordered]@{ id = "steam-web"; title = "Сайты Steam"; description = "Восстанавливает стили и изображения с трёх проблемных CDN Steam."; enabled = [bool]$config.steamWeb; applied = [bool]$config.steamWeb; enabledAt = $null; domains = @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com") },
+        [ordered]@{ id = "steam-workshop"; title = "Мастерская Steam"; description = "Восстанавливает страницы, превью и файлы контента Workshop с Akamai CDN."; enabled = [bool]$config.steamWorkshop; applied = [bool]$config.steamWorkshop; enabledAt = $null; domains = @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com") }
     )
 }
 
@@ -399,12 +413,17 @@ function Get-ProblemLaunchPrefix([string]$zapretDir) {
     $bin = (Join-Path $zapretDir "bin") + "\"
     $parts = @()
     if ($config.discordMedia) {
-        $domains = "media.discordapp.net,cdn.discordapp.com,images-ext-1.discordapp.net,images-ext-2.discordapp.net"
+        $domains = "discord.com,media.discordapp.net,cdn.discordapp.com,images-ext-1.discordapp.net,images-ext-2.discordapp.net"
         $parts += "--filter-udp=443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-repeats=11 --dpi-desync-fake-quic=`"$($bin)quic_initial_4pda_to.bin`" --new"
         $parts += "--filter-tcp=80,443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-fake-tls-mod=none --dpi-desync-repeats=6 --dpi-desync-fooling=badseq,hopbyhop2 --new"
     }
     if ($config.steamWeb) {
         $domains = "cdn.akamai.steamstatic.com,store.akamai.steamstatic.com,community.akamai.steamstatic.com"
+        $parts += "--filter-udp=443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-repeats=11 --dpi-desync-fake-quic=`"$($bin)quic_initial_steamstatic_com.bin`" --new"
+        $parts += "--filter-tcp=80,443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-fake-tls=`"$($bin)tls_clienthello_steamstatic_com.bin`" --dpi-desync-repeats=6 --dpi-desync-fooling=badseq,hopbyhop2 --new"
+    }
+    if ($config.steamWorkshop) {
+        $domains = "steamusercontent-a.akamaihd.net,steamuserimages-a.akamaihd.net,images.steamusercontent.com,shared.akamai.steamstatic.com"
         $parts += "--filter-udp=443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-repeats=11 --dpi-desync-fake-quic=`"$($bin)quic_initial_steamstatic_com.bin`" --new"
         $parts += "--filter-tcp=80,443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-fake-tls=`"$($bin)tls_clienthello_steamstatic_com.bin`" --dpi-desync-repeats=6 --dpi-desync-fooling=badseq,hopbyhop2 --new"
     }
@@ -651,7 +670,7 @@ while ($listener.IsListening) {
                 continue
             }
 
-            if ($urlPath -match '^/api/problems/(discord-media|steam-web)$' -and $req.HttpMethod -eq "POST") {
+            if ($urlPath -match '^/api/problems/(discord-media|steam-web|steam-workshop)$' -and $req.HttpMethod -eq "POST") {
                 $stCur = Get-AppSettings
                 $enabled = if ($null -ne $bodyObj.enabled) { [bool]$bodyObj.enabled } else { $true }
                 Set-ProblemFixPs $Matches[1] $enabled $stCur

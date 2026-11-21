@@ -189,7 +189,7 @@ export interface TestJobState {
 }
 
 export interface ProblemFixState {
-  id: 'discord-media' | 'steam-web';
+  id: 'discord-media' | 'steam-web' | 'steam-workshop';
   title: string;
   description: string;
   enabled: boolean;

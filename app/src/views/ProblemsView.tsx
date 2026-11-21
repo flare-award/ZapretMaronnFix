@@ -21,9 +21,15 @@ interface ProblemsViewProps {
 const CHECK_DOMAINS: Record<ProblemFixState['id'], string[]> = {
   'discord-media': ['media.discordapp.net'],
   'steam-web': [
-    'store.steampowered.com',
     'cdn.akamai.steamstatic.com',
+    'store.akamai.steamstatic.com',
     'community.akamai.steamstatic.com',
+  ],
+  'steam-workshop': [
+    'steamusercontent-a.akamaihd.net',
+    'steamuserimages-a.akamaihd.net',
+    'images.steamusercontent.com',
+    'shared.akamai.steamstatic.com',
   ],
 };
 
@@ -103,6 +109,7 @@ export const ProblemsView: React.FC<ProblemsViewProps> = ({
       <div className="problem-cards">
         {fixes.map((fix) => {
           const isDiscord = fix.id === 'discord-media';
+          const isWorkshop = fix.id === 'steam-workshop';
           const check = checkResults[fix.id];
           return (
             <section key={fix.id} className={`m3-card problem-card ${fix.enabled ? 'enabled' : ''}`}>
@@ -125,8 +132,10 @@ export const ProblemsView: React.FC<ProblemsViewProps> = ({
                 <strong>{isDiscord ? 'Что исправляется' : 'Затрагиваемые страницы'}</strong>
                 <span>
                   {isDiscord
-                    ? 'media.discordapp.net и images-ext-1 через рабочие адреса Cloudflare в системном hosts.'
-                    : 'Только три Akamai CDN со стилями и изображениями. Основные сайты и загрузка игр не меняются.'}
+                    ? 'discord.com, media.discordapp.net и images-ext-1 через адреса Cloudflare в системном hosts.'
+                    : isWorkshop
+                      ? 'Только CDN мастерской, изображений и пользовательского контента. Загрузка игр не меняется.'
+                      : 'Только три Akamai CDN со стилями и изображениями. Основные сайты и загрузка игр не меняются.'}
                 </span>
               </div>
 

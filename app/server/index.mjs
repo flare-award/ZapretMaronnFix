@@ -429,7 +429,7 @@ async function handleApi(req, res, pathname, urlObj) {
     }
   }
 
-  const problemFixMatch = pathname.match(/^\/api\/problems\/(discord-media|steam-web)$/);
+  const problemFixMatch = pathname.match(/^\/api\/problems\/(discord-media|steam-web|steam-workshop)$/);
   if (method === 'POST' && problemFixMatch) {
     if (getSteamSpeedJobState().running || getTestJobState().running) {
       throw new Error('Сначала остановите активное тестирование');

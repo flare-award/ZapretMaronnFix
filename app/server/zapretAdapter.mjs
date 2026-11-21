@@ -32,7 +32,7 @@ const PROBLEM_FIX_DEFINITIONS = {
       'images-ext-1.discordapp.net',
       'images-ext-2.discordapp.net',
     ],
-    removeFromExclusions: ['discordapp.net', 'discordapp.com'],
+    removeFromExclusions: ['discord.com', 'discordapp.net', 'discordapp.com'],
   },
   'steam-web': {
     title: 'Сайты Steam',
@@ -41,6 +41,17 @@ const PROBLEM_FIX_DEFINITIONS = {
       'cdn.akamai.steamstatic.com',
       'store.akamai.steamstatic.com',
       'community.akamai.steamstatic.com',
+    ],
+    removeFromExclusions: [],
+  },
+  'steam-workshop': {
+    title: 'Мастерская Steam',
+    description: 'Восстанавливает страницы, превью и файлы контента Workshop с Akamai CDN.',
+    bypassDomains: [
+      'steamusercontent-a.akamaihd.net',
+      'steamuserimages-a.akamaihd.net',
+      'images.steamusercontent.com',
+      'shared.akamai.steamstatic.com',
     ],
     removeFromExclusions: [],
   },
@@ -239,7 +250,13 @@ function hasDiscordHostsFix() {
   if (os.platform() !== 'win32') return true;
   try {
     const content = fs.readFileSync(getSystemHostsPath(), 'utf8');
-    return content.includes(DISCORD_HOSTS_BEGIN) && content.includes(DISCORD_HOSTS_END);
+    return (
+      content.includes(DISCORD_HOSTS_BEGIN) &&
+      content.includes(DISCORD_HOSTS_END) &&
+      content.includes('discord.com') &&
+      content.includes('media.discordapp.net') &&
+      content.includes('images-ext-1.discordapp.net')
+    );
   } catch {
     return false;
   }
@@ -258,6 +275,7 @@ function setDiscordHostsFix(enabled) {
   const managedLines = enabled
     ? [
         DISCORD_HOSTS_BEGIN,
+        ...DISCORD_MEDIA_IPS.map((ip) => `${ip} discord.com`),
         ...DISCORD_MEDIA_IPS.map((ip) => `${ip} media.discordapp.net`),
         ...DISCORD_MEDIA_IPS.map((ip) => `${ip} images-ext-1.discordapp.net`),
         DISCORD_HOSTS_END,
@@ -473,7 +491,7 @@ export function getProblemFixLaunchArgs(zapretDir) {
   };
   if (enabled.has('discord-media')) {
     addWebRule(
-      ['media.discordapp.net', 'cdn.discordapp.com', 'images-ext-1.discordapp.net', 'images-ext-2.discordapp.net'],
+      ['discord.com', 'media.discordapp.net', 'cdn.discordapp.com', 'images-ext-1.discordapp.net', 'images-ext-2.discordapp.net'],
       'tls_clienthello_4pda_to.bin',
       'quic_initial_4pda_to.bin',
       true
@@ -482,6 +500,18 @@ export function getProblemFixLaunchArgs(zapretDir) {
   if (enabled.has('steam-web')) {
     addWebRule(
       ['cdn.akamai.steamstatic.com', 'store.akamai.steamstatic.com', 'community.akamai.steamstatic.com'],
+      'tls_clienthello_steamstatic_com.bin',
+      'quic_initial_steamstatic_com.bin'
+    );
+  }
+  if (enabled.has('steam-workshop')) {
+    addWebRule(
+      [
+        'steamusercontent-a.akamaihd.net',
+        'steamuserimages-a.akamaihd.net',
+        'images.steamusercontent.com',
+        'shared.akamai.steamstatic.com',
+      ],
       'tls_clienthello_steamstatic_com.bin',
       'quic_initial_steamstatic_com.bin'
     );
