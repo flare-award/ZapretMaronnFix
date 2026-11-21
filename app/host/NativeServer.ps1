@@ -287,11 +287,13 @@ function Get-SteamHostsDomainsPs($config) {
 
 function Get-SteamDohIpsPs([string]$domain) {
     $curl = (Get-Command "curl.exe" -ErrorAction Stop).Source
-    $encoded = [Uri]::EscapeDataString($domain)
-    $urls = @(
-        "https://cloudflare-dns.com/dns-query?name=$encoded&type=A",
-        "https://dns.google/resolve?name=$encoded&type=A"
-    )
+    $lookupDomains = if ($domain -eq "images.steamusercontent.com") { @($domain, "steamusercontent-a.akamaihd.net") } else { @($domain) }
+    $urls = @()
+    foreach ($lookupDomain in $lookupDomains) {
+        $encoded = [Uri]::EscapeDataString($lookupDomain)
+        $urls += "https://cloudflare-dns.com/dns-query?name=$encoded&type=A"
+        $urls += "https://dns.google/resolve?name=$encoded&type=A"
+    }
     $ips = @()
     foreach ($url in $urls) {
         try {
@@ -329,7 +331,7 @@ function Refresh-SteamHostsFixPs($config) {
         $missing = @()
         foreach ($domain in $domains) {
             $ip = Find-WorkingSteamEdgePs $domain
-            if ($ip) { $routes += "$ip $domain" } else { $missing += $domain }
+            if ($ip) { $routes += "$ip $domain" } elseif ($domain -ne "images.steamusercontent.com") { $missing += $domain }
         }
         $parts = @()
         if ($clean) { $parts += $clean }
@@ -348,6 +350,7 @@ function Test-SteamHostsFixPs([string[]]$domains) {
         $content = [IO.File]::ReadAllText($SystemHostsFile)
         if (-not $content.Contains("# Zapret Control: Steam Akamai route") -or -not $content.Contains("# Zapret Control: end Steam Akamai route")) { return $false }
         foreach ($domain in $domains) {
+            if ($domain -eq "images.steamusercontent.com") { continue }
             if ($content -notmatch "(?m)^\s*\d{1,3}(?:\.\d{1,3}){3}\s+$([regex]::Escape($domain))\s*$") { return $false }
         }
         return $true

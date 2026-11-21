@@ -61,6 +61,7 @@ const DISCORD_HOSTS_BEGIN = '# Zapret Control: Discord media fix';
 const DISCORD_HOSTS_END = '# Zapret Control: end Discord media fix';
 const STEAM_HOSTS_BEGIN = '# Zapret Control: Steam Akamai route';
 const STEAM_HOSTS_END = '# Zapret Control: end Steam Akamai route';
+const STEAM_OPTIONAL_ROUTE_DOMAINS = new Set(['images.steamusercontent.com']);
 const DISCORD_MEDIA_IPS = [
   '162.159.138.232',
   '162.159.137.232',
@@ -324,11 +325,16 @@ function queryDohIpv4(domain, url) {
 }
 
 function findWorkingSteamEdge(domain) {
-  const encoded = encodeURIComponent(domain);
-  const candidates = [
-    ...queryDohIpv4(domain, `https://cloudflare-dns.com/dns-query?name=${encoded}&type=A`),
-    ...queryDohIpv4(domain, `https://dns.google/resolve?name=${encoded}&type=A`),
-  ];
+  const lookupDomains = domain === 'images.steamusercontent.com'
+    ? [domain, 'steamusercontent-a.akamaihd.net']
+    : [domain];
+  const candidates = lookupDomains.flatMap((lookupDomain) => {
+    const encoded = encodeURIComponent(lookupDomain);
+    return [
+      ...queryDohIpv4(lookupDomain, `https://cloudflare-dns.com/dns-query?name=${encoded}&type=A`),
+      ...queryDohIpv4(lookupDomain, `https://dns.google/resolve?name=${encoded}&type=A`),
+    ];
+  });
   for (const ip of Array.from(new Set(candidates)).slice(0, 8)) {
     try {
       execFileSync(
@@ -359,7 +365,9 @@ function hasSteamHostsFix(domains) {
     return (
       content.includes(STEAM_HOSTS_BEGIN) &&
       content.includes(STEAM_HOSTS_END) &&
-      domains.every((domain) => routes.some(([, routeDomain]) => routeDomain === domain))
+      domains
+        .filter((domain) => !STEAM_OPTIONAL_ROUTE_DOMAINS.has(domain))
+        .every((domain) => routes.some(([, routeDomain]) => routeDomain === domain))
     );
   } catch {
     return false;
@@ -382,7 +390,7 @@ function refreshSteamHostsFix(config) {
   for (const domain of domains) {
     const ip = findWorkingSteamEdge(domain);
     if (ip) routes.push(`${ip} ${domain}`);
-    else missing.push(domain);
+    else if (!STEAM_OPTIONAL_ROUTE_DOMAINS.has(domain)) missing.push(domain);
   }
   const managedLines = routes.length ? [STEAM_HOSTS_BEGIN, ...routes, STEAM_HOSTS_END] : [];
   const next = [...(clean ? [clean] : []), ...managedLines].join('\n') + '\n';
