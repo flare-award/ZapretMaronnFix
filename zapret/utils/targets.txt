@@ -33,9 +33,9 @@ GitHubMain            = "https://github.com"
 GitHubAPI             = "https://api.github.com"
 
 ### Steam
-SteamStore            = "https://store.steampowered.com"
-SteamCommunity        = "https://steamcommunity.com"
 SteamStaticCDN        = "https://cdn.akamai.steamstatic.com"
+SteamStoreCDN         = "https://store.akamai.steamstatic.com"
+SteamCommunityCDN     = "https://community.akamai.steamstatic.com"
 
 ### Public DNS (PING-only)
 CloudflareDNS1111     = "PING:1.1.1.1"

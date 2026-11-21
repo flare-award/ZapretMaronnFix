@@ -66,7 +66,7 @@ export const ProblemsView: React.FC<ProblemsViewProps> = ({
     try {
       for (const domain of domains) {
         const report = await api.checkSite(domain);
-        if (report.tcp.ok && report.tls.ok) passed += 1;
+        if (report.tls.ok) passed += 1;
       }
       setCheckResults((current) => ({
         ...current,
@@ -125,8 +125,8 @@ export const ProblemsView: React.FC<ProblemsViewProps> = ({
                 <strong>{isDiscord ? 'Что исправляется' : 'Затрагиваемые страницы'}</strong>
                 <span>
                   {isDiscord
-                    ? 'Превью изображений, вложения и CDN Discord.'
-                    : 'Магазин, сообщество, стили и изображения Steam. Загрузка игр не меняется.'}
+                    ? 'media.discordapp.net и images-ext-1 через рабочие адреса Cloudflare в системном hosts.'
+                    : 'Только три Akamai CDN со стилями и изображениями. Основные сайты и загрузка игр не меняются.'}
                 </span>
               </div>
 

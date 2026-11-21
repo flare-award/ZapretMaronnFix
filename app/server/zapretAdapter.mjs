@@ -36,22 +36,25 @@ const PROBLEM_FIX_DEFINITIONS = {
   },
   'steam-web': {
     title: 'Сайты Steam',
-    description: 'Исправляет медленную загрузку магазина, сообщества и ресурсов Steam.',
+    description: 'Восстанавливает стили и изображения с трёх проблемных CDN Steam.',
     bypassDomains: [
-      'steampowered.com',
-      'steamcommunity.com',
-      'steamstatic.com',
       'cdn.akamai.steamstatic.com',
       'store.akamai.steamstatic.com',
       'community.akamai.steamstatic.com',
     ],
-    removeFromExclusions: [
-      'steampowered.com',
-      'steamcommunity.com',
-      'steamstatic.com',
-    ],
+    removeFromExclusions: [],
   },
 };
+
+const DISCORD_HOSTS_BEGIN = '# Zapret Control: Discord media fix';
+const DISCORD_HOSTS_END = '# Zapret Control: end Discord media fix';
+const DISCORD_MEDIA_IPS = [
+  '162.159.138.232',
+  '162.159.137.232',
+  '162.159.128.233',
+  '162.159.135.232',
+  '162.159.134.232',
+];
 
 const DEFAULT_SETTINGS = {
   zapretDir: path.join(REPO_ROOT, 'zapret'),
@@ -218,6 +221,57 @@ function normalizedDomainLine(line) {
   return String(line || '').trim().replace(/^\^/, '').toLowerCase();
 }
 
+function getSystemHostsPath() {
+  const windowsRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+  return path.join(windowsRoot, 'System32', 'drivers', 'etc', 'hosts');
+}
+
+function stripManagedDiscordHostsBlock(content) {
+  const normalized = String(content || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const escapedBegin = DISCORD_HOSTS_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapedEnd = DISCORD_HOSTS_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return normalized
+    .replace(new RegExp(`(?:^|\\n)${escapedBegin}\\n[\\s\\S]*?\\n${escapedEnd}(?=\\n|$)`, 'g'), '')
+    .replace(/^\n+|\n+$/g, '');
+}
+
+function hasDiscordHostsFix() {
+  if (os.platform() !== 'win32') return true;
+  try {
+    const content = fs.readFileSync(getSystemHostsPath(), 'utf8');
+    return content.includes(DISCORD_HOSTS_BEGIN) && content.includes(DISCORD_HOSTS_END);
+  } catch {
+    return false;
+  }
+}
+
+function setDiscordHostsFix(enabled) {
+  if (os.platform() !== 'win32') return;
+  const hostsPath = getSystemHostsPath();
+  let content = '';
+  try {
+    content = fs.readFileSync(hostsPath, 'utf8').replace(/^\uFEFF/, '');
+  } catch (err) {
+    throw new Error(`Не удалось прочитать системный hosts: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const clean = stripManagedDiscordHostsBlock(content);
+  const managedLines = enabled
+    ? [
+        DISCORD_HOSTS_BEGIN,
+        ...DISCORD_MEDIA_IPS.map((ip) => `${ip} media.discordapp.net`),
+        ...DISCORD_MEDIA_IPS.map((ip) => `${ip} images-ext-1.discordapp.net`),
+        DISCORD_HOSTS_END,
+      ]
+    : [];
+  const next = [...(clean ? [clean] : []), ...managedLines].join('\n') + '\n';
+  try {
+    fs.writeFileSync(hostsPath, next.replace(/\n/g, '\r\n'), 'utf8');
+  } catch (err) {
+    throw new Error('Не удалось изменить системный hosts. Запустите Zapret Control от имени администратора.');
+  }
+  execFile('ipconfig.exe', ['/flushdns'], { windowsHide: true }, () => {});
+}
+
 function ensureBypassDomains(zapretDir, fixState, domains) {
   const userListPath = path.join(zapretDir, 'lists', 'list-general-user.txt');
   const lines = readMeaningfulLines(userListPath);
@@ -298,8 +352,22 @@ export function applyEnabledProblemFixes(zapretDir) {
   for (const [id, definition] of Object.entries(PROBLEM_FIX_DEFINITIONS)) {
     const fixState = config.fixes[id];
     if (!fixState || !fixState.enabled) continue;
+    if (id === 'steam-web' && fixState.version !== 2) {
+      undoProblemListChanges(zapretDir, fixState);
+      fixState.addedDomains = [];
+      fixState.removedExclusions = [];
+      fixState.version = 2;
+    }
     ensureBypassDomains(zapretDir, fixState, definition.bypassDomains);
     removeProblemExclusions(zapretDir, fixState, definition.removeFromExclusions);
+    if (id === 'discord-media') {
+      try {
+        setDiscordHostsFix(true);
+        fixState.systemError = null;
+      } catch (err) {
+        fixState.systemError = err instanceof Error ? err.message : String(err);
+      }
+    }
     changed = true;
   }
   if (changed) saveProblemFixConfig(config);
@@ -315,13 +383,17 @@ export function setProblemFixEnabled(zapretDir, id, enabled) {
     enabledAt: null,
     addedDomains: [],
     removedExclusions: [],
+    version: 2,
   };
   if (enabled) {
+    if (id === 'discord-media') setDiscordHostsFix(true);
     current.enabled = true;
     current.enabledAt = new Date().toISOString();
+    current.version = 2;
     ensureBypassDomains(zapretDir, current, definition.bypassDomains);
     removeProblemExclusions(zapretDir, current, definition.removeFromExclusions);
   } else {
+    if (id === 'discord-media') setDiscordHostsFix(false);
     undoProblemListChanges(zapretDir, current);
     current.enabled = false;
     current.enabledAt = null;
@@ -351,12 +423,13 @@ export function readProblemFixesState(zapretDir) {
     const enabled = Boolean(fixState.enabled);
     const domainsReady = definition.bypassDomains.every((domain) => bypassLines.has(domain));
     const exclusionsCleared = definition.removeFromExclusions.every((domain) => !excludeLines.has(domain));
+    const systemReady = id !== 'discord-media' || hasDiscordHostsFix();
     return {
       id,
       title: definition.title,
       description: definition.description,
       enabled,
-      applied: enabled && domainsReady && exclusionsCleared,
+      applied: enabled && domainsReady && exclusionsCleared && systemReady,
       enabledAt: fixState.enabledAt || null,
       domains: definition.bypassDomains,
     };
@@ -368,7 +441,7 @@ export function getProblemFixLaunchArgs(zapretDir) {
     readProblemFixesState(zapretDir).filter((fix) => fix.enabled).map((fix) => fix.id)
   );
   const rules = [];
-  const addWebRule = (domains, tlsPattern, quicPattern) => {
+  const addWebRule = (domains, tlsPattern, quicPattern, useDiscordRule = false) => {
     const domainArg = domains.join(',');
     rules.push(
       '--filter-udp=443',
@@ -378,26 +451,37 @@ export function getProblemFixLaunchArgs(zapretDir) {
       `--dpi-desync-fake-quic=${path.join(zapretDir, 'bin', quicPattern)}`,
       '--new',
       '--filter-tcp=80,443',
-      `--hostlist-domains=${domainArg}`,
-      '--dpi-desync=fake,multisplit',
-      '--dpi-desync-repeats=6',
-      '--dpi-desync-split-seqovl=568',
-      '--dpi-desync-split-pos=1,midsld',
-      `--dpi-desync-fake-tls=${path.join(zapretDir, 'bin', tlsPattern)}`,
-      `--dpi-desync-split-seqovl-pattern=${path.join(zapretDir, 'bin', tlsPattern)}`,
-      '--new'
+      `--hostlist-domains=${domainArg}`
     );
+    if (useDiscordRule) {
+      rules.push(
+        '--dpi-desync=fake',
+        '--dpi-desync-fake-tls-mod=none',
+        '--dpi-desync-repeats=6',
+        '--dpi-desync-fooling=badseq,hopbyhop2',
+        '--new'
+      );
+    } else {
+      rules.push(
+        '--dpi-desync=fake',
+        `--dpi-desync-fake-tls=${path.join(zapretDir, 'bin', tlsPattern)}`,
+        '--dpi-desync-repeats=6',
+        '--dpi-desync-fooling=badseq,hopbyhop2',
+        '--new'
+      );
+    }
   };
   if (enabled.has('discord-media')) {
     addWebRule(
       ['media.discordapp.net', 'cdn.discordapp.com', 'images-ext-1.discordapp.net', 'images-ext-2.discordapp.net'],
       'tls_clienthello_4pda_to.bin',
-      'quic_initial_4pda_to.bin'
+      'quic_initial_4pda_to.bin',
+      true
     );
   }
   if (enabled.has('steam-web')) {
     addWebRule(
-      ['steamcommunity.com', 'store.steampowered.com', 'cdn.akamai.steamstatic.com', 'store.akamai.steamstatic.com', 'community.akamai.steamstatic.com'],
+      ['cdn.akamai.steamstatic.com', 'store.akamai.steamstatic.com', 'community.akamai.steamstatic.com'],
       'tls_clienthello_steamstatic_com.bin',
       'quic_initial_steamstatic_com.bin'
     );
@@ -2473,7 +2557,7 @@ export async function diagnoseSite(zapretDir, rawInput) {
       : dohIps.length > 0
         ? 'Системный DNS не находит домен, но через DoH он виден. Включите защищённый DNS в браузере.'
         : 'Домен не найден в DNS (проверьте правильность адреса или интернет-соединение).';
-  } else if (tcpPingMs === null) {
+  } else if (tcpPingMs === null && !tlsOk) {
     verdictStatus = 'error';
     summary = 'Нет TCP-ответа на порт 443 - возможна блокировка по IP-адресу (попробуйте режим IPSet Loaded).';
   } else if (!tlsOk) {
