@@ -266,8 +266,6 @@ namespace ZapretControlHost
         private readonly int port;
         private readonly Icon smallIcon;
         private readonly Icon largeIcon;
-        private readonly Icon activeTrayIcon;
-        private readonly Icon testingTrayIcon;
         private readonly SynchronizationContext uiSync;
         private Process backendProcess;
         private Process powershellBackend;
@@ -278,7 +276,6 @@ namespace ZapretControlHost
         private bool isShuttingDown;
         private int tickCounter;
         private int pollingStateFlag;
-        private int currentBadgeState = -1;
         private string currentTooltipText = string.Empty;
         private TraySnapshot latestTraySnapshot;
 
@@ -289,9 +286,6 @@ namespace ZapretControlHost
             port = FindAvailablePort(preferredPort, waitForPreferredPort);
 
             LoadBrandIcons(repoRoot, out smallIcon, out largeIcon);
-            activeTrayIcon = BuildBadgedTrayIcon(smallIcon, Color.FromArgb(125, 216, 166));
-            testingTrayIcon = BuildBadgedTrayIcon(smallIcon, Color.FromArgb(247, 201, 110));
-
             trayIcon = new NotifyIcon
             {
                 Icon = smallIcon,
@@ -413,22 +407,13 @@ namespace ZapretControlHost
         {
             if (isShuttingDown || trayIcon == null) return;
             latestTraySnapshot = snap;
-            int nextBadge = snap.Testing ? 2 : (snap.Running ? 1 : 0);
-            if (nextBadge != currentBadgeState)
+            // Keep the original multi-resolution ICO in the notification area.
+            // Rebuilding it through Bitmap.GetHicon corrupts alpha on some Windows
+            // tray scale factors and appears as scattered pixels. Runtime state is
+            // still exposed through the tooltip and context-menu actions.
+            if (smallIcon != null && trayIcon.Icon != smallIcon)
             {
-                currentBadgeState = nextBadge;
-                if (nextBadge == 2 && testingTrayIcon != null)
-                {
-                    trayIcon.Icon = testingTrayIcon;
-                }
-                else if (nextBadge == 1 && activeTrayIcon != null)
-                {
-                    trayIcon.Icon = activeTrayIcon;
-                }
-                else if (smallIcon != null)
-                {
-                    trayIcon.Icon = smallIcon;
-                }
+                trayIcon.Icon = smallIcon;
             }
 
             string nextTip = FormatSafeTrayTooltip(snap);
@@ -1045,46 +1030,6 @@ namespace ZapretControlHost
             Icon fallback = BuildFallbackShieldIcon(32);
             small = fallback;
             large = BuildFallbackShieldIcon(48);
-        }
-
-        private static Icon BuildBadgedTrayIcon(Icon baseIcon, Color badgeColor)
-        {
-            if (baseIcon == null) return null;
-            try
-            {
-                int size = 16;
-                using (Bitmap bmp = new Bitmap(size, size))
-                {
-                    using (Graphics g = Graphics.FromImage(bmp))
-                    {
-                        g.SmoothingMode = SmoothingMode.AntiAlias;
-                        g.Clear(Color.Transparent);
-                        g.DrawIcon(baseIcon, new Rectangle(0, 0, size, size));
-
-                        using (SolidBrush rimBrush = new SolidBrush(Color.FromArgb(17, 20, 27)))
-                        {
-                            g.FillEllipse(rimBrush, 8.5f, 8.5f, 7.2f, 7.2f);
-                        }
-                        using (SolidBrush dotBrush = new SolidBrush(badgeColor))
-                        {
-                            g.FillEllipse(dotBrush, 9.8f, 9.8f, 4.8f, 4.8f);
-                        }
-                    }
-                    IntPtr hIcon = bmp.GetHicon();
-                    try
-                    {
-                        return (Icon)Icon.FromHandle(hIcon).Clone();
-                    }
-                    finally
-                    {
-                        NativeWin32.DestroyIcon(hIcon);
-                    }
-                }
-            }
-            catch
-            {
-                return baseIcon;
-            }
         }
 
         private static Icon BuildFallbackShieldIcon(int size)
