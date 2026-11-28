@@ -11,15 +11,118 @@ echo:
 
 set "BIN=%~dp0bin\"
 set "LISTS=%~dp0lists\"
+set "LUA=%~dp0lua\"
 cd /d %BIN%
 
-start "zapret: %~n0" /min "%BIN%winws.exe" --wf-tcp=80,443,2053,2083,2087,2096,8443,%GameFilterTCP% --wf-udp=443,19294-19344,50000-50100,%GameFilterUDP% ^
---filter-udp=443 --hostlist="%LISTS%list-general.txt" --hostlist="%LISTS%list-general-user.txt" --hostlist-exclude="%LISTS%list-exclude.txt" --hostlist-exclude="%LISTS%list-exclude-user.txt" --ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic="%BIN%quic_initial_www_google_com.bin" --new ^
---filter-udp=19294-19344,50000-50100 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-fake-discord="%BIN%ACTIVE_DISCORD_UDP.bin" --dpi-desync-fake-stun="%BIN%ACTIVE_DISCORD_UDP.bin" --dpi-desync-repeats=6 --new ^
---filter-tcp=2053,2083,2087,2096,8443 --hostlist-domains=discord.media --dpi-desync=fake,fakedsplit --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-fakedsplit-pattern=0x00 --dpi-desync-fake-tls="%BIN%tls_clienthello_www_google_com.bin" --new ^
---filter-tcp=443 --hostlist="%LISTS%list-google.txt" --ip-id=zero --dpi-desync=fake,fakedsplit --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-fakedsplit-pattern=0x00 --dpi-desync-fake-tls="%BIN%tls_clienthello_www_google_com.bin" --new ^
---filter-tcp=80,443 --hostlist="%LISTS%list-general.txt" --hostlist="%LISTS%list-general-user.txt" --hostlist-exclude="%LISTS%list-exclude.txt" --hostlist-exclude="%LISTS%list-exclude-user.txt" --ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" --dpi-desync=fake,fakedsplit --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-fakedsplit-pattern=0x00 --dpi-desync-fake-tls="%BIN%stun.bin" --dpi-desync-fake-tls="%BIN%tls_clienthello_www_google_com.bin" --dpi-desync-fake-http="%BIN%tls_clienthello_www_sferum_ru.bin" --new ^
---filter-udp=443 --ipset="%LISTS%ipset-all.txt" --hostlist-exclude="%LISTS%list-exclude.txt" --hostlist-exclude="%LISTS%list-exclude-user.txt" --ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic="%BIN%quic_initial_www_google_com.bin" --new ^
---filter-tcp=80,443,8443 --ipset="%LISTS%ipset-all.txt" --hostlist-exclude="%LISTS%list-exclude.txt" --hostlist-exclude="%LISTS%list-exclude-user.txt" --ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" --dpi-desync=fake,fakedsplit --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-fakedsplit-pattern=0x00 --dpi-desync-fake-tls="%BIN%stun.bin" --dpi-desync-fake-tls="%BIN%tls_clienthello_www_google_com.bin" --dpi-desync-fake-http="%BIN%tls_clienthello_www_sferum_ru.bin" --new ^
---filter-tcp=%GameFilterTCP% --ipset="%LISTS%ipset-all.txt" --ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" --dpi-desync=fake,fakedsplit --dpi-desync-repeats=6 --dpi-desync-any-protocol=1 --dpi-desync-cutoff=n4 --dpi-desync-fooling=ts --dpi-desync-fakedsplit-pattern=0x00 --dpi-desync-fake-tls="%BIN%stun.bin" --dpi-desync-fake-tls="%BIN%tls_clienthello_www_google_com.bin" --dpi-desync-fake-http="%BIN%tls_clienthello_www_sferum_ru.bin" --dpi-desync-fake-unknown="%BIN%stun.bin" --dpi-desync-fake-unknown="%BIN%tls_clienthello_www_google_com.bin" --new ^
---filter-udp=%GameFilterUDP% --ipset="%LISTS%ipset-all.txt" --ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" --dpi-desync=fake --dpi-desync-repeats=12 --dpi-desync-any-protocol=1 --dpi-desync-fake-unknown-udp="%BIN%ACTIVE_GAME_UDP.bin" --dpi-desync-cutoff=n3
+start "zapret: %~n0" /min "%BIN%winws2.exe" --debug=0 --wf-tcp-out=80,443,2053,2083,2087,2096,8443,%GameFilterTCP% --wf-udp-out=443,19294-19344,50000-50100,%GameFilterUDP% ^
+
+--lua-init=@"%LUA%blobs.lua" ^
+--lua-init=@"%LUA%zapret-lib.lua" ^
+--lua-init=@"%LUA%zapret-antidpi.lua" ^
+
+--template=i ^
+--ipset-exclude="%LISTS%ipset-exclude.txt" --ipset-exclude="%LISTS%ipset-exclude-user.txt" ^
+--new ^
+
+--template=h ^
+--hostlist-exclude="%LISTS%list-exclude.txt" --hostlist-exclude="%LISTS%list-exclude-user.txt" ^
+--import=i ^
+--new ^
+
+--name="Domain Quic" ^
+--filter-udp=443 ^
+--hostlist="%LISTS%list-general.txt"         --hostlist="%LISTS%list-general-user.txt" ^
+--import=h ^
+--payload=quic_initial ^
+--lua-desync=fake:blob=quic_google2:repeats=4 ^
+--lua-desync=fake:blob=quic_google3:repeats=1 ^
+--lua-desync=send:repeats=1:dir=out ^
+--new ^
+
+--name="Discord Voice" ^
+--filter-udp=19294-19344,50000-50100 ^
+--filter-l7=discord,stun ^
+--payload=discord_ip_discovery,stun ^
+--lua-desync=fake:blob=ACTIVE_DISCORD:repeats=6 ^
+--lua-desync=fake:blob=quic_google2:repeats=3 ^
+--new ^
+
+--name="Discord Media" ^
+--filter-tcp=2053,2083,2087,2096,8443 ^
+--hostlist-domains=discord.media ^
+--payload=tls_client_hello ^
+--lua-desync=tls_client_hello_clone:blob=live_tls:sni_del:sni_first=www.google.com ^
+--lua-desync=fake:blob=live_tls:optional:tcp_ts=-600000:ip_id=zero:repeats=5 ^
+--lua-desync=fake:blob=fake_default_tls:tls_mod=rnd,dupsid,sni=www.google.com:tcp_ts=-600000:ip_id=zero:repeats=3 ^
+--lua-desync=fakedsplit:pos=midsld-1:tcp_ts=-600000:ip_id=zero ^
+--new ^
+
+--name="Youtube" ^
+--filter-tcp=443 ^
+--hostlist="%LISTS%list-google.txt" ^
+--payload=tls_client_hello ^
+--lua-desync=tls_client_hello_clone:blob=live_tls:sni_del:sni_first=www.google.com ^
+--lua-desync=fake:blob=live_tls:optional:tcp_ts=-600000:ip_id=zero:repeats=5 ^
+--lua-desync=fake:blob=fake_default_tls:tls_mod=rnd,dupsid,sni=www.google.com:tcp_ts=-600000:ip_id=zero:repeats=3 ^
+--lua-desync=fakedsplit:pos=1,sld+1,midsld-1:tcp_ts=-600000:ip_id=zero ^
+--new ^
+
+--name="Domain TLS" ^
+--filter-tcp=80,443 ^
+--hostlist="%LISTS%list-general.txt"         --hostlist="%LISTS%list-general-user.txt" ^
+--import=h ^
+--payload=tls_client_hello ^
+--lua-desync=fake:blob=stun2:tcp_ts=-600000:repeats=6 ^
+--lua-desync=fake:blob=tls_google2:tcp_ts=-600000:repeats=6 ^
+--lua-desync=fakedsplit:tcp_ts=-600000:repeats=6 ^
+--payload=http_req ^
+--lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:repeats=6 ^
+--lua-desync=fakedsplit:tcp_ts=-600000:repeats=6 ^
+--new ^
+
+--name="IP Quic" ^
+--filter-udp=443 ^
+--ipset="%LISTS%ipset-all.txt" ^
+--import=h ^
+--payload=quic_initial ^
+--lua-desync=fake:blob=quic_google:repeats=6 ^
+--new ^
+
+--name="IP TLS" ^
+--filter-tcp=80,443,8443 ^
+--ipset="%LISTS%ipset-all.txt" ^
+--import=h ^
+--payload=tls_client_hello ^
+--lua-desync=fake:blob=stun2:tcp_ts=-600000:repeats=6 ^
+--lua-desync=fake:blob=tls_google2:tcp_ts=-600000:repeats=6 ^
+--lua-desync=fakedsplit:tcp_ts=-600000:repeats=6 ^
+--payload=http_req ^
+--lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:repeats=6 ^
+--lua-desync=fakedsplit:tcp_ts=-600000:repeats=6 ^
+--new ^
+
+--name="GameFilter TCP" ^
+--filter-tcp=%GameFilterTCP% ^
+--ipset="%LISTS%ipset-all.txt" ^
+--import=i ^
+--out-range=-n4 ^
+--payload=tls_client_hello ^
+--lua-desync=fake:blob=stun2:tcp_ts=-600000:repeats=6 ^
+--lua-desync=fake:blob=tls_google2:tcp_ts=-600000:repeats=6 ^
+--lua-desync=fakedsplit:tcp_ts=-600000:repeats=6 ^
+--payload=http_req ^
+--lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:repeats=6 ^
+--lua-desync=fakedsplit:tcp_ts=-600000:repeats=6 ^
+--payload=unknown ^
+--lua-desync=fake:blob=stun2:tcp_ts=-600000:repeats=6:payload=all ^
+--lua-desync=fake:blob=tls_google2:tcp_ts=-600000:repeats=6:payload=all ^
+--lua-desync=fakedsplit:tcp_ts=-600000:repeats=6:payload=all ^
+--new ^
+
+--name="GameFilter UDP" ^
+--filter-udp=%GameFilterUDP% ^
+--ipset="%LISTS%ipset-all.txt" ^
+--import=i ^
+--out-range=-n3 ^
+--payload=all ^
+--lua-desync=fake:blob=ACTIVE_GAME:repeats=12:payload=all

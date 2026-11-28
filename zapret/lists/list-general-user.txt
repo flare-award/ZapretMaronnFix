@@ -1,4 +1,3 @@
-domain.example.abc
 tiktok.com
 tiktokcdn.com
 tiktokv.com
@@ -133,3 +132,15 @@ auth0.com
 gofile.io
 www.steamworkshopdownloader.io
 arena.ai
+mega.nz
+mega.co.nz
+g.api.mega.co.nz
+api.mega.co.nz
+userstorage.mega.co.nz
+eu.static.mega.co.nz
+g.static.mega.co.nz
+smartcaptcha.cloud.yandex.ru
+steamstatic.com
+enbdev.com
+stagetimer.io
+ru.pinterest.com

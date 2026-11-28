@@ -1,17 +1,7 @@
-# targets.txt - endpoint list for zapret.ps1 tests
-#
-# Format:
-#   KeyName = "https://host..."   -> Runs HTTP/TLS checks + ping
-#   KeyName = "PING:1.2.3.4"       -> Ping only
-#
-# Keys must be a single word (letters/digits/underscore), because the
-# script parses them as simple identifiers. You can add or remove lines.
-
 ### Discord
 DiscordMain           = "https://discord.com"
 DiscordGateway        = "https://gateway.discord.gg"
 DiscordCDN            = "https://cdn.discordapp.com"
-DiscordMedia          = "https://media.discordapp.net"
 DiscordUpdates        = "https://updates.discord.com"
 
 ### YouTube
@@ -32,14 +22,8 @@ CloudflareCDN         = "https://cdnjs.cloudflare.com"
 GitHubMain            = "https://github.com"
 GitHubAPI             = "https://api.github.com"
 
-### Steam
-SteamStaticCDN        = "https://cdn.akamai.steamstatic.com"
-SteamStoreCDN         = "https://store.akamai.steamstatic.com"
-SteamCommunityCDN     = "https://community.akamai.steamstatic.com"
-
 ### Public DNS (PING-only)
 CloudflareDNS1111     = "PING:1.1.1.1"
 CloudflareDNS1001     = "PING:1.0.0.1"
 GoogleDNS8888         = "PING:8.8.8.8"
 GoogleDNS8844         = "PING:8.8.4.4"
-

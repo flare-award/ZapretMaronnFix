@@ -19,7 +19,7 @@ function Get-IpsetStatus {
 function Wait-WinwsReady {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     while ($timer.ElapsedMilliseconds -lt 5000) {
-        if (Get-Process -Name "winws" -ErrorAction SilentlyContinue) {
+        if (Get-Process -Name "winws2" -ErrorAction SilentlyContinue) {
             Start-Sleep -Milliseconds 300
             return $true
         }
@@ -192,6 +192,7 @@ function Invoke-DpiSuite {
 
         foreach ($test in $tests) {
             $curlArgs = @(
+                "-q", "--noproxy", "*",
                 "--range", $rangeSpec,
                 "-m", $TimeoutSeconds,
                 "--connect-timeout", ([Math]::Min(3, $TimeoutSeconds)),
@@ -585,15 +586,15 @@ if (-not $batFiles -or $batFiles.Count -eq 0) {
     exit 1
 }
 
-# Stop winws
+# Stop winws/winws2
 function Stop-Zapret {
-    Get-Process -Name "winws" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process -Name "winws", "winws2" -ErrorAction SilentlyContinue | Stop-Process -Force
 }
 
-# Capture/restore running winws instances to return user ipset/config
+# Capture/restore running winws2 instances to return user ipset/config
 function Get-WinwsSnapshot {
     try {
-        return Get-CimInstance Win32_Process -Filter "Name='winws.exe'" |
+        return Get-CimInstance Win32_Process -Filter "Name='winws2.exe'" |
             Select-Object ProcessId, CommandLine, ExecutablePath
     } catch {
         return @()
@@ -608,7 +609,7 @@ function Restore-WinwsSnapshot {
     $current = @()
     try { $current = (Get-WinwsSnapshot).CommandLine } catch { $current = @() }
 
-    Write-Host "[INFO] Restoring previously running winws instances..." -ForegroundColor DarkGray
+    Write-Host "[INFO] Restoring previously running winws2 instances..." -ForegroundColor DarkGray
     foreach ($p in $snapshot) {
         if (-not $p.ExecutablePath) { continue }
 
@@ -621,23 +622,23 @@ function Restore-WinwsSnapshot {
         # A quoted token is unambiguous; an unquoted one may contain spaces, so
         # fall back to the known executable path before guessing at whitespace.
         $processArgs = $null
-        if ($p.CommandLine -match '^\s*"[^"]*"\s*(.*)$') {
+        if ($p.CommandLine -match '(?s)^\s*"[^"]*"\s*(.*)$') {
             $processArgs = $matches[1].Trim()
         } elseif ($p.CommandLine -and $p.CommandLine.StartsWith($exe, [StringComparison]::OrdinalIgnoreCase)) {
             $processArgs = $p.CommandLine.Substring($exe.Length).Trim()
-        } elseif ($p.CommandLine -match '^\s*\S+\s*(.*)$') {
+        } elseif ($p.CommandLine -match '(?s)^\s*\S+\s*(.*)$') {
             $processArgs = $matches[1].Trim()
         }
 
         if (-not $processArgs) {
-            Write-Host "[WARN] Could not read arguments of previous winws instance ($exe); skipping restore." -ForegroundColor Yellow
+            Write-Host "[WARN] Could not read arguments of previous winws2 instance ($exe); skipping restore." -ForegroundColor Yellow
             continue
         }
 
         try {
             Start-Process -FilePath $exe -ArgumentList $processArgs -WorkingDirectory (Split-Path $exe -Parent) -WindowStyle Minimized | Out-Null
         } catch {
-            Write-Host "[WARN] Failed to restore previous winws instance ($exe): $_" -ForegroundColor Yellow
+            Write-Host "[WARN] Failed to restore previous winws2 instance ($exe): $_" -ForegroundColor Yellow
         }
     }
 }
@@ -679,7 +680,7 @@ try {
     
     # Wait init
     if (-not (Wait-WinwsReady)) {
-        Write-Host "  > Strategy failed to start (winws process not found). Skipping..." -ForegroundColor Red
+        Write-Host "  > Strategy failed to start (winws2 process not found). Skipping..." -ForegroundColor Red
         if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
         continue
     }
@@ -704,7 +705,7 @@ try {
                     @{ Label = "TLS1.3"; Args = @("--tlsv1.3", "--tls-max", "1.3") }
                 )
 
-                $baseArgs = @("-I", "-s", "-m", $curlTimeoutSeconds, "--connect-timeout", ([Math]::Min(2, $curlTimeoutSeconds)), "-o", "NUL", "-w", "%{http_code}", "--show-error")
+                $baseArgs = @("-q", "--noproxy", "*", "-I", "-s", "-m", $curlTimeoutSeconds, "--connect-timeout", ([Math]::Min(2, $curlTimeoutSeconds)), "-o", "NUL", "-w", "%{http_code}", "--show-error")
                 foreach ($test in $tests) {
                     try {
                         $curlArgs = $baseArgs + $test.Args
@@ -896,10 +897,16 @@ try {
         }
     }
 
+    $configsInTestOrder = foreach ($res in $globalResults) {
+        if ($analytics.ContainsKey($res.Config)) {
+            $res.Config
+        }
+    }
+
     Write-Host ""
     Write-Host "=== ANALYTICS ===" -ForegroundColor Cyan
     $maxConfigLen = ($analytics.Keys | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
-    foreach ($config in $analytics.Keys) {
+    foreach ($config in $configsInTestOrder) {
         $a = $analytics[$config]
         $configPadded = $config.PadRight($maxConfigLen)
         if ($a.ContainsKey('PingOK')) {
@@ -981,7 +988,7 @@ try {
     # Add analytics
     [void]$resultLines.Add("=== ANALYTICS ===")
     $maxConfigLen = ($analytics.Keys | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
-    foreach ($config in $analytics.Keys) {
+    foreach ($config in $configsInTestOrder) {
         $a = $analytics[$config]
         $configPadded = $config.PadRight($maxConfigLen)
         if ($a.ContainsKey('PingOK')) {
