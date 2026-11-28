@@ -1,0 +1,1314 @@
+﻿param(
+    [int]$Port = 3847,
+    [string]$RepoRoot = (Resolve-Path "$PSScriptRoot\..\..").Path
+)
+
+$ProgressPreference = "SilentlyContinue"
+$ErrorActionPreference = "Stop"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$AppDir = Join-Path $RepoRoot "app"
+$StaticDir = Join-Path $AppDir "static"
+$DataDir = Join-Path $AppDir "data"
+$BackupDir = Join-Path $DataDir "user-lists-backup"
+$SettingsFile = Join-Path $DataDir "settings.json"
+$ProfilesFile = Join-Path $DataDir "profiles.json"
+New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
+
+$script:ActiveWinws = $null
+$script:StartedAtMs = $null
+$script:ActiveStrategy = $null
+
+function Get-AppSettings {
+    $defaults = [ordered]@{
+        zapretDir = (Join-Path $RepoRoot "zapret")
+        selectedStrategy = "general (ALT11).bat"
+        activeProfileId = "default"
+        showBestStrategyCards = $true
+        connectLayout = "split"
+        theme = "dark"
+        accent = "blue"
+        skippedZapretVersion = $null
+        developerMode = $false
+        autoStartStrategyOnLaunch = $false
+        launchOnWindowsStartup = $false
+        startMinimizedToTray = $false
+        minimizeToTrayOnClose = $true
+        autoRestartOnFilterChange = $true
+        autoCheckUpdates = $true
+        showWinwsConsole = $false
+    }
+    if (Test-Path $SettingsFile) {
+        try {
+            $loaded = Get-Content $SettingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($p in $loaded.PSObject.Properties) {
+                $defaults[$p.Name] = $p.Value
+            }
+        } catch {}
+    }
+    return $defaults
+}
+
+function Save-AppSettings($patch) {
+    $cur = Get-AppSettings
+    foreach ($p in $patch.PSObject.Properties) {
+        $cur[$p.Name] = $p.Value
+    }
+    ($cur | ConvertTo-Json -Depth 6) | Set-Content -Path $SettingsFile -Encoding UTF8
+    return $cur
+}
+
+function Read-GameFilter($zapretDir) {
+    $flag = Join-Path $zapretDir "utils\game_filter.enabled"
+    $mode = "disabled"
+    $tcp = "1024-65535"
+    $udp = "1024-65535"
+    if (Test-Path $flag) {
+        $lines = Get-Content $flag -Encoding UTF8
+        $hasKv = $false
+        foreach ($l in $lines) {
+            if ($l -match "^mode=(.+)$") { $mode = $Matches[1].Trim(); $hasKv = $true }
+            elseif ($l -match "^tcp=(.+)$") { $tcp = $Matches[1].Trim(); $hasKv = $true }
+            elseif ($l -match "^udp=(.+)$") { $udp = $Matches[1].Trim(); $hasKv = $true }
+        }
+        if (-not $hasKv -and $lines.Count -gt 0) {
+            $first = $lines[0].Trim().ToLower()
+            if ($first -in @("all", "tcp", "udp", "disabled")) { $mode = $first }
+        }
+    }
+    return @{ mode = $mode; tcpRange = $tcp; udpRange = $udp }
+}
+
+function Write-GameFilter($zapretDir, $mode, $tcp, $udp) {
+    $utilsDir = Join-Path $zapretDir "utils"
+    New-Item -ItemType Directory -Force -Path $utilsDir | Out-Null
+    $flag = Join-Path $utilsDir "game_filter.enabled"
+    if ($mode -eq "disabled") {
+        if (Test-Path $flag) { Remove-Item -Force $flag }
+        return
+    }
+    $text = "$mode`r`nmode=$mode`r`ntcp=$tcp`r`nudp=$udp`r`n"
+    Set-Content -Path $flag -Value $text -Encoding UTF8
+}
+
+function Get-ProfilesList($settings) {
+    $gf = Read-GameFilter $settings.zapretDir
+    $nowIso = [DateTime]::UtcNow.ToString("o")
+    $defaultProf = [ordered]@{
+        id = "default"
+        name = "Основной"
+        description = ""
+        isDefault = $true
+        strategy = $settings.selectedStrategy
+        gameFilterMode = $gf.mode
+        gameFilterTcp = $gf.tcpRange
+        gameFilterUdp = $gf.udpRange
+        ipsetMode = "none"
+        discordFakeBin = $null
+        gameFakeBin = $null
+        updatedAt = $nowIso
+    }
+    if (Test-Path $ProfilesFile) {
+        try {
+            $arr = @(Get-Content $ProfilesFile -Raw -Encoding UTF8 | ConvertFrom-Json)
+            if ($arr.Count -gt 0) {
+                return $arr
+            }
+        } catch {}
+    }
+    $initList = @($defaultProf)
+    ($initList | ConvertTo-Json -Depth 6) | Set-Content -Path $ProfilesFile -Encoding UTF8
+    return $initList
+}
+
+function Stop-WinwsDirect {
+    if ($script:ActiveWinws -and -not $script:ActiveWinws.HasExited) {
+        try { $script:ActiveWinws.Kill() } catch {}
+    }
+    Get-Process -Name "winws","winws2" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    $script:ActiveWinws = $null
+    $script:StartedAtMs = $null
+    $script:ActiveStrategy = $null
+}
+
+function Start-WinwsDirect($strategyName) {
+    $settings = Get-AppSettings
+    $zDir = $settings.zapretDir
+    $batName = if ($strategyName) { $strategyName } else { $settings.selectedStrategy }
+    $batPath = Join-Path $zDir $batName
+    if (-not (Test-Path $batPath)) { throw "Файл стратегии не найден: $batName" }
+
+    $gf = Read-GameFilter $zDir
+    $effTcp = if ($gf.mode -in @("all", "tcp")) { $gf.tcpRange } else { "12" }
+    $effUdp = if ($gf.mode -in @("all", "udp")) { $gf.udpRange } else { "12" }
+
+    $raw = (Get-Content $batPath -Raw -Encoding UTF8) -replace "\^\s*\r?\n", " "
+    $raw = $raw -replace "\r?\n", " "
+    $match = [regex]::Match($raw, '(?im)(winws2?\.exe)"\s+(.+)$')
+    if (-not $match.Success) { throw "Не найдена команда winws.exe или winws2.exe в $batName" }
+    $winwsName = $match.Groups[1].Value
+
+    $argLine = $match.Groups[2].Value.Trim()
+    $binPath = (Join-Path $zDir "bin") + "\"
+    $listsPath = (Join-Path $zDir "lists") + "\"
+    $luaPath = (Join-Path $zDir "lua") + "\"
+    $argLine = $argLine.Replace("%BIN%", $binPath).Replace("!BIN!", $binPath)
+    $argLine = $argLine.Replace("%LISTS%", $listsPath).Replace("!LISTS!", $listsPath)
+    $argLine = $argLine.Replace("%LUA%", $luaPath).Replace("!LUA!", $luaPath)
+    $argLine = $argLine.Replace("%GameFilterTCP%", $effTcp).Replace("!GameFilterTCP!", $effTcp)
+    $argLine = $argLine.Replace("%GameFilterUDP%", $effUdp).Replace("!GameFilterUDP!", $effUdp)
+    $argLine = $argLine.Replace("%GameFilter%", $effUdp).Replace("!GameFilter!", $effUdp)
+    Stop-WinwsDirect
+    & netsh interface tcp set global timestamps=enabled | Out-Null
+
+    $winwsExe = Join-Path (Join-Path $zDir "bin") $winwsName
+    if (-not (Test-Path $winwsExe) -and $winwsName -ieq "winws.exe") {
+        $officialName = $batName -replace ' my\)\.bat$', ').bat'
+        if ($officialName -ne $batName -and (Test-Path (Join-Path $zDir $officialName)) -and (Test-Path (Join-Path $zDir "bin\winws2.exe"))) {
+            Start-WinwsDirect $officialName
+            return
+        }
+        throw "Стратегия $batName использует отсутствующий старый winws.exe"
+    }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $winwsExe
+    $psi.Arguments = $argLine
+    $psi.WorkingDirectory = Join-Path $zDir "bin"
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = (-not [bool]$settings.showWinwsConsole)
+    $script:ActiveWinws = [System.Diagnostics.Process]::Start($psi)
+    $script:ActiveStrategy = $batName
+    $script:StartedAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+}
+
+$ResumeFlagFile = Join-Path $DataDir "resume-after-update.json"
+$UpdateStateFile = Join-Path $DataDir "app-update-state.json"
+$SteamSpeedStateFile = Join-Path $DataDir "steam-speed-state.json"
+$SteamSpeedHistoryFile = Join-Path $DataDir "steam-speed-history.json"
+$SteamSpeedStopFile = Join-Path $DataDir "steam-speed-stop.flag"
+$ProblemFixesFile = Join-Path $DataDir "problem-fixes.json"
+$SystemHostsFile = Join-Path $env:SystemRoot "System32\drivers\etc\hosts"
+$script:SteamSpeedProcess = $null
+$script:SteamRestoreStrategy = $null
+$script:SteamHostsChecked = $false
+$script:SteamHostsError = $null
+$ServerBootId = [guid]::NewGuid().ToString()
+
+function Get-SteamSpeedState {
+    if (Test-Path $SteamSpeedStateFile) {
+        try { return Get-Content $SteamSpeedStateFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+    }
+    return [ordered]@{
+        running = $false; aborted = $false; startedAt = $null; finishedAt = $null
+        currentStrategy = $null; completedCount = 0; totalCount = 0; progressPct = 0
+results = @(); error = $null; sourceLabel = "Официальная CDN Steam"; sampleBytesPerStrategy = 209715200
+    }
+}
+
+function Get-SteamSpeedHistory {
+    if (Test-Path $SteamSpeedHistoryFile) {
+        try { return @(Get-Content $SteamSpeedHistoryFile -Raw -Encoding UTF8 | ConvertFrom-Json) } catch {}
+    }
+    return @()
+}
+
+function Get-ProblemFixConfig {
+    $default = [ordered]@{ discordMedia = $false; steamWeb = $false; steamWorkshop = $false; steamHostsError = $null }
+    if (Test-Path $ProblemFixesFile) {
+        try {
+            $loaded = Get-Content $ProblemFixesFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $loaded.steamHostsError) { $default.steamHostsError = [string]$loaded.steamHostsError }
+            if ($null -ne $loaded.fixes) {
+                $discordFix = $loaded.fixes.PSObject.Properties['discord-media']
+                $steamFix = $loaded.fixes.PSObject.Properties['steam-web']
+                $workshopFix = $loaded.fixes.PSObject.Properties['steam-workshop']
+                if ($null -ne $discordFix) { $default.discordMedia = [bool]$discordFix.Value.enabled }
+                if ($null -ne $steamFix) { $default.steamWeb = [bool]$steamFix.Value.enabled }
+                if ($null -ne $workshopFix) { $default.steamWorkshop = [bool]$workshopFix.Value.enabled }
+            } else {
+                if ($null -ne $loaded.discordMedia) { $default.discordMedia = [bool]$loaded.discordMedia }
+                if ($null -ne $loaded.steamWeb) { $default.steamWeb = [bool]$loaded.steamWeb }
+                if ($null -ne $loaded.steamWorkshop) { $default.steamWorkshop = [bool]$loaded.steamWorkshop }
+            }
+        } catch {}
+    }
+    return $default
+}
+
+function Set-DomainFileEntries([string]$filePath, [string[]]$add, [string[]]$remove) {
+    $lines = if (Test-Path $filePath) { @(Get-Content $filePath -Encoding UTF8) } else { @() }
+    $removeSet = @{}
+    foreach ($domain in $remove) { $removeSet[$domain.ToLower()] = $true }
+    $kept = @($lines | Where-Object { -not $removeSet.ContainsKey(($_.Trim().TrimStart('^')).ToLower()) })
+    $present = @{}
+    foreach ($line in $kept) { $present[($line.Trim().TrimStart('^')).ToLower()] = $true }
+    foreach ($domain in $add) {
+        if (-not $present.ContainsKey($domain.ToLower())) { $kept += $domain }
+    }
+    $text = (($kept -join "`r`n").TrimEnd() + "`r`n")
+    [System.IO.File]::WriteAllText($filePath, $text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Set-DiscordHostsFixPs([bool]$enabled) {
+    $begin = "# Zapret Control: Discord media fix"
+    $end = "# Zapret Control: end Discord media fix"
+    $ips = @("162.159.138.232", "162.159.137.232", "162.159.128.233", "162.159.135.232", "162.159.134.232")
+    try {
+        $content = if (Test-Path $SystemHostsFile) { [System.IO.File]::ReadAllText($SystemHostsFile) } else { "" }
+        $pattern = "(?ms)(?:^|\r?\n)" + [regex]::Escape($begin) + "\r?\n.*?\r?\n" + [regex]::Escape($end) + "(?=\r?\n|$)"
+        $clean = ([regex]::Replace($content, $pattern, "")).TrimEnd()
+        $managed = @()
+        if ($enabled) {
+            $managed += $begin
+            foreach ($ip in $ips) { $managed += "$ip discord.com" }
+            foreach ($ip in $ips) { $managed += "$ip media.discordapp.net" }
+            foreach ($ip in $ips) { $managed += "$ip images-ext-1.discordapp.net" }
+            $managed += $end
+        }
+        $parts = @()
+        if ($clean) { $parts += $clean }
+        if ($managed.Count -gt 0) { $parts += ($managed -join "`r`n") }
+        [System.IO.File]::WriteAllText($SystemHostsFile, (($parts -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+        & ipconfig.exe /flushdns 2>&1 | Out-Null
+    } catch {
+        throw "Не удалось изменить системный hosts. Запустите Zapret Control от имени администратора."
+    }
+}
+
+function Test-DiscordHostsFixPs {
+    try {
+        $content = [System.IO.File]::ReadAllText($SystemHostsFile)
+        return $content.Contains("# Zapret Control: Discord media fix") -and $content.Contains("# Zapret Control: end Discord media fix") -and $content.Contains("discord.com") -and $content.Contains("media.discordapp.net") -and $content.Contains("images-ext-1.discordapp.net")
+    } catch { return $false }
+}
+
+function Get-SteamHostsDomainsPs($config) {
+    $domains = @()
+    if ($config.steamWeb) {
+        $domains += @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com")
+    }
+    if ($config.steamWorkshop) {
+        $domains += @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com")
+    }
+    return @($domains | Select-Object -Unique)
+}
+
+function Get-SteamDohIpsPs([string]$domain) {
+    $curl = (Get-Command "curl.exe" -ErrorAction Stop).Source
+    $lookupDomains = if ($domain -eq "images.steamusercontent.com") { @($domain, "steamusercontent-a.akamaihd.net") } else { @($domain) }
+    $urls = @()
+    foreach ($lookupDomain in $lookupDomains) {
+        $encoded = [Uri]::EscapeDataString($lookupDomain)
+        $urls += "https://cloudflare-dns.com/dns-query?name=$encoded&type=A"
+        $urls += "https://dns.google/resolve?name=$encoded&type=A"
+    }
+    $ips = @()
+    foreach ($url in $urls) {
+        try {
+            $json = (& $curl -fsSL --connect-timeout 2 --max-time 5 -H "Accept: application/dns-json" $url 2>$null | Out-String) | ConvertFrom-Json
+            foreach ($answer in @($json.Answer)) {
+                $candidate = [string]$answer.data
+                $parsed = $null
+                if ([int]$answer.type -eq 1 -and [Net.IPAddress]::TryParse($candidate, [ref]$parsed) -and $parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) {
+                    $ips += $candidate
+                }
+            }
+        } catch {}
+    }
+    return @($ips | Select-Object -Unique | Select-Object -First 8)
+}
+
+function Find-WorkingSteamEdgePs([string]$domain) {
+    $curl = (Get-Command "curl.exe" -ErrorAction Stop).Source
+    foreach ($ip in @(Get-SteamDohIpsPs $domain)) {
+        & $curl -sS -I --connect-timeout 2 --max-time 4 --resolve "$domain`:443`:$ip" -o NUL "https://$domain/" 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { return $ip }
+    }
+    return $null
+}
+
+function Refresh-SteamHostsFixPs($config) {
+    $begin = "# Zapret Control: Steam Akamai route"
+    $end = "# Zapret Control: end Steam Akamai route"
+    $domains = @(Get-SteamHostsDomainsPs $config)
+    try {
+        $content = if (Test-Path $SystemHostsFile) { [IO.File]::ReadAllText($SystemHostsFile) } else { "" }
+        $pattern = "(?ms)(?:^|\r?\n)" + [regex]::Escape($begin) + "\r?\n.*?\r?\n" + [regex]::Escape($end) + "(?=\r?\n|$)"
+        $clean = ([regex]::Replace($content, $pattern, "")).TrimEnd()
+        $routes = @()
+        $missing = @()
+        foreach ($domain in $domains) {
+            $ip = Find-WorkingSteamEdgePs $domain
+            if ($ip) { $routes += "$ip $domain" } elseif ($domain -ne "images.steamusercontent.com") { $missing += $domain }
+        }
+        $parts = @()
+        if ($clean) { $parts += $clean }
+        if ($routes.Count -gt 0) { $parts += ((@($begin) + $routes + @($end)) -join "`r`n") }
+        [IO.File]::WriteAllText($SystemHostsFile, (($parts -join "`r`n") + "`r`n"), (New-Object Text.UTF8Encoding($false)))
+        & ipconfig.exe /flushdns 2>&1 | Out-Null
+        return $missing
+    } catch {
+        throw "Не удалось обновить маршруты Steam в системном hosts. Запустите Zapret Control от имени администратора."
+    }
+}
+
+function Test-SteamHostsFixPs([string[]]$domains) {
+    if ($domains.Count -eq 0) { return $true }
+    try {
+        $content = [IO.File]::ReadAllText($SystemHostsFile)
+        if (-not $content.Contains("# Zapret Control: Steam Akamai route") -or -not $content.Contains("# Zapret Control: end Steam Akamai route")) { return $false }
+        foreach ($domain in $domains) {
+            if ($domain -eq "images.steamusercontent.com") { continue }
+            if ($content -notmatch "(?m)^\s*\d{1,3}(?:\.\d{1,3}){3}\s+$([regex]::Escape($domain))\s*$") { return $false }
+        }
+        return $true
+    } catch { return $false }
+}
+
+function Apply-ProblemFixLists($settings, [bool]$refreshRoutes = $true) {
+    $config = Get-ProblemFixConfig
+    $lists = Join-Path $settings.zapretDir "lists"
+    $userGeneral = Join-Path $lists "list-general-user.txt"
+    $baseExclude = Join-Path $lists "list-exclude.txt"
+    $userExclude = Join-Path $lists "list-exclude-user.txt"
+    $discordDomains = @("discordapp.net", "media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net")
+    $steamDomains = @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com")
+    $workshopDomains = @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com")
+    if ($config.discordMedia) {
+        try { Set-DiscordHostsFixPs $true } catch {}
+        Set-DomainFileEntries $userGeneral $discordDomains @()
+        Set-DomainFileEntries $userExclude @() @("discord.com", "discordapp.net", "discordapp.com")
+    }
+    if ($config.steamWeb) {
+        Set-DomainFileEntries $userGeneral $steamDomains @()
+        Set-DomainFileEntries $baseExclude @() @()
+        Set-DomainFileEntries $userExclude @() @()
+    }
+    if ($config.steamWorkshop) {
+        Set-DomainFileEntries $userGeneral $workshopDomains @()
+        Set-DomainFileEntries $baseExclude @() @("steamusercontent.com")
+        Set-DomainFileEntries $userExclude @() @("steamusercontent.com")
+    }
+    if ($refreshRoutes) {
+        try {
+            $missing = @(Refresh-SteamHostsFixPs $config)
+            $script:SteamHostsError = if ($missing.Count -gt 0) { "Не найдены доступные Akamai-адреса: " + ($missing -join ", ") } else { $null }
+        } catch { $script:SteamHostsError = $_.Exception.Message }
+        $script:SteamHostsChecked = $true
+    }
+}
+
+function Get-ProblemFixRecord([string]$id) {
+    if (Test-Path $ProblemFixesFile) {
+        try {
+            $raw = Get-Content $ProblemFixesFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $raw.fixes) {
+                $property = $raw.fixes.PSObject.Properties[$id]
+                if ($null -ne $property) { return $property.Value }
+            }
+        } catch {}
+    }
+    return [pscustomobject]@{ enabled = $false; enabledAt = $null; addedDomains = @(); removedExclusions = @(); version = 2 }
+}
+
+function Restore-ProblemExclusions([string]$listsDir, $entries) {
+    foreach ($fileName in @("list-exclude.txt", "list-exclude-user.txt")) {
+        $selected = @($entries | Where-Object { $_.fileName -eq $fileName } | Sort-Object index)
+        if ($selected.Count -eq 0) { continue }
+        $filePath = Join-Path $listsDir $fileName
+        $lines = New-Object System.Collections.ArrayList
+        if (Test-Path $filePath) { @(Get-Content $filePath -Encoding UTF8) | ForEach-Object { [void]$lines.Add($_) } }
+        foreach ($entry in $selected) {
+            $exists = @($lines | Where-Object { ($_.Trim().TrimStart('^')).ToLower() -eq ($entry.line.Trim().TrimStart('^')).ToLower() }).Count -gt 0
+            if ($exists) { continue }
+            $insertAt = if ($null -ne $entry.index) { [Math]::Max(0, [Math]::Min([int]$entry.index, $lines.Count)) } else { $lines.Count }
+            $lines.Insert($insertAt, [string]$entry.line)
+        }
+        $text = (($lines.ToArray() -join "`r`n").TrimEnd() + "`r`n")
+        [System.IO.File]::WriteAllText($filePath, $text, (New-Object System.Text.UTF8Encoding($false)))
+    }
+}
+
+function Set-ProblemFixPs([string]$id, [bool]$enabled, $settings) {
+    if ($id -notin @("discord-media", "steam-web", "steam-workshop")) { throw "Неизвестное исправление" }
+    $config = Get-ProblemFixConfig
+    $discordRecord = Get-ProblemFixRecord "discord-media"
+    $steamRecord = Get-ProblemFixRecord "steam-web"
+    $workshopRecord = Get-ProblemFixRecord "steam-workshop"
+    $targetRecord = if ($id -eq "discord-media") { $discordRecord } elseif ($id -eq "steam-web") { $steamRecord } else { $workshopRecord }
+    $domains = if ($id -eq "discord-media") {
+        @("discordapp.net", "media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net")
+    } elseif ($id -eq "steam-web") {
+        @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com")
+    } else {
+        @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com")
+    }
+    $excludeDomains = if ($id -eq "discord-media") { @("discord.com", "discordapp.net", "discordapp.com") } elseif ($id -eq "steam-workshop") { @("steamusercontent.com") } else { @() }
+    $lists = Join-Path $settings.zapretDir "lists"
+    if ($id -eq "discord-media") { Set-DiscordHostsFixPs $enabled }
+
+    if ($enabled) {
+        $userGeneral = Join-Path $lists "list-general-user.txt"
+        $present = @{}
+        if (Test-Path $userGeneral) {
+            Get-Content $userGeneral -Encoding UTF8 | ForEach-Object { $present[($_.Trim().TrimStart('^')).ToLower()] = $true }
+        }
+        $addedDomains = @((@($targetRecord.addedDomains) + @($domains | Where-Object { -not $present.ContainsKey($_.ToLower()) })) | Select-Object -Unique)
+        $removed = @($targetRecord.removedExclusions)
+        foreach ($fileName in @("list-exclude.txt", "list-exclude-user.txt")) {
+            $filePath = Join-Path $lists $fileName
+            $lines = if (Test-Path $filePath) { @(Get-Content $filePath -Encoding UTF8) } else { @() }
+            for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
+                $normalized = ($lines[$lineIndex].Trim().TrimStart('^')).ToLower()
+                if ($excludeDomains -contains $normalized) {
+                    $removed += [ordered]@{ fileName = $fileName; line = $lines[$lineIndex].Trim(); index = $lineIndex }
+                }
+            }
+        }
+        $recordVersion = if ($id -eq "steam-workshop") { 3 } else { 2 }
+        $targetRecord = [pscustomobject]@{ enabled = $true; enabledAt = [DateTime]::UtcNow.ToString("o"); addedDomains = $addedDomains; removedExclusions = $removed; version = $recordVersion }
+    } else {
+        Set-DomainFileEntries (Join-Path $lists "list-general-user.txt") @() @($targetRecord.addedDomains)
+        Restore-ProblemExclusions $lists @($targetRecord.removedExclusions)
+        $targetRecord = [pscustomobject]@{ enabled = $false; enabledAt = $null; addedDomains = @(); removedExclusions = @(); version = 2 }
+    }
+
+    if ($id -eq "discord-media") { $discordRecord = $targetRecord; $config.discordMedia = $enabled }
+    elseif ($id -eq "steam-web") { $steamRecord = $targetRecord; $config.steamWeb = $enabled }
+    else { $workshopRecord = $targetRecord; $config.steamWorkshop = $enabled }
+    $savedConfig = [ordered]@{ steamHostsError = $config.steamHostsError; fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $steamRecord; "steam-workshop" = $workshopRecord } }
+    ($savedConfig | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ProblemFixesFile -Encoding UTF8
+    Apply-ProblemFixLists $settings $false
+    if ($id -eq "steam-web" -or $id -eq "steam-workshop") {
+        try {
+            $missing = @(Refresh-SteamHostsFixPs $config)
+            $config.steamHostsError = if ($missing.Count -gt 0) { "Не найдены доступные Akamai-адреса: " + ($missing -join ", ") } else { $null }
+        } catch { $config.steamHostsError = $_.Exception.Message }
+        $script:SteamHostsError = $config.steamHostsError
+        $script:SteamHostsChecked = $true
+        $savedConfig.steamHostsError = $config.steamHostsError
+        ($savedConfig | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ProblemFixesFile -Encoding UTF8
+    }
+}
+
+function Migrate-ProblemFixesPs($settings) {
+    $steamRecord = Get-ProblemFixRecord "steam-web"
+    if (-not [bool]$steamRecord.enabled -or [int]$steamRecord.version -eq 2) { return }
+    $lists = Join-Path $settings.zapretDir "lists"
+    Set-DomainFileEntries (Join-Path $lists "list-general-user.txt") @() @($steamRecord.addedDomains)
+    Restore-ProblemExclusions $lists @($steamRecord.removedExclusions)
+    $newDomains = @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com")
+    $present = @{}
+    Get-Content (Join-Path $lists "list-general-user.txt") -Encoding UTF8 | ForEach-Object { $present[($_.Trim().TrimStart('^')).ToLower()] = $true }
+    $newRecord = [pscustomobject]@{
+        enabled = $true
+        enabledAt = [DateTime]::UtcNow.ToString("o")
+        addedDomains = @($newDomains | Where-Object { -not $present.ContainsKey($_.ToLower()) })
+        removedExclusions = @()
+        version = 2
+    }
+    $discordRecord = Get-ProblemFixRecord "discord-media"
+    $workshopRecord = Get-ProblemFixRecord "steam-workshop"
+    $savedConfig = [ordered]@{ steamHostsError = $null; fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $newRecord; "steam-workshop" = $workshopRecord } }
+    ($savedConfig | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ProblemFixesFile -Encoding UTF8
+}
+
+function Migrate-WorkshopFixPs($settings) {
+    $workshopRecord = Get-ProblemFixRecord "steam-workshop"
+    if (-not [bool]$workshopRecord.enabled -or [int]$workshopRecord.version -ge 3) { return }
+    $lists = Join-Path $settings.zapretDir "lists"
+    $removed = @($workshopRecord.removedExclusions)
+    foreach ($fileName in @("list-exclude.txt", "list-exclude-user.txt")) {
+        $filePath = Join-Path $lists $fileName
+        $lines = if (Test-Path $filePath) { @(Get-Content $filePath -Encoding UTF8) } else { @() }
+        for ($index = 0; $index -lt $lines.Count; $index++) {
+            if (($lines[$index].Trim().TrimStart('^')).ToLower() -ne "steamusercontent.com") { continue }
+            if (@($removed | Where-Object { $_.fileName -eq $fileName -and $_.line -eq $lines[$index].Trim() }).Count -eq 0) {
+                $removed += [ordered]@{ fileName = $fileName; line = $lines[$index].Trim(); index = $index }
+            }
+        }
+    }
+    $newWorkshopRecord = [pscustomobject]@{
+        enabled = $true
+        enabledAt = $workshopRecord.enabledAt
+        addedDomains = @($workshopRecord.addedDomains)
+        removedExclusions = $removed
+        version = 3
+    }
+    $discordRecord = Get-ProblemFixRecord "discord-media"
+    $steamRecord = Get-ProblemFixRecord "steam-web"
+    $config = Get-ProblemFixConfig
+    $savedConfig = [ordered]@{ steamHostsError = $config.steamHostsError; fixes = [ordered]@{ "discord-media" = $discordRecord; "steam-web" = $steamRecord; "steam-workshop" = $newWorkshopRecord } }
+    ($savedConfig | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ProblemFixesFile -Encoding UTF8
+}
+
+function Get-ProblemFixesPs {
+    $config = Get-ProblemFixConfig
+    return @(
+        [ordered]@{ id = "discord-media"; title = "Изображения Discord"; description = "Восстанавливает загрузку превью и вложений с media.discordapp.net."; enabled = [bool]$config.discordMedia; applied = ([bool]$config.discordMedia -and (Test-DiscordHostsFixPs)); enabledAt = $null; domains = @("discordapp.net", "media.discordapp.net", "cdn.discordapp.com", "images-ext-1.discordapp.net", "images-ext-2.discordapp.net") },
+        [ordered]@{ id = "steam-web"; title = "Сайты Steam"; description = "Восстанавливает стили и изображения с трёх проблемных CDN Steam."; enabled = [bool]$config.steamWeb; applied = ([bool]$config.steamWeb -and (Test-SteamHostsFixPs @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com"))); enabledAt = $null; domains = @("cdn.akamai.steamstatic.com", "store.akamai.steamstatic.com", "community.akamai.steamstatic.com"); systemError = $(if ($script:SteamHostsChecked) { $script:SteamHostsError } else { $config.steamHostsError }) },
+        [ordered]@{ id = "steam-workshop"; title = "Мастерская Steam"; description = "Восстанавливает страницы, превью и файлы контента Workshop с Akamai CDN."; enabled = [bool]$config.steamWorkshop; applied = ([bool]$config.steamWorkshop -and (Test-SteamHostsFixPs @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com"))); enabledAt = $null; domains = @("steamusercontent-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "images.steamusercontent.com", "shared.akamai.steamstatic.com"); systemError = $(if ($script:SteamHostsChecked) { $script:SteamHostsError } else { $config.steamHostsError }) }
+    )
+}
+
+function Get-ProblemLaunchPrefix([string]$zapretDir) {
+    $config = Get-ProblemFixConfig
+    $bin = (Join-Path $zapretDir "bin") + "\"
+    $parts = @()
+    if ($config.discordMedia) {
+        $domains = "discord.com,media.discordapp.net,cdn.discordapp.com,images-ext-1.discordapp.net,images-ext-2.discordapp.net"
+        $parts += "--filter-udp=443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-repeats=11 --dpi-desync-fake-quic=`"$($bin)quic_initial_4pda_to.bin`" --new"
+        $parts += "--filter-tcp=80,443 --hostlist-domains=$domains --dpi-desync=fake --dpi-desync-fake-tls-mod=none --dpi-desync-repeats=6 --dpi-desync-fooling=badseq,hopbyhop2 --new"
+    }
+    # Steam uses the currently selected strategy through list-general-user.txt.
+    return ($parts -join " ")
+}
+
+function Get-GitBlobSha1([byte[]]$bytes) {
+    $header = [System.Text.Encoding]::UTF8.GetBytes("blob $($bytes.Length)`0")
+    $combined = New-Object byte[] ($header.Length + $bytes.Length)
+    [System.Buffer]::BlockCopy($header, 0, $combined, 0, $header.Length)
+    [System.Buffer]::BlockCopy($bytes, 0, $combined, $header.Length, $bytes.Length)
+    $sha1 = [System.Security.Cryptography.SHA1]::Create()
+    $hash = $sha1.ComputeHash($combined)
+    return ([System.BitConverter]::ToString($hash)).Replace("-", "").ToLower()
+}
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function Get-LatestAppCommit {
+    $headers = @{ "User-Agent" = "Mozilla/5.0 ZapretControl/1.3" }
+    $branch = "arena/9383b414-zapretmaronnfix"
+    $atomResp = Invoke-WebRequest -Uri "https://github.com/flare-award/ZapretMaronnFix/commits/$branch.atom" -Headers $headers -UseBasicParsing -TimeoutSec 15
+    $xmlText = $atomResp.Content
+    $entryMatch = [regex]::Match($xmlText, "<entry>([\s\S]*?)</entry>", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $entryMatch.Success) { throw "Не удалось прочитать ленту обновлений GitHub" }
+    $entry = $entryMatch.Groups[1].Value
+    $shaMatch = [regex]::Match($entry, "Commit/([0-9a-f]{40})", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $shaMatch.Success) { $shaMatch = [regex]::Match($entry, "/commit/([0-9a-f]{40})", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase) }
+    if (-not $shaMatch.Success) { throw "Не удалось определить SHA коммита" }
+    $sha = $shaMatch.Groups[1].Value.ToLower()
+    $updMatch = [regex]::Match($entry, "<updated>([^<]+)</updated>", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $titleMatch = [regex]::Match($entry, "<title[^>]*>([\s\S]*?)</title>", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $msg = if ($titleMatch.Success) { ([System.Net.WebUtility]::HtmlDecode($titleMatch.Groups[1].Value) -replace "\s+", " ").Trim() } else { "Обновление Zapret Control" }
+    return @{
+        branch = $branch
+        sha = $sha
+        shortSha = $sha.Substring(0, 7)
+        publishedAt = if ($updMatch.Success) { $updMatch.Groups[1].Value.Trim() } else { $null }
+        message = $msg
+        htmlUrl = "https://github.com/flare-award/ZapretMaronnFix/tree/arena/9383b414-zapretmaronnfix"
+    }
+}
+
+function Download-FastFile([string]$url, [string]$outFile) {
+    $curlCmd = Get-Command "curl.exe" -ErrorAction SilentlyContinue
+    if ($null -ne $curlCmd) {
+        & $curlCmd.Source -fsSL --connect-timeout 8 -m 30 -H "User-Agent: Mozilla/5.0 ZapretControl/1.4" -o $outFile $url 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $outFile) -and (Get-Item -LiteralPath $outFile).Length -gt 200) {
+            return
+        }
+    }
+    Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -TimeoutSec 35
+}
+
+function Check-AppUpdatePs {
+    $latest = Get-LatestAppCommit
+    $zipCache = Join-Path ([System.IO.Path]::GetTempPath()) "zapret-control-pkg-$($latest.sha).zip"
+    if (-not (Test-Path -LiteralPath $zipCache)) {
+        Download-FastFile "https://codeload.github.com/flare-award/ZapretMaronnFix/zip/$($latest.sha)" $zipCache
+    }
+    $changed = 0
+    $za = [System.IO.Compression.ZipFile]::OpenRead($zipCache)
+    try {
+        foreach ($ze in $za.Entries) {
+            if ([string]::IsNullOrEmpty($ze.Name)) { continue }
+            $slashIdx = $ze.FullName.IndexOf("/")
+            if ($slashIdx -lt 0) { continue }
+            $p = $ze.FullName.Substring($slashIdx + 1)
+            if ($p -ne "ZapretControl.bat" -and (-not $p.StartsWith("app/") -or $p.StartsWith("app/data/") -or $p.StartsWith("app/node_modules/"))) { continue }
+            $localFile = Join-Path $RepoRoot ($p -replace "/", "\")
+            if (-not (Test-Path -LiteralPath $localFile)) { $changed++; continue }
+            $ms = New-Object System.IO.MemoryStream
+            $st = $ze.Open()
+            $st.CopyTo($ms)
+            $st.Close()
+            $remoteSha = Get-GitBlobSha1 ($ms.ToArray())
+            $ms.Close()
+            $raw = [System.IO.File]::ReadAllBytes($localFile)
+            if ((Get-GitBlobSha1 $raw) -eq $remoteSha) { continue }
+            $lfText = [System.Text.Encoding]::GetEncoding("ISO-8859-1").GetString($raw) -replace "`r`n", "`n"
+            if ((Get-GitBlobSha1 ([System.Text.Encoding]::GetEncoding("ISO-8859-1").GetBytes($lfText))) -eq $remoteSha) { continue }
+            $changed++
+        }
+    } finally {
+        $za.Dispose()
+    }
+    if ($changed -eq 0) {
+        (@{
+            installedSha = $latest.sha
+            installedShortSha = $latest.shortSha
+            installedBranch = $latest.branch
+            commitDate = $latest.publishedAt
+            commitMessage = $latest.message
+        } | ConvertTo-Json) | Set-Content -Path $UpdateStateFile -Encoding UTF8
+    }
+    $localState = if (Test-Path $UpdateStateFile) { Get-Content $UpdateStateFile -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
+    $repLocal = if ($changed -eq 0) { $latest.shortSha } elseif ($localState -and $localState.installedShortSha -ne $latest.shortSha) { $localState.installedShortSha } else { $null }
+    return @{
+        repo = "flare-award/ZapretMaronnFix"
+        currentShortSha = $repLocal
+        currentDate = if ($changed -eq 0) { $latest.publishedAt } elseif ($repLocal -and $localState) { $localState.commitDate } else { $null }
+        latestSha = $latest.sha
+        latestShortSha = $latest.shortSha
+        branch = $latest.branch
+        publishedAt = $latest.publishedAt
+        commitMessage = $latest.message
+        changedFilesCount = $changed
+        updateAvailable = ($changed -gt 0)
+        htmlUrl = "https://github.com/flare-award/ZapretMaronnFix/tree/arena/9383b414-zapretmaronnfix"
+        checkedAt = [DateTime]::UtcNow.ToString("o")
+    }
+}
+
+function Check-ZapretReleasePs([string]$zDir) {
+    $svcPath = Join-Path $zDir "service.bat"
+    $localVer = "Неизвестно"
+    if (Test-Path $svcPath) {
+        $rawSvc = Get-Content $svcPath -Raw -Encoding UTF8
+        if ($rawSvc -match 'LOCAL_VERSION=([^\r\n"]+)') { $localVer = $Matches[1].Trim() }
+    }
+    $headers = @{ "User-Agent" = "Mozilla/5.0 ZapretControl/1.3" }
+    $atomXml = (Invoke-WebRequest -Uri "https://github.com/Flowseal/zapret-discord-youtube/releases.atom" -Headers $headers -UseBasicParsing -TimeoutSec 15).Content
+    $em = [regex]::Match($atomXml, "<entry>([\s\S]*?)</entry>", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $em.Success) { throw "Не удалось прочитать список релизов Zapret" }
+    $block = $em.Groups[1].Value
+    $tagMatch = [regex]::Match($block, "/releases/tag/([^`"&<>?#]+)", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $tag = if ($tagMatch.Success) { [Uri]::UnescapeDataString($tagMatch.Groups[1].Value) } else { $localVer }
+    $cleanVer = $tag -replace "^v", ""
+    $updMatch = [regex]::Match($block, "<updated>([^<]+)</updated>", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $pubAt = if ($updMatch.Success) { $updMatch.Groups[1].Value.Trim() } else { $null }
+    $assetName = "zapret-discord-youtube-$cleanVer.zip"
+    $dlUrl = "https://github.com/Flowseal/zapret-discord-youtube/releases/download/$tag/$assetName"
+    try {
+        $assetsHtml = (Invoke-WebRequest -Uri "https://github.com/Flowseal/zapret-discord-youtube/releases/expanded_assets/$tag" -Headers $headers -UseBasicParsing -TimeoutSec 12).Content
+        $zm = [regex]::Match($assetsHtml, 'href="([^"]*/releases/download/[^"]+\.zip)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($zm.Success) {
+            $dlUrl = "https://github.com" + $zm.Groups[1].Value
+            $assetName = [System.IO.Path]::GetFileName($dlUrl)
+        }
+    } catch {}
+    $settingsNow = Get-AppSettings
+    $isSkipped = ([string]$settingsNow.skippedZapretVersion -eq $cleanVer)
+    return @{
+        localVersion = if ($isSkipped) { $cleanVer } else { $localVer }
+        latestVersion = $cleanVer
+        updateAvailable = (($localVer -ne $cleanVer) -and -not $isSkipped)
+        publishedAt = $pubAt
+        releaseName = "Zapret $cleanVer"
+        releaseNotes = ""
+        htmlUrl = "https://github.com/Flowseal/zapret-discord-youtube/releases"
+        downloadUrl = $dlUrl
+        assetName = $assetName
+        checkedAt = [DateTime]::UtcNow.ToString("o")
+    }
+}
+
+$initSettings = Get-AppSettings
+if (Test-Path $ResumeFlagFile) {
+    try {
+        $resumeObj = Get-Content $ResumeFlagFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        Remove-Item -LiteralPath $ResumeFlagFile -Force -ErrorAction SilentlyContinue
+        if ($resumeObj.strategy) { Start-WinwsDirect $resumeObj.strategy }
+    } catch {}
+} elseif ($initSettings.autoStartStrategyOnLaunch) {
+    try { Start-WinwsDirect $initSettings.selectedStrategy } catch {}
+}
+
+$listener = New-Object System.Net.HttpListener
+$listener.Prefixes.Add("http://127.0.0.1:$Port/")
+$listener.Start()
+
+$mimeMap = @{
+    ".html"        = "text/html; charset=utf-8"
+    ".js"          = "application/javascript; charset=utf-8"
+    ".css"         = "text/css; charset=utf-8"
+    ".json"        = "application/json; charset=utf-8"
+    ".webmanifest" = "application/manifest+json; charset=utf-8"
+    ".ico"         = "image/x-icon"
+    ".png"         = "image/png"
+    ".woff2"       = "font/woff2"
+    ".woff"        = "font/woff"
+    ".svg"         = "image/svg+xml"
+}
+
+while ($listener.IsListening) {
+    $ctx = $listener.GetContext()
+    $req = $ctx.Request
+    $res = $ctx.Response
+    $urlPath = $req.Url.AbsolutePath
+
+    try {
+        if ($urlPath.StartsWith("/api/")) {
+            $bodyObj = $null
+            if ($req.HasEntityBody) {
+                $reader = New-Object System.IO.StreamReader($req.InputStream, [System.Text.Encoding]::UTF8)
+                $rawBody = $reader.ReadToEnd()
+                if ($rawBody.Trim()) { $bodyObj = $rawBody | ConvertFrom-Json }
+            }
+
+            if ($urlPath -eq "/api/hosts" -and $req.HttpMethod -eq "GET") {
+                $hostsContent = if (Test-Path $SystemHostsFile) { [System.IO.File]::ReadAllText($SystemHostsFile) } else { "" }
+                $hBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ path = $SystemHostsFile; content = $hostsContent } | ConvertTo-Json -Depth 4))
+                $res.StatusCode = 200; $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($hBytes, 0, $hBytes.Length); $res.Close(); continue
+            }
+
+            if ($urlPath -eq "/api/hosts" -and $req.HttpMethod -eq "PUT") {
+                [System.IO.File]::WriteAllText($SystemHostsFile, [string]$bodyObj.content, (New-Object System.Text.UTF8Encoding($false)))
+                $hostsContent = [System.IO.File]::ReadAllText($SystemHostsFile)
+                $hBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ path = $SystemHostsFile; content = $hostsContent } | ConvertTo-Json -Depth 4))
+                $res.StatusCode = 200; $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($hBytes, 0, $hBytes.Length); $res.Close(); continue
+            }
+
+            if ($urlPath -eq "/api/hosts/update" -and $req.HttpMethod -eq "POST") {
+                $sourceUrl = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/hosts?t=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+                $official = (Invoke-WebRequest -Uri $sourceUrl -UseBasicParsing -TimeoutSec 15).Content.Trim() -replace "`r?`n", "`r`n"
+                $beginHosts = "# BEGIN ZAPRET OFFICIAL HOSTS"; $endHosts = "# END ZAPRET OFFICIAL HOSTS"
+                $currentHosts = if (Test-Path $SystemHostsFile) { [System.IO.File]::ReadAllText($SystemHostsFile) } else { "" }
+                $managedHosts = "$beginHosts`r`n$official`r`n$endHosts"
+                $escapedBegin = [regex]::Escape($beginHosts); $escapedEnd = [regex]::Escape($endHosts)
+                if ($currentHosts -match "$escapedBegin[\s\S]*?$escapedEnd") {
+                    $nextHosts = [regex]::Replace($currentHosts, "$escapedBegin[\s\S]*?$escapedEnd", [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $managedHosts })
+                } else { $nextHosts = $currentHosts.TrimEnd() + "`r`n`r`n$managedHosts`r`n" }
+                [System.IO.File]::WriteAllText($SystemHostsFile, $nextHosts, (New-Object System.Text.UTF8Encoding($false)))
+                $hBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ path = $SystemHostsFile; content = $nextHosts; sourceUrl = $sourceUrl } | ConvertTo-Json -Depth 4))
+                $res.StatusCode = 200; $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($hBytes, 0, $hBytes.Length); $res.Close(); continue
+            }
+
+            if ($urlPath -eq "/api/hosts/open-location" -and $req.HttpMethod -eq "POST") {
+                Start-Process "explorer.exe" -ArgumentList "/select,`"$SystemHostsFile`"" | Out-Null
+                $hBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ opened = $true; path = $SystemHostsFile } | ConvertTo-Json))
+                $res.StatusCode = 200; $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($hBytes, 0, $hBytes.Length); $res.Close(); continue
+            }
+
+            if ($urlPath -eq "/api/updates/check" -and $req.HttpMethod -eq "GET") {
+                $stCur = Get-AppSettings
+                $uInfo = Check-ZapretReleasePs $stCur.zapretDir
+                $uBytes = [System.Text.Encoding]::UTF8.GetBytes(($uInfo | ConvertTo-Json -Depth 6))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($uBytes, 0, $uBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            if ($urlPath -eq "/api/updates/download-latest") {
+                $stCur = Get-AppSettings
+                $uInfo = Check-ZapretReleasePs $stCur.zapretDir
+                if ($req.HttpMethod -eq "GET") {
+                    $res.StatusCode = 302
+                    $res.RedirectLocation = $uInfo.downloadUrl
+                    $res.Close()
+                    continue
+                }
+                Start-Process "rundll32.exe" -ArgumentList "url.dll,FileProtocolHandler $($uInfo.downloadUrl)" | Out-Null
+                $dBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ ok = $true; delegatedToOs = $true; downloadUrl = $uInfo.downloadUrl; assetName = $uInfo.assetName; updateInfo = $uInfo } | ConvertTo-Json -Depth 6))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($dBytes, 0, $dBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            if ($urlPath -eq "/api/system/shutdown" -and $req.HttpMethod -eq "POST") {
+                if ($script:SteamSpeedProcess -and -not $script:SteamSpeedProcess.HasExited) {
+                    & taskkill.exe /PID $script:SteamSpeedProcess.Id /T /F 2>&1 | Out-Null
+                }
+                Stop-WinwsDirect
+                foreach ($svc in @("zapret","GoodbyeDPI","discordfix_zapret","winws1","winws2")) { & sc.exe stop $svc 2>&1 | Out-Null }
+                & taskkill.exe /IM winws2.exe /F 2>&1 | Out-Null
+                & taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
+                & taskkill.exe /IM goodbyedpi.exe /F 2>&1 | Out-Null
+                Start-Sleep -Milliseconds 180
+                foreach ($drv in @("WinDivert","WinDivert14","WinDivert64")) { & sc.exe stop $drv 2>&1 | Out-Null; & sc.exe delete $drv 2>&1 | Out-Null }
+                $okBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ ok = $true } | ConvertTo-Json))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($okBytes, 0, $okBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            if ($urlPath -match '^/api/problems/(discord-media|steam-web|steam-workshop)$' -and $req.HttpMethod -eq "POST") {
+                $stCur = Get-AppSettings
+                $enabled = if ($null -ne $bodyObj.enabled) { [bool]$bodyObj.enabled } else { $true }
+                Set-ProblemFixPs $Matches[1] $enabled $stCur
+                if ($script:ActiveWinws -and -not $script:ActiveWinws.HasExited) {
+                    Start-WinwsDirect $script:ActiveStrategy
+                }
+            }
+
+            if ($urlPath -eq "/api/steam-speed/start" -and $req.HttpMethod -eq "POST") {
+                $existingSteam = Get-SteamSpeedState
+                if ($existingSteam.running) { throw "Тест скорости Steam уже выполняется" }
+                $stCur = Get-AppSettings
+                $script:SteamRestoreStrategy = if ($script:ActiveWinws -and -not $script:ActiveWinws.HasExited) { $script:ActiveStrategy } else { $null }
+                Stop-WinwsDirect
+                Remove-Item -LiteralPath $SteamSpeedStopFile -Force -ErrorAction SilentlyContinue
+                $strategyCount = @(Get-ChildItem -LiteralPath $stCur.zapretDir -Filter "*.bat" | Where-Object { $_.Name -ne "service.bat" }).Count
+                $initialSteam = [ordered]@{ running = $true; aborted = $false; startedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); finishedAt = $null; currentStrategy = $null; completedCount = 0; totalCount = $strategyCount; progressPct = 0; results = @(); error = $null; sourceLabel = "Официальная CDN Steam"; sampleBytesPerStrategy = 209715200 }
+                ($initialSteam | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $SteamSpeedStateFile -Encoding UTF8
+                $steamScript = Join-Path $PSScriptRoot "SteamSpeedTest.ps1"
+                $steamArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$steamScript`" -RepoRoot `"$RepoRoot`" -ZapretDir `"$($stCur.zapretDir)`""
+                $script:SteamSpeedProcess = Start-Process "powershell.exe" -ArgumentList $steamArgs -WindowStyle Hidden -PassThru
+                $speedBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ steamSpeedJob = $initialSteam } | ConvertTo-Json -Depth 8))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($speedBytes, 0, $speedBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            if ($urlPath -eq "/api/steam-speed/stop" -and $req.HttpMethod -eq "POST") {
+                New-Item -ItemType File -Force -Path $SteamSpeedStopFile | Out-Null
+                if ($script:SteamSpeedProcess -and -not $script:SteamSpeedProcess.HasExited) {
+                    & taskkill.exe /PID $script:SteamSpeedProcess.Id /T /F 2>&1 | Out-Null
+                }
+                Stop-WinwsDirect
+                $stoppedSteam = Get-SteamSpeedState
+                $stoppedSteam.running = $false
+                $stoppedSteam.aborted = $true
+                $stoppedSteam.currentStrategy = $null
+                $stoppedSteam.finishedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                ($stoppedSteam | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $SteamSpeedStateFile -Encoding UTF8
+                $speedBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ steamSpeedJob = $stoppedSteam } | ConvertTo-Json -Depth 8))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($speedBytes, 0, $speedBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            if ($urlPath -eq "/api/app-update/check" -and $req.HttpMethod -eq "GET") {
+                $chk = Check-AppUpdatePs
+                $chkBytes = [System.Text.Encoding]::UTF8.GetBytes(($chk | ConvertTo-Json -Depth 6))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($chkBytes, 0, $chkBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            if ($urlPath -eq "/api/app-update/install" -and $req.HttpMethod -eq "POST") {
+                $tmpWork = Join-Path ([System.IO.Path]::GetTempPath()) ("zapret-control-upd-" + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+                New-Item -ItemType Directory -Force -Path $tmpWork | Out-Null
+                $zipPath = Join-Path $tmpWork "update.zip"
+                $protectedList = @(
+                    "zapret/lists/list-general-user.txt",
+                    "zapret/lists/list-exclude-user.txt",
+                    "zapret/lists/ipset-exclude-user.txt",
+                    "zapret/lists/ipset-all.txt",
+                    "zapret/lists/ipset-all.txt.backup",
+                    "zapret/utils/game_filter.enabled",
+                    "zapret/utils/check_updates.enabled",
+                    "zapret/utils/targets.txt",
+                    "zapret/bin/ACTIVE_DISCORD_UDP.bin",
+                    "zapret/bin/ACTIVE_GAME_UDP.bin"
+                )
+
+                $nextStateObj = $null
+                if ($bodyObj -and $bodyObj.zipBase64) {
+                    $b64 = ([string]$bodyObj.zipBase64) -replace "^data:[^;]+;base64,", ""
+                    [System.IO.File]::WriteAllBytes($zipPath, [Convert]::FromBase64String($b64))
+                    $nextStateObj = @{
+                        installedShortSha = "zip"
+                        commitDate = [DateTime]::UtcNow.ToString("o")
+                        commitMessage = "Обновлено из ZIP-архива"
+                    }
+                } else {
+                    $latest = Get-LatestAppCommit
+                    $zipCache = Join-Path ([System.IO.Path]::GetTempPath()) "zapret-control-pkg-$($latest.sha).zip"
+                    if (Test-Path -LiteralPath $zipCache) {
+                        $zipPath = $zipCache
+                    } else {
+                        Download-FastFile "https://codeload.github.com/flare-award/ZapretMaronnFix/zip/$($latest.sha)" $zipPath
+                    }
+                    $nextStateObj = @{
+                        installedSha = $latest.sha
+                        installedShortSha = $latest.shortSha
+                        installedBranch = $latest.branch
+                        commitDate = $latest.publishedAt
+                        commitMessage = $latest.message
+                    }
+                }
+
+                if ($null -ne $script:ActiveWinws -and -not $script:ActiveWinws.HasExited -and $script:ActiveStrategy) {
+                    (@{ strategy = $script:ActiveStrategy } | ConvertTo-Json) | Set-Content -Path $ResumeFlagFile -Encoding UTF8
+                    Stop-WinwsDirect
+                }
+
+                $hostChanged = $false
+                $validRelPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                $za = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+                try {
+                    foreach ($ze in $za.Entries) {
+                        if ([string]::IsNullOrEmpty($ze.Name)) { continue }
+                        $fullEntry = $ze.FullName -replace "\\", "/"
+                        $slashIdx = $fullEntry.IndexOf("/")
+                        $relPosix = if ($slashIdx -gt 0) { $fullEntry.Substring($slashIdx + 1) } else { $fullEntry }
+                        if ([string]::IsNullOrEmpty($relPosix) -or $relPosix.Contains("..")) { continue }
+                        [void]$validRelPaths.Add($relPosix)
+
+                        if ($relPosix.StartsWith(".git/") -or $relPosix.StartsWith("app/data/") -or $relPosix.StartsWith("app/node_modules/") -or $relPosix.StartsWith("zapret/utils/test results/") -or $relPosix -eq "ZapretControl.exe") { continue }
+                        if ($relPosix -match '^zapret/custom\s*-.*\.bat$') { continue }
+                        if ($protectedList -contains $relPosix) { continue }
+
+                        $dstPath = Join-Path $RepoRoot ($relPosix -replace "/", "\")
+                        $ms = New-Object System.IO.MemoryStream
+                        $stEntry = $ze.Open()
+                        $stEntry.CopyTo($ms)
+                        $stEntry.Close()
+                        $entryBytes = $ms.ToArray()
+                        $ms.Close()
+
+                        $remoteSha = Get-GitBlobSha1 $entryBytes
+                        if (Test-Path -LiteralPath $dstPath) {
+                            $localRaw = [System.IO.File]::ReadAllBytes($dstPath)
+                            if ((Get-GitBlobSha1 $localRaw) -eq $remoteSha) { continue }
+                            $lfText = [System.Text.Encoding]::GetEncoding("ISO-8859-1").GetString($localRaw) -replace "`r`n", "`n"
+                            if ((Get-GitBlobSha1 ([System.Text.Encoding]::GetEncoding("ISO-8859-1").GetBytes($lfText))) -eq $remoteSha) { continue }
+                        }
+
+                        if ($relPosix -eq "app/host/ZapretControl.cs" -or $relPosix -eq "app/host/app.ico") {
+                            $hostChanged = $true
+                        }
+
+                        $outBytes = $entryBytes
+                        if ($relPosix.EndsWith(".cs") -or $relPosix.EndsWith(".ps1")) {
+                            $txt = [System.Text.Encoding]::UTF8.GetString($entryBytes).TrimStart([char]0xFEFF)
+                            $txt = ($txt -replace "`r`n", "`n" -replace "`r", "`n" -replace "`n", "`r`n")
+                            $utf8Body = [System.Text.Encoding]::UTF8.GetBytes($txt)
+                            $outBytes = New-Object byte[] ($utf8Body.Length + 3)
+                            $outBytes[0] = 0xEF; $outBytes[1] = 0xBB; $outBytes[2] = 0xBF
+                            [System.Buffer]::BlockCopy($utf8Body, 0, $outBytes, 3, $utf8Body.Length)
+                        }
+
+                        $parentDir = [System.IO.Path]::GetDirectoryName($dstPath)
+                        if (-not (Test-Path -LiteralPath $parentDir)) {
+                            New-Item -ItemType Directory -Force -Path $parentDir | Out-Null
+                        }
+                        try { [System.IO.File]::WriteAllBytes($dstPath, $outBytes) } catch {}
+                    }
+                } finally {
+                    $za.Dispose()
+                }
+
+                foreach ($sub in @("server","static","src","host","public")) {
+                    $absSub = Join-Path (Join-Path $RepoRoot "app") $sub
+                    if (Test-Path -LiteralPath $absSub) {
+                        Get-ChildItem -LiteralPath $absSub -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                            $relFile = $_.FullName.Substring($RepoRoot.Length).TrimStart('\','/') -replace "\\", "/"
+                            if (-not $validRelPaths.Contains($relFile)) {
+                                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                            }
+                        }
+                    }
+                }
+
+                if ($null -ne $nextStateObj) {
+                    ($nextStateObj | ConvertTo-Json) | Set-Content -Path $UpdateStateFile -Encoding UTF8
+                }
+
+                $exeLocal = Join-Path $RepoRoot "ZapretControl.exe"
+                $csLocal = Join-Path $RepoRoot "app\host\ZapretControl.cs"
+                $needRebuild = $hostChanged -or (-not (Test-Path -LiteralPath $exeLocal))
+                if (-not $needRebuild -and (Test-Path -LiteralPath $exeLocal) -and (Test-Path -LiteralPath $csLocal)) {
+                    if ((Get-Item -LiteralPath $csLocal).LastWriteTimeUtc -gt (Get-Item -LiteralPath $exeLocal).LastWriteTimeUtc.AddSeconds(1)) {
+                        $needRebuild = $true
+                    }
+                }
+
+                $lockFile = Join-Path $DataDir "host-updating.lock"
+                if ($needRebuild) {
+                    [System.IO.File]::WriteAllText($lockFile, "updating")
+                }
+
+                $applyScript = Join-Path ([System.IO.Path]::GetTempPath()) ("zapret-control-restart-" + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + ".ps1")
+                $vbsPath = Join-Path ([System.IO.Path]::GetTempPath()) ("zapret-control-launch-" + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + ".vbs")
+                $psNeedStr = if ($needRebuild) { '$true' } else { '$false' }
+                $safeRepoEsc = $RepoRoot.Replace("'", "''")
+                $safeLockEsc = $lockFile.Replace("'", "''")
+                $safeTmpEsc = $tmpWork.Replace("'", "''")
+
+                $scriptBody = @"
+`$ProgressPreference = 'SilentlyContinue'
+`$ErrorActionPreference = 'Continue'
+`$repoRoot = '$safeRepoEsc'
+`$lockFile = '$safeLockEsc'
+`$tmpWork = '$safeTmpEsc'
+`$targetPort = $Port
+`$needRebuild = $psNeedStr
+
+Start-Sleep -Milliseconds 220
+Stop-Process -Id $PID -Force -ErrorAction SilentlyContinue
+
+function Test-BackendAlive([int]`$p) {
+    try {
+        `$r = [System.Net.HttpWebRequest]::Create(('http://127.0.0.1:' + `$p + '/api/state'))
+        `$r.Timeout = 450
+        `$resp = `$r.GetResponse()
+        `$c = [int]`$resp.StatusCode
+        `$resp.Close()
+        return (`$c -eq 200)
+    } catch { return `$false }
+}
+
+if (-not `$needRebuild) {
+    `$trayAlive = @(Get-Process -Name 'ZapretControl' -ErrorAction SilentlyContinue).Count -gt 0
+    if (`$trayAlive) {
+        for (`$w = 0; `$w -lt 14; `$w++) {
+            Start-Sleep -Milliseconds 180
+            if (Test-BackendAlive `$targetPort) {
+                Remove-Item -LiteralPath `$lockFile -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath `$tmpWork -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+                exit 0
+            }
+        }
+    }
+}
+
+try { [System.IO.File]::WriteAllText(`$lockFile, 'updating') } catch {}
+try {
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        `$_.CommandLine -and (`$_.CommandLine -like '*ui-window-v2*' -or `$_.CommandLine -like '*window-profile*')
+    } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }
+} catch {}
+
+Get-Process -Name 'ZapretControl' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Wait-Process -Name 'ZapretControl' -Timeout 4 -ErrorAction SilentlyContinue
+& taskkill.exe /IM winws2.exe /F 2>&1 | Out-Null
+& taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
+
+for (`$pWait = 0; `$pWait -lt 45; `$pWait++) {
+    try {
+        `$tl = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, `$targetPort)
+        `$tl.Start(); `$tl.Stop(); break
+    } catch { Start-Sleep -Milliseconds 90 }
+}
+
+`$exePath = Join-Path `$repoRoot 'ZapretControl.exe'
+if (`$needRebuild -or -not (Test-Path -LiteralPath `$exePath)) {
+    for (`$i = 0; `$i -lt 20; `$i++) {
+        if (-not (Test-Path -LiteralPath `$exePath)) { break }
+        try { Remove-Item -LiteralPath `$exePath -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 150 }
+    }
+    `$csPath = Join-Path `$repoRoot 'app\host\ZapretControl.cs'
+    `$icoPath = Join-Path `$repoRoot 'app\host\app.ico'
+    `$csc64 = Join-Path `$env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    `$csc32 = Join-Path `$env:SystemRoot 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+    `$csc = if (Test-Path -LiteralPath `$csc64) { `$csc64 } elseif (Test-Path -LiteralPath `$csc32) { `$csc32 } else { `$null }
+    if (`$null -ne `$csc -and (Test-Path -LiteralPath `$csPath)) {
+        `$cscArgs = @('/nologo', '/target:winexe', '/optimize+', ("/out:`$exePath"), '/r:System.dll', '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll')
+        if (Test-Path -LiteralPath `$icoPath) { `$cscArgs += ("/win32icon:`$icoPath") }
+        `$cscArgs += `$csPath
+        & `$csc @cscArgs 2>&1 | Out-Null
+    }
+}
+
+Remove-Item -LiteralPath `$lockFile -Force -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath `$exePath) {
+    `$psi = New-Object System.Diagnostics.ProcessStartInfo
+    `$psi.FileName = `$exePath
+    `$psi.Arguments = '--relaunch-after-update --port=' + `$targetPort
+    `$psi.WorkingDirectory = `$repoRoot
+    `$psi.UseShellExecute = `$false
+    `$psi.CreateNoWindow = `$true
+    [System.Diagnostics.Process]::Start(`$psi) | Out-Null
+}
+Start-Sleep -Milliseconds 300
+Remove-Item -LiteralPath `$tmpWork -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+"@
+                Set-Content -Path $applyScript -Value $scriptBody -Encoding UTF8
+
+                $escapedPs = $applyScript.Replace('"', '""')
+                $vbsLines = @(
+                    'Set sh = CreateObject("WScript.Shell")',
+                    "sh.Run ""powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """"$escapedPs"""""", 0, False",
+                    'Set fso = CreateObject("Scripting.FileSystemObject")',
+                    'On Error Resume Next',
+                    'fso.DeleteFile WScript.ScriptFullName, True'
+                ) -join "`r`n"
+                [System.IO.File]::WriteAllText($vbsPath, $vbsLines, [System.Text.Encoding]::ASCII)
+
+                $psiWsh = New-Object System.Diagnostics.ProcessStartInfo
+                $psiWsh.FileName = "wscript.exe"
+                $psiWsh.Arguments = "//B //NoLogo `"$vbsPath`""
+                $psiWsh.UseShellExecute = $true
+                $psiWsh.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+                [System.Diagnostics.Process]::Start($psiWsh) | Out-Null
+
+                $okBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ ok = $true; restarting = $true; message = "Обновление установлено, выполняется перезапуск..." } | ConvertTo-Json))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($okBytes, 0, $okBytes.Length)
+                $res.Close()
+                try { $listener.Stop(); $listener.Close() } catch {}
+                break
+            }
+
+            if ($urlPath -eq "/api/system/open-url" -and $req.HttpMethod -eq "POST") {
+                $u = [string]$bodyObj.url
+                if ($u -match "^https?://") {
+                    Start-Process "rundll32.exe" -ArgumentList "url.dll,FileProtocolHandler $u" | Out-Null
+                }
+                $okBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ opened = $true } | ConvertTo-Json))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($okBytes, 0, $okBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            if ($urlPath -eq "/api/runner/start" -and $req.HttpMethod -eq "POST") {
+                if ((Get-SteamSpeedState).running) { throw "Сначала остановите тест скорости Steam" }
+                Start-WinwsDirect $bodyObj.strategy
+            } elseif ($urlPath -eq "/api/runner/stop" -and $req.HttpMethod -eq "POST") {
+                Stop-WinwsDirect
+            } elseif ($urlPath -eq "/api/settings" -and $req.HttpMethod -eq "POST") {
+                Save-AppSettings $bodyObj | Out-Null
+            } elseif ($urlPath -eq "/api/profiles/activate" -and $req.HttpMethod -eq "POST") {
+                $stCur = Get-AppSettings
+                $profs = Get-ProfilesList $stCur
+                $targetProf = $profs | Where-Object { $_.id -eq $bodyObj.id } | Select-Object -First 1
+                if ($targetProf) {
+                    Write-GameFilter $stCur.zapretDir $targetProf.gameFilterMode $targetProf.gameFilterTcp $targetProf.gameFilterUdp
+                    Save-AppSettings ([pscustomobject]@{
+                        activeProfileId = $targetProf.id
+                        selectedStrategy = $targetProf.strategy
+                    }) | Out-Null
+                    if ($bodyObj.startNow -or ($null -ne $script:ActiveWinws -and -not $script:ActiveWinws.HasExited)) {
+                        Start-WinwsDirect $targetProf.strategy
+                    }
+                }
+            }
+
+            $steamState = Get-SteamSpeedState
+            if (-not $steamState.running -and $script:SteamRestoreStrategy) {
+                $restoreName = $script:SteamRestoreStrategy
+                $script:SteamRestoreStrategy = $null
+                try { Start-WinwsDirect $restoreName } catch {}
+            }
+            $st = Get-AppSettings
+            $zDir = $st.zapretDir
+            $svcFile = Join-Path $zDir "service.bat"
+            $ver = "unknown"
+            if (Test-Path $svcFile) {
+                $svcRaw = Get-Content $svcFile -Raw -Encoding UTF8
+                if ($svcRaw -match 'LOCAL_VERSION=([^\r\n"]+)') { $ver = $Matches[1].Trim() }
+            }
+            $strats = @()
+            if (Test-Path $zDir) {
+                Get-ChildItem -Path $zDir -Filter "*.bat" | Where-Object { $_.Name -ne "service.bat" } | Sort-Object Name | ForEach-Object {
+                    $strats += @{
+                        fileName = $_.Name
+                        displayName = ($_.BaseName)
+                        isCustom = ($_.Name -match '^custom\s*-')
+                        sizeBytes = $_.Length
+                        modifiedAt = $_.LastWriteTimeUtc.ToString("o")
+                        engineSummary = "Стратегия Zapret"
+                        usesGameFilter = $true
+                        usesIpset = $true
+                        commandPreview = (Get-Content $_.FullName -Raw -Encoding UTF8)
+                    }
+                }
+            }
+
+            $profilesArr = @(Get-ProfilesList $st)
+            $runningNow = ($null -ne $script:ActiveWinws -and -not $script:ActiveWinws.HasExited)
+            $statePayload = @{
+                platform = @{ os = "win32"; arch = "x64" }
+                settings = $st
+                profiles = $profilesArr
+                activeProfileId = $st.activeProfileId
+                runtime = @{
+                    running = $runningNow
+                    activeStrategy = if ($runningNow) { $script:ActiveStrategy } else { $null }
+                    startedAt = if ($runningNow) { $script:StartedAtMs } else { $null }
+                    pid = if ($runningNow) { $script:ActiveWinws.Id } else { $null }
+                    appliedGameFilter = (Read-GameFilter $zDir).mode
+                    appliedIpsetMode = "none"
+                    expandedCommand = $null
+                    modeNote = $null
+                }
+                zapretInfo = @{
+                    valid = (Test-Path $svcFile)
+                    hasWinwsBinary = ((Test-Path (Join-Path $zDir "bin\winws.exe")) -or (Test-Path (Join-Path $zDir "bin\winws2.exe")))
+                    localVersion = $ver
+                    zapretPath = $zDir
+                    lastModified = $null
+                    strategyCount = $strats.Count
+                    binCount = @(Get-ChildItem -Path (Join-Path $zDir "bin") -Filter "*.bin" -ErrorAction SilentlyContinue).Count
+                    links = @{
+                        upstreamRepo = "https://github.com/Flowseal/zapret-discord-youtube"
+                        latestRelease = "https://github.com/Flowseal/zapret-discord-youtube/releases"
+                        coreRepo = "https://github.com/bol-van/zapret"
+                        userRepo = "https://github.com/flare-award/ZapretMaronnFix/tree/arena/9383b414-zapretmaronnfix"
+                    }
+                }
+                strategies = $strats
+                filters = @{
+                    gameFilter = (Read-GameFilter $zDir)
+                    ipsetFilter = @{ mode = "none"; entriesCount = 0; hasBackup = $true; backupEntriesCount = 0 }
+                    activeFakes = @{ discordCurrent = $null; gameCurrent = $null; availableBins = @() }
+                }
+                listsMeta = @()
+                testHistory = @()
+                latestTestRun = $null
+                problemFixes = @(Get-ProblemFixesPs)
+                steamSpeedJob = $steamState
+                steamSpeedHistory = @(Get-SteamSpeedHistory)
+                appUpdateState = if (Test-Path $UpdateStateFile) { try { Get-Content $UpdateStateFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $null } } else { $null }
+                serverBootId = $ServerBootId
+                zapretFingerprint = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString())
+                testJob = @{ running = $false; aborted = $false; completedCount = 0; totalCount = 0; progressPct = 0; results = @() }
+            }
+
+            $jsonBytes = [System.Text.Encoding]::UTF8.GetBytes(($statePayload | ConvertTo-Json -Depth 8))
+            $res.StatusCode = 200
+            $res.ContentType = "application/json; charset=utf-8"
+            $res.OutputStream.Write($jsonBytes, 0, $jsonBytes.Length)
+            $res.Close()
+            continue
+        }
+
+        $rel = if ($urlPath -eq "/") { "index.html" } else { $urlPath.TrimStart("/") }
+        $filePath = Join-Path $StaticDir $rel
+        if (-not (Test-Path $filePath -PathType Leaf)) {
+            $filePath = Join-Path $StaticDir "index.html"
+        }
+        $ext = [System.IO.Path]::GetExtension($filePath).ToLower()
+        $res.ContentType = if ($mimeMap.ContainsKey($ext)) { $mimeMap[$ext] } else { "application/octet-stream" }
+        if ($urlPath.StartsWith("/assets/")) {
+            $res.AddHeader("Cache-Control", "public, max-age=31536000, immutable")
+        } else {
+            $res.AddHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        }
+        $bytes = [System.IO.File]::ReadAllBytes($filePath)
+        $res.StatusCode = 200
+        $res.OutputStream.Write($bytes, 0, $bytes.Length)
+        $res.Close()
+    } catch {
+        $errBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ error = $_.Exception.Message } | ConvertTo-Json))
+        $res.StatusCode = 400
+        $res.ContentType = "application/json; charset=utf-8"
+        $res.OutputStream.Write($errBytes, 0, $errBytes.Length)
+        $res.Close()
+    }
+}

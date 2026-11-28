@@ -1,0 +1,995 @@
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import {
+  APP_DIR,
+  loadSettings,
+  saveSettings,
+  readZapretInfo,
+  readStrategies,
+  readGameFilter,
+  writeGameFilter,
+  readIpsetFilter,
+  switchIpsetFilter,
+  readActiveFakes,
+  replaceActiveFake,
+  readListsMeta,
+  readListContent,
+  saveListContent,
+  smartAddEntriesToList,
+  cleanAllDomainLists,
+  backupUserLists,
+  restoreUserLists,
+  readTestHistory,
+  parseTestResultContent,
+  readTargetCategories,
+  checkZapretUpdates,
+  updateRemoteIpsetList,
+  checkRemoteHostsDiff,
+  runDiagnostics,
+  diagnoseSite,
+  exportFullConfig,
+  importFullConfig,
+  getStrategyBuilderSource,
+  saveCustomStrategy,
+  deleteCustomStrategy,
+  readProfiles,
+  syncCurrentStateToActiveProfile,
+  activateProfile,
+  createProfile,
+  updateProfile,
+  deleteProfile,
+  computeZapretDirectoryFingerprint,
+  applyEnabledProblemFixes,
+  readProblemFixesState,
+  setProblemFixEnabled,
+} from './zapretAdapter.mjs';
+import {
+  setRuntimeChangeListener,
+  getRuntimeState,
+  getTestJobState,
+  startStrategyProcess,
+  stopStrategyProcess,
+  shutdownBypassServicesAndDriver,
+  restartIfRunning,
+  applyWindowsStartupSetting,
+  fixWinDivertConflictsOnWindows,
+  enableTcpTimestampsAction,
+  clearDiscordCacheOnWindows,
+  runQuickLiveProbe,
+  startTestSuite,
+  stopTestSuite,
+} from './runnerAndTester.mjs';
+import {
+  setSteamSpeedChangeListener,
+  getSteamSpeedJobState,
+  readSteamSpeedHistory,
+  startSteamSpeedTest,
+  stopSteamSpeedTest,
+} from './steamSpeedTester.mjs';
+import {
+  readLocalAppUpdateState,
+  checkProgramUpdate,
+  installProgramUpdate,
+  consumeResumeAfterUpdateFlag,
+} from './appUpdater.mjs';
+
+const STATIC_DIR = path.join(APP_DIR, 'static');
+const PORT = Number(process.env.PORT || 3847);
+const HOST = process.env.HOST || '0.0.0.0';
+const SERVER_BOOT_ID = crypto.randomUUID();
+
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.ttf': 'font/ttf',
+};
+
+const sseClients = new Set();
+let lastZapretFingerprint = '';
+let fsWatchers = [];
+let watchedRootPath = '';
+let watchDebounceTimer = null;
+
+function sendJson(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+  });
+  res.end(body);
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => {
+      raw += chunk;
+      if (raw.length > 64 * 1024 * 1024) {
+        reject(new Error('Превышен допустимый размер тела запроса'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      if (!raw.trim()) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(new Error('Некорректный JSON в запросе'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function buildFullState() {
+  const settings = loadSettings();
+  const zapretDir = settings.zapretDir;
+  const zapretInfo = readZapretInfo(zapretDir);
+  const strategies = zapretInfo.valid ? readStrategies(zapretDir) : [];
+  const gameFilter = zapretInfo.valid
+    ? readGameFilter(zapretDir)
+    : { mode: 'disabled', tcpRange: '1024-65535', udpRange: '1024-65535' };
+  const ipsetFilter = zapretInfo.valid
+    ? readIpsetFilter(zapretDir)
+    : { mode: 'none', entriesCount: 0, hasBackup: false, backupEntriesCount: 0 };
+  const activeFakes = zapretInfo.valid
+    ? readActiveFakes(zapretDir)
+    : { discordCurrent: null, gameCurrent: null, availableBins: [] };
+  const listsMeta = zapretInfo.valid ? readListsMeta(zapretDir) : [];
+  const targetCategories = zapretInfo.valid ? readTargetCategories(zapretDir) : [];
+  const { history: testHistory, latestRun } = zapretInfo.valid
+    ? readTestHistory(zapretDir)
+    : { history: [], latestRun: null };
+  const profilesData = zapretInfo.valid
+    ? readProfiles(zapretDir)
+    : { profiles: [], activeProfileId: 'default' };
+  const testJob = getTestJobState();
+
+  // In non-Windows preview mode where tests aren't written to disk, expose in-memory results
+  const effectiveLatestRun =
+    testJob.results && testJob.results.length > 0 && !testJob.savedFileName
+      ? {
+          fileName: 'Текущая сессия тестирования',
+          timestamp: new Date(testJob.finishedAt || testJob.startedAt || Date.now()).toISOString(),
+          strategies: testJob.results,
+        }
+      : latestRun;
+
+  return {
+    platform: {
+      os: os.platform(),
+      arch: os.arch(),
+    },
+    settings,
+    runtime: getRuntimeState(),
+    zapretInfo,
+    strategies,
+    profiles: profilesData.profiles,
+    activeProfileId: profilesData.activeProfileId,
+    filters: {
+      gameFilter,
+      ipsetFilter,
+      activeFakes,
+    },
+    listsMeta,
+    targetCategories,
+    testHistory,
+    latestTestRun: effectiveLatestRun,
+    testJob,
+    problemFixes: readProblemFixesState(zapretDir),
+    steamSpeedJob: getSteamSpeedJobState(),
+    steamSpeedHistory: readSteamSpeedHistory(),
+    appUpdateState: readLocalAppUpdateState(),
+    serverBootId: SERVER_BOOT_ID,
+    zapretFingerprint: lastZapretFingerprint || computeZapretDirectoryFingerprint(zapretDir),
+  };
+}
+
+function broadcastStateChange() {
+  if (sseClients.size === 0) return;
+  try {
+    const payload = JSON.stringify(buildFullState());
+    for (const client of sseClients) {
+      try {
+        client.write(`event: state\ndata: ${payload}\n\n`);
+      } catch {
+        sseClients.delete(client);
+      }
+    }
+  } catch {
+    // ignore transient read error while files are being copied
+  }
+}
+
+function checkZapretFingerprintAndBroadcast() {
+  try {
+    const settings = loadSettings();
+    const fp = computeZapretDirectoryFingerprint(settings.zapretDir);
+    if (fp !== lastZapretFingerprint) {
+      lastZapretFingerprint = fp;
+      broadcastStateChange();
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function setupZapretWatchers(zapretDir) {
+  if (watchedRootPath === zapretDir && fsWatchers.length > 0) return;
+  for (const w of fsWatchers) {
+    try {
+      w.close();
+    } catch {
+      // ignore
+    }
+  }
+  fsWatchers = [];
+  watchedRootPath = zapretDir;
+  if (!fs.existsSync(zapretDir)) return;
+
+  const dirs = [
+    zapretDir,
+    path.join(zapretDir, 'lists'),
+    path.join(zapretDir, 'bin'),
+    path.join(zapretDir, 'utils'),
+    path.join(zapretDir, 'utils', 'test results'),
+  ];
+
+  const onFsEvent = () => {
+    if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
+    watchDebounceTimer = setTimeout(() => {
+      checkZapretFingerprintAndBroadcast();
+    }, 250);
+  };
+
+  for (const d of dirs) {
+    if (!fs.existsSync(d)) continue;
+    try {
+      const watcher = fs.watch(d, onFsEvent);
+      watcher.on('error', () => {});
+      fsWatchers.push(watcher);
+    } catch {
+      // ignore if OS watch limit hit; periodic fingerprint check still catches changes
+    }
+  }
+}
+
+async function handleApi(req, res, pathname, urlObj) {
+  const method = req.method || 'GET';
+
+  if (method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    });
+    res.end();
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/events') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.write(': connected\n\n');
+    sseClients.add(res);
+    req.on('close', () => {
+      sseClients.delete(res);
+    });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/state') {
+    sendJson(res, 200, buildFullState());
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/runner/start') {
+    if (getSteamSpeedJobState().running) {
+      throw new Error('Сначала остановите тест скорости Steam');
+    }
+    const body = await readJsonBody(req);
+    await startStrategyProcess(body.strategy);
+    if (body.strategy) {
+      const s = loadSettings();
+      syncCurrentStateToActiveProfile(s.zapretDir);
+    }
+    broadcastStateChange();
+    sendJson(res, 200, buildFullState());
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/runner/stop') {
+    await stopStrategyProcess();
+    broadcastStateChange();
+    sendJson(res, 200, buildFullState());
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/runner/restart') {
+    await restartIfRunning();
+    broadcastStateChange();
+    sendJson(res, 200, buildFullState());
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/settings') {
+    if (getSteamSpeedJobState().running) {
+      throw new Error('Настройки нельзя менять во время теста скорости Steam');
+    }
+    const body = await readJsonBody(req);
+    const prev = loadSettings();
+    const updated = saveSettings(body);
+    if (body.zapretDir && body.zapretDir !== prev.zapretDir) {
+      setupZapretWatchers(updated.zapretDir);
+    }
+    if (body.selectedStrategy && body.selectedStrategy !== prev.selectedStrategy) {
+      syncCurrentStateToActiveProfile(updated.zapretDir);
+      if (updated.autoRestartOnFilterChange) {
+        await restartIfRunning();
+      }
+    }
+    if (body.launchOnWindowsStartup !== undefined || body.startMinimizedToTray !== undefined) {
+      if (
+        prev.launchOnWindowsStartup !== updated.launchOnWindowsStartup ||
+        prev.startMinimizedToTray !== updated.startMinimizedToTray
+      ) {
+        await applyWindowsStartupSetting(updated.launchOnWindowsStartup, updated.startMinimizedToTray);
+      }
+    }
+    broadcastStateChange();
+    sendJson(res, 200, buildFullState());
+    return;
+  }
+
+  // Profiles API
+  if (method === 'POST' && pathname === '/api/profiles/activate') {
+    if (getSteamSpeedJobState().running) {
+      throw new Error('Профиль нельзя переключить во время теста скорости Steam');
+    }
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    activateProfile(settings.zapretDir, String(body.id || ''));
+    const nextSettings = loadSettings();
+    if (body.startNow) {
+      await startStrategyProcess(nextSettings.selectedStrategy);
+    } else if (nextSettings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(nextSettings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, buildFullState());
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/profiles') {
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    createProfile(settings.zapretDir, body);
+    if (body.activateNow && settings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, buildFullState());
+    return;
+  }
+
+  const profileMatch = pathname.match(/^\/api\/profiles\/([a-z0-9-]+)$/i);
+  if (profileMatch) {
+    if (getSteamSpeedJobState().running) {
+      throw new Error('Профили нельзя менять во время теста скорости Steam');
+    }
+    const profileId = profileMatch[1];
+    const settings = loadSettings();
+    if (method === 'PUT') {
+      const body = await readJsonBody(req);
+      updateProfile(settings.zapretDir, profileId, body);
+      if (settings.activeProfileId === profileId && settings.autoRestartOnFilterChange) {
+        await restartIfRunning();
+      }
+      lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+      broadcastStateChange();
+      sendJson(res, 200, buildFullState());
+      return;
+    }
+    if (method === 'DELETE') {
+      const wasActive = settings.activeProfileId === profileId;
+      deleteProfile(settings.zapretDir, profileId);
+      if (wasActive && settings.autoRestartOnFilterChange) {
+        await restartIfRunning();
+      }
+      lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+      broadcastStateChange();
+      sendJson(res, 200, buildFullState());
+      return;
+    }
+  }
+
+  const problemFixMatch = pathname.match(/^\/api\/problems\/(discord-media|steam-web|steam-workshop)$/);
+  if (method === 'POST' && problemFixMatch) {
+    if (getSteamSpeedJobState().running || getTestJobState().running) {
+      throw new Error('Сначала остановите активное тестирование');
+    }
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    const problemFixes = setProblemFixEnabled(
+      settings.zapretDir,
+      problemFixMatch[1],
+      body.enabled !== false
+    );
+    if (getRuntimeState().running) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { problemFixes, state: buildFullState() });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/filters/game') {
+    if (getSteamSpeedJobState().running) throw new Error('Сначала остановите тест скорости Steam');
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    writeGameFilter(settings.zapretDir, body);
+    syncCurrentStateToActiveProfile(settings.zapretDir);
+    if (settings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, buildFullState());
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/filters/ipset') {
+    if (getSteamSpeedJobState().running) throw new Error('Сначала остановите тест скорости Steam');
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    switchIpsetFilter(settings.zapretDir, body.mode);
+    syncCurrentStateToActiveProfile(settings.zapretDir);
+    if (settings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, buildFullState());
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/filters/ipset-update') {
+    const settings = loadSettings();
+    const result = await updateRemoteIpsetList(settings.zapretDir);
+    syncCurrentStateToActiveProfile(settings.zapretDir);
+    if (settings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { ...result, state: buildFullState() });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/filters/fakes') {
+    if (getSteamSpeedJobState().running) throw new Error('Сначала остановите тест скорости Steam');
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    replaceActiveFake(settings.zapretDir, body.target, body.binFileName);
+    syncCurrentStateToActiveProfile(settings.zapretDir);
+    if (settings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, buildFullState());
+    return;
+  }
+
+  const listSmartAddMatch = pathname.match(/^\/api\/lists\/([a-z0-9-]+)\/add-smart$/i);
+  if (method === 'POST' && listSmartAddMatch) {
+    const listId = listSmartAddMatch[1];
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    const resAdd = smartAddEntriesToList(settings.zapretDir, listId, String(body.input ?? ''));
+    if (resAdd.added.length > 0 && settings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { ...resAdd, state: buildFullState() });
+    return;
+  }
+
+  const listMatch = pathname.match(/^\/api\/lists\/([a-z0-9-]+)$/i);
+  if (listMatch) {
+    const listId = listMatch[1];
+    const settings = loadSettings();
+    if (method === 'GET') {
+      sendJson(res, 200, readListContent(settings.zapretDir, listId));
+      return;
+    }
+    if (method === 'PUT') {
+      const body = await readJsonBody(req);
+      const saved = saveListContent(settings.zapretDir, listId, String(body.content ?? ''), {
+        autoClean: Boolean(body.autoClean),
+      });
+      if (settings.autoRestartOnFilterChange) {
+        await restartIfRunning();
+      }
+      lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+      broadcastStateChange();
+      sendJson(res, 200, { list: saved, state: buildFullState() });
+      return;
+    }
+  }
+
+  if (method === 'POST' && pathname === '/api/backups/save') {
+    const settings = loadSettings();
+    const result = backupUserLists(settings.zapretDir);
+    sendJson(res, 200, { ...result, state: buildFullState() });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/backups/restore') {
+    const settings = loadSettings();
+    const result = restoreUserLists(settings.zapretDir);
+    if (settings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { ...result, state: buildFullState() });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/updates/check') {
+    const settings = loadSettings();
+    const updateInfo = await checkZapretUpdates(settings.zapretDir);
+    sendJson(res, 200, updateInfo);
+    return;
+  }
+
+  if (pathname === '/api/updates/download-latest') {
+    const settings = loadSettings();
+    const updateInfo = await checkZapretUpdates(settings.zapretDir);
+    const zipUrl = updateInfo.downloadUrl;
+    if (method === 'GET' || method === 'HEAD') {
+      res.writeHead(302, {
+        Location: zipUrl,
+        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      });
+      res.end();
+      return;
+    }
+    if (method === 'POST') {
+      const delegated = os.platform() === 'win32';
+      if (delegated) {
+        execFile('rundll32.exe', ['url.dll,FileProtocolHandler', zipUrl], () => {});
+      }
+      sendJson(res, 200, {
+        ok: true,
+        delegatedToOs: delegated,
+        downloadUrl: zipUrl,
+        assetName: updateInfo.assetName,
+        updateInfo,
+      });
+      return;
+    }
+  }
+
+  if (method === 'POST' && pathname === '/api/system/shutdown') {
+    stopSteamSpeedTest();
+    await shutdownBypassServicesAndDriver();
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/app-update/check') {
+    const appUpdate = await checkProgramUpdate();
+    sendJson(res, 200, appUpdate);
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/app-update/install') {
+    const body = await readJsonBody(req);
+    const runtime = getRuntimeState();
+    const result = await installProgramUpdate({
+      zipBase64: body.zipBase64 || null,
+      activeRunningStrategy: runtime.running ? runtime.activeStrategy : null,
+      targetPort: PORT,
+      onBeforeApply: async () => {
+        if (runtime.running) {
+          await stopStrategyProcess();
+        }
+      },
+    });
+    sendJson(res, 200, result);
+    if (result.restarting) {
+      setTimeout(() => {
+        for (const client of sseClients) {
+          try {
+            client.end();
+            client.socket?.destroy();
+          } catch {
+            // ignore
+          }
+        }
+        sseClients.clear();
+        try {
+          if (typeof server.closeAllConnections === 'function') {
+            server.closeAllConnections();
+          }
+          server.close();
+        } catch {
+          // ignore
+        }
+        process.exit(0);
+      }, 160);
+    }
+    return;
+  }
+
+  const histMatch = pathname.match(/^\/api\/tests\/history\/(.+)$/);
+  if (method === 'GET' && histMatch) {
+    const settings = loadSettings();
+    const fileName = path.basename(decodeURIComponent(histMatch[1]));
+    const fullPath = path.join(settings.zapretDir, 'utils', 'test results', fileName);
+    if (!fs.existsSync(fullPath)) {
+      sendJson(res, 404, { error: 'Файл отчёта не найден' });
+      return;
+    }
+    const content = fs.readFileSync(fullPath, 'utf8');
+    sendJson(res, 200, parseTestResultContent(fileName, content, settings.zapretDir));
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/tests/start') {
+    if (getSteamSpeedJobState().running) {
+      throw new Error('Сначала остановите тест скорости Steam');
+    }
+    const body = await readJsonBody(req);
+    const job = await startTestSuite(body);
+    sendJson(res, 200, { testJob: job });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/tests/stop') {
+    const job = stopTestSuite();
+    sendJson(res, 200, { testJob: job });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/steam-speed/start') {
+    if (getTestJobState().running) {
+      throw new Error('Сначала остановите обычное тестирование стратегий');
+    }
+    const body = await readJsonBody(req);
+    const job = await startSteamSpeedTest(body);
+    sendJson(res, 200, { steamSpeedJob: job });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/steam-speed/stop') {
+    const job = stopSteamSpeedTest();
+    sendJson(res, 200, { steamSpeedJob: job });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/tests/job') {
+    sendJson(res, 200, { testJob: getTestJobState() });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/probe/quick') {
+    const probe = await runQuickLiveProbe();
+    sendJson(res, 200, probe);
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/tools/check-site') {
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    const report = await diagnoseSite(settings.zapretDir, String(body.input || ''));
+    sendJson(res, 200, report);
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/config/export') {
+    const settings = loadSettings();
+    const bundle = exportFullConfig(settings.zapretDir);
+    sendJson(res, 200, bundle);
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/config/import') {
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    const summary = importFullConfig(settings.zapretDir, body);
+    const updatedSettings = loadSettings();
+    await applyWindowsStartupSetting(
+      updatedSettings.launchOnWindowsStartup,
+      updatedSettings.startMinimizedToTray
+    );
+    if (updatedSettings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(updatedSettings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { ...summary, state: buildFullState() });
+    return;
+  }
+
+  if (pathname === '/api/strategies/custom-source' && method === 'GET') {
+    const settings = loadSettings();
+    const file = urlObj.searchParams.get('file') || '';
+    const src = getStrategyBuilderSource(settings.zapretDir, file);
+    sendJson(res, 200, src);
+    return;
+  }
+
+  if (pathname === '/api/strategies/custom' && method === 'POST') {
+    const body = await readJsonBody(req);
+    const settings = loadSettings();
+    const saved = saveCustomStrategy(settings.zapretDir, body);
+    const rt = getRuntimeState();
+    if (
+      settings.autoRestartOnFilterChange &&
+      rt.running &&
+      (rt.activeStrategy === saved.fileName ||
+        rt.activeStrategy === body.previousFileName ||
+        body.selectAfterSave)
+    ) {
+      await startStrategyProcess(saved.fileName);
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { fileName: saved.fileName, state: buildFullState() });
+    return;
+  }
+
+  if (pathname === '/api/strategies/custom' && method === 'DELETE') {
+    const settings = loadSettings();
+    const file = urlObj.searchParams.get('file') || '';
+    const rt = getRuntimeState();
+    const wasRunningDeleted = rt.running && rt.activeStrategy === path.basename(file);
+    const del = deleteCustomStrategy(settings.zapretDir, file);
+    if (wasRunningDeleted) {
+      await startStrategyProcess(del.fallbackStrategy);
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { ...del, state: buildFullState() });
+    return;
+  }
+
+  if (pathname === '/api/hosts' && method === 'GET') {
+    const hostsPath = os.platform() === 'win32'
+      ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts')
+      : '/etc/hosts';
+    const content = fs.existsSync(hostsPath) ? fs.readFileSync(hostsPath, 'utf8') : '';
+    sendJson(res, 200, { path: hostsPath, content });
+    return;
+  }
+
+  if (pathname === '/api/hosts' && method === 'PUT') {
+    if (os.platform() !== 'win32') {
+      sendJson(res, 400, { error: 'Системный hosts изменяется только в Windows' });
+      return;
+    }
+    const body = await readJsonBody(req);
+    const hostsPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts');
+    fs.writeFileSync(hostsPath, String(body.content ?? ''), 'utf8');
+    sendJson(res, 200, { path: hostsPath, content: fs.readFileSync(hostsPath, 'utf8') });
+    return;
+  }
+
+  if (pathname === '/api/hosts/update' && method === 'POST') {
+    if (os.platform() !== 'win32') {
+      sendJson(res, 400, { error: 'Обновление системного hosts доступно только в Windows' });
+      return;
+    }
+    const sourceUrl = 'https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/hosts';
+    const response = await fetch(`${sourceUrl}?t=${Date.now()}`, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new Error(`Не удалось загрузить официальный hosts (${response.status})`);
+    const official = (await response.text()).trim();
+    const hostsPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts');
+    const begin = '# BEGIN ZAPRET OFFICIAL HOSTS';
+    const end = '# END ZAPRET OFFICIAL HOSTS';
+    const current = fs.existsSync(hostsPath) ? fs.readFileSync(hostsPath, 'utf8') : '';
+    const managed = `${begin}\r\n${official.replace(/\r?\n/g, '\r\n')}\r\n${end}`;
+    const blockPattern = new RegExp(`${begin}[\\s\\S]*?${end}`, 'g');
+    const content = blockPattern.test(current)
+      ? current.replace(blockPattern, managed)
+      : `${current.trimEnd()}\r\n\r\n${managed}\r\n`;
+    fs.writeFileSync(hostsPath, content, 'utf8');
+    sendJson(res, 200, { path: hostsPath, content, sourceUrl });
+    return;
+  }
+
+  if (pathname === '/api/hosts/open-location' && method === 'POST') {
+    const hostsPath = os.platform() === 'win32'
+      ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts')
+      : '/etc/hosts';
+    if (os.platform() === 'win32') execFile('explorer.exe', [`/select,${hostsPath}`], () => {});
+    sendJson(res, 200, { opened: os.platform() === 'win32', path: hostsPath });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/diagnostics') {
+    const settings = loadSettings();
+    const diag = await runDiagnostics(settings.zapretDir);
+    sendJson(res, 200, diag);
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/diagnostics/fix-windivert') {
+    const resFix = await fixWinDivertConflictsOnWindows();
+    sendJson(res, 200, resFix);
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/diagnostics/clean-lists') {
+    const settings = loadSettings();
+    const resClean = cleanAllDomainLists(settings.zapretDir);
+    if (settings.autoRestartOnFilterChange) {
+      await restartIfRunning();
+    }
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    broadcastStateChange();
+    sendJson(res, 200, { ...resClean, state: buildFullState() });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/diagnostics/enable-timestamps') {
+    const resTs = await enableTcpTimestampsAction();
+    sendJson(res, 200, resTs);
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/diagnostics/clear-discord-cache') {
+    const resClear = await clearDiscordCacheOnWindows();
+    sendJson(res, 200, resClear);
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/diagnostics/check-hosts') {
+    const hostsReport = await checkRemoteHostsDiff();
+    sendJson(res, 200, hostsReport);
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/system/open-folder') {
+    const settings = loadSettings();
+    if (os.platform() === 'win32') {
+      execFile('explorer.exe', [settings.zapretDir], () => {});
+      sendJson(res, 200, { opened: true, path: settings.zapretDir });
+    } else {
+      sendJson(res, 200, { opened: false, path: settings.zapretDir, note: `Путь к папке: ${settings.zapretDir}` });
+    }
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/system/open-url') {
+    const body = await readJsonBody(req);
+    const targetUrl = String(body.url || '').trim();
+    if (!/^https?:\/\/[^\s"<>]+$/i.test(targetUrl)) {
+      sendJson(res, 400, { error: 'Некорректный адрес ссылки' });
+      return;
+    }
+    if (os.platform() === 'win32') {
+      // Open strictly in user's default OS browser instead of the msedge --app container
+      execFile('rundll32.exe', ['url.dll,FileProtocolHandler', targetUrl], () => {});
+      sendJson(res, 200, { opened: true, delegatedToOs: true });
+    } else {
+      sendJson(res, 200, { opened: false, delegatedToOs: false });
+    }
+    return;
+  }
+
+  sendJson(res, 404, { error: `Неизвестный метод API: ${method} ${pathname}` });
+}
+
+function serveStatic(req, res, pathname) {
+  let targetPath = pathname === '/' ? path.join(STATIC_DIR, 'index.html') : path.join(STATIC_DIR, pathname);
+  if (!path.resolve(targetPath).startsWith(path.resolve(STATIC_DIR))) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
+  if (!fs.existsSync(targetPath) || fs.statSync(targetPath).isDirectory()) {
+    targetPath = path.join(STATIC_DIR, 'index.html');
+  }
+  if (!fs.existsSync(targetPath)) {
+    res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Static UI bundle not built yet.');
+    return;
+  }
+
+  const ext = path.extname(targetPath).toLowerCase();
+  const mime = MIME_TYPES[ext] || 'application/octet-stream';
+  const isAsset = pathname.startsWith('/assets/');
+  res.writeHead(200, {
+    'Content-Type': mime,
+    'Cache-Control': isAsset
+      ? 'public, max-age=31536000, immutable'
+      : 'no-store, no-cache, must-revalidate, max-age=0',
+    ...(isAsset ? {} : { Pragma: 'no-cache', Expires: '0' }),
+  });
+  fs.createReadStream(targetPath).pipe(res);
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const urlObj = new URL(req.url || '/', 'http://localhost');
+    const pathname = urlObj.pathname;
+    if (pathname.startsWith('/api/')) {
+      await handleApi(req, res, pathname, urlObj);
+      return;
+    }
+    serveStatic(req, res, pathname);
+  } catch (err) {
+    sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+setRuntimeChangeListener(broadcastStateChange);
+setSteamSpeedChangeListener(broadcastStateChange);
+
+server.listen(PORT, HOST, async () => {
+  console.log(`Zapret Control UI server listening on http://${HOST}:${PORT}`);
+  try {
+    const settings = loadSettings();
+    lastZapretFingerprint = computeZapretDirectoryFingerprint(settings.zapretDir);
+    setupZapretWatchers(settings.zapretDir);
+    setInterval(checkZapretFingerprintAndBroadcast, 1500).unref();
+
+    const info = readZapretInfo(settings.zapretDir);
+    if (info.valid) {
+      applyEnabledProblemFixes(settings.zapretDir);
+      backupUserLists(settings.zapretDir);
+      const { activeProfileId } = readProfiles(settings.zapretDir);
+      activateProfile(settings.zapretDir, activeProfileId);
+      const resumedStrategy = consumeResumeAfterUpdateFlag();
+      if (resumedStrategy) {
+        console.log(`Resuming active strategy after program self-update: ${resumedStrategy}`);
+        await startStrategyProcess(resumedStrategy);
+      } else if (settings.autoStartStrategyOnLaunch) {
+        const refreshed = loadSettings();
+        console.log(`Auto-starting last selected strategy on launch: ${refreshed.selectedStrategy}`);
+        await startStrategyProcess(refreshed.selectedStrategy);
+      }
+    }
+  } catch (err) {
+    console.error('Startup init warning:', err);
+  }
+});
+
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    stopSteamSpeedTest();
+    shutdownBypassServicesAndDriver().finally(() => process.exit(0));
+  });
+}

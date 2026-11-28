@@ -1,0 +1,289 @@
+import type {
+  AppProgramUpdateResult,
+  AppSettings,
+  CustomStrategyParams,
+  CustomStrategySource,
+  DiagnosticCheck,
+  FullAppState,
+  GameFilterMode,
+  HostsCheckReport,
+  IpsetFilterMode,
+  ListDocument,
+  ProblemFixState,
+  QuickProbeResult,
+  SiteDiagnosisReport,
+  SmartListAddResult,
+  SteamSpeedJobState,
+  TestJobState,
+  TestRunReport,
+  UpdateCheckResult,
+  UserProfile,
+} from './types';
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, {
+    cache: 'no-store',
+    ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(init?.headers || {}),
+    },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `Ошибка запроса (${res.status})`);
+  }
+  return data as T;
+}
+
+export interface CreateProfilePayload {
+  name: string;
+  description?: string;
+  strategy?: string;
+  gameFilterMode?: GameFilterMode;
+  gameFilterTcp?: string;
+  gameFilterUdp?: string;
+  ipsetMode?: IpsetFilterMode;
+  discordFakeBin?: string | null;
+  gameFakeBin?: string | null;
+  activateNow?: boolean;
+}
+
+export const api = {
+  getState: () => request<FullAppState>('/api/state'),
+
+  startRunner: (strategy?: string) =>
+    request<FullAppState>('/api/runner/start', {
+      method: 'POST',
+      body: JSON.stringify({ strategy }),
+    }),
+
+  stopRunner: () =>
+    request<FullAppState>('/api/runner/stop', {
+      method: 'POST',
+    }),
+
+  restartRunner: () =>
+    request<FullAppState>('/api/runner/restart', {
+      method: 'POST',
+    }),
+
+  updateSettings: (settings: Partial<AppSettings>) =>
+    request<FullAppState>('/api/settings', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    }),
+
+  activateProfile: (id: string, startNow = false) =>
+    request<FullAppState>('/api/profiles/activate', {
+      method: 'POST',
+      body: JSON.stringify({ id, startNow }),
+    }),
+
+  createProfile: (payload: CreateProfilePayload) =>
+    request<FullAppState>('/api/profiles', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  updateProfile: (id: string, patch: Partial<UserProfile>) =>
+    request<FullAppState>(`/api/profiles/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+
+  deleteProfile: (id: string) =>
+    request<FullAppState>(`/api/profiles/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
+  setProblemFix: (id: ProblemFixState['id'], enabled: boolean) =>
+    request<{ problemFixes: ProblemFixState[]; state: FullAppState }>(
+      `/api/problems/${encodeURIComponent(id)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      }
+    ),
+
+  setGameFilter: (payload: { mode?: GameFilterMode; tcpRange?: string; udpRange?: string }) =>
+    request<FullAppState>('/api/filters/game', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  setIpsetMode: (mode: IpsetFilterMode) =>
+    request<FullAppState>('/api/filters/ipset', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
+
+  updateRemoteIpset: () =>
+    request<{ updatedEntries: number; state: FullAppState }>('/api/filters/ipset-update', {
+      method: 'POST',
+    }),
+
+  setActiveFake: (target: 'discord' | 'game', binFileName: string) =>
+    request<FullAppState>('/api/filters/fakes', {
+      method: 'POST',
+      body: JSON.stringify({ target, binFileName }),
+    }),
+
+  getList: (id: string) => request<ListDocument>(`/api/lists/${encodeURIComponent(id)}`),
+
+  saveList: (id: string, content: string, autoClean = false) =>
+    request<{ list: ListDocument; state: FullAppState }>(`/api/lists/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content, autoClean }),
+    }),
+
+  smartAddListEntries: (id: string, input: string) =>
+    request<SmartListAddResult>(`/api/lists/${encodeURIComponent(id)}/add-smart`, {
+      method: 'POST',
+      body: JSON.stringify({ input }),
+    }),
+
+  runQuickProbe: () =>
+    request<QuickProbeResult>('/api/probe/quick', {
+      method: 'POST',
+    }),
+
+  checkSite: (input: string) =>
+    request<SiteDiagnosisReport>('/api/tools/check-site', {
+      method: 'POST',
+      body: JSON.stringify({ input }),
+    }),
+
+  exportConfig: () => request<Record<string, unknown>>('/api/config/export'),
+
+  importConfig: (bundle: Record<string, unknown>) =>
+    request<{ restoredLists: number; restoredCustomStrats: number; profilesCount: number; state: FullAppState }>(
+      '/api/config/import',
+      {
+        method: 'POST',
+        body: JSON.stringify(bundle),
+      }
+    ),
+
+  getCustomStrategySource: (fileName: string) =>
+    request<CustomStrategySource>(`/api/strategies/custom-source?file=${encodeURIComponent(fileName)}`),
+
+  saveCustomStrategy: (payload: {
+    title: string;
+    previousFileName?: string | null;
+    mode: 'visual' | 'raw';
+    params?: CustomStrategyParams;
+    winwsArgsText?: string;
+    selectAfterSave?: boolean;
+  }) =>
+    request<{ fileName: string; state: FullAppState }>('/api/strategies/custom', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  deleteCustomStrategy: (fileName: string) =>
+    request<{ deleted: string; fallbackStrategy: string; state: FullAppState }>(
+      `/api/strategies/custom?file=${encodeURIComponent(fileName)}`,
+      { method: 'DELETE' }
+    ),
+
+  saveBackups: () =>
+    request<{ saved: string[]; timestamp: string; state: FullAppState }>('/api/backups/save', {
+      method: 'POST',
+    }),
+
+  restoreBackups: () =>
+    request<{ restored: string[]; timestamp: string; state: FullAppState }>('/api/backups/restore', {
+      method: 'POST',
+    }),
+
+  checkUpdates: () => request<UpdateCheckResult>('/api/updates/check'),
+
+  downloadLatestZapretZip: () =>
+    request<{
+      ok: boolean;
+      delegatedToOs: boolean;
+      downloadUrl: string;
+      assetName: string | null;
+      updateInfo: UpdateCheckResult;
+    }>('/api/updates/download-latest', { method: 'POST' }),
+
+  checkAppUpdate: () => request<AppProgramUpdateResult>('/api/app-update/check'),
+
+  installAppUpdate: (zipBase64?: string) =>
+    request<{ ok: boolean; restarting: boolean; installedShortSha: string; message: string }>(
+      '/api/app-update/install',
+      {
+        method: 'POST',
+        body: JSON.stringify(zipBase64 ? { zipBase64 } : {}),
+      }
+    ),
+
+  getTestHistoryReport: (fileName: string) =>
+    request<TestRunReport>(`/api/tests/history/${encodeURIComponent(fileName)}`),
+
+  startTests: (payload: { strategies?: string[]; categories?: string[]; mode?: 'standard' | 'express' }) =>
+    request<{ testJob: TestJobState }>('/api/tests/start', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  stopTests: () =>
+    request<{ testJob: TestJobState }>('/api/tests/stop', {
+      method: 'POST',
+    }),
+
+  startSteamSpeedTest: () =>
+    request<{ steamSpeedJob: SteamSpeedJobState }>('/api/steam-speed/start', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  stopSteamSpeedTest: () =>
+    request<{ steamSpeedJob: SteamSpeedJobState }>('/api/steam-speed/stop', {
+      method: 'POST',
+    }),
+
+  getDiagnostics: () => request<{ checks: DiagnosticCheck[]; checkedAt: string }>('/api/diagnostics'),
+
+  fixWinDivert: () => request<{ ok: boolean; actions: string[] }>('/api/diagnostics/fix-windivert', { method: 'POST' }),
+
+  cleanDomainLists: () =>
+    request<{ cleanedFiles: number; state: FullAppState }>('/api/diagnostics/clean-lists', { method: 'POST' }),
+
+  enableTcpTimestamps: () =>
+    request<{ ok: boolean; message: string }>('/api/diagnostics/enable-timestamps', { method: 'POST' }),
+
+  clearDiscordCache: () =>
+    request<{ ok: boolean; cleared: string[] }>('/api/diagnostics/clear-discord-cache', { method: 'POST' }),
+
+  checkHosts: () => request<HostsCheckReport>('/api/diagnostics/check-hosts'),
+
+  getSystemHosts: () => request<{ path: string; content: string }>('/api/hosts'),
+  saveSystemHosts: (content: string) =>
+    request<{ path: string; content: string }>('/api/hosts', {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
+  updateSystemHosts: () =>
+    request<{ path: string; content: string; sourceUrl: string }>('/api/hosts/update', { method: 'POST' }),
+  openSystemHostsLocation: () =>
+    request<{ opened: boolean; path: string }>('/api/hosts/open-location', { method: 'POST' }),
+
+  openZapretFolder: () =>
+    request<{ opened: boolean; path: string; note?: string }>('/api/system/open-folder', { method: 'POST' }),
+
+  openExternalUrl: async (url: string) => {
+    try {
+      const res = await request<{ opened: boolean; delegatedToOs: boolean }>('/api/system/open-url', {
+        method: 'POST',
+        body: JSON.stringify({ url }),
+      });
+      if (!res.delegatedToOs) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+    } catch {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  },
+};
