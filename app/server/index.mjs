@@ -180,7 +180,7 @@ function buildFullState() {
       os: os.platform(),
       arch: os.arch(),
     },
-    settings: loadSettings(),
+    settings,
     runtime: getRuntimeState(),
     zapretInfo,
     strategies,

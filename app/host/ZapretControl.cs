@@ -280,6 +280,7 @@ namespace ZapretControlHost
         private int pollingStateFlag;
         private int currentBadgeState = -1;
         private string currentTooltipText = string.Empty;
+        private TraySnapshot latestTraySnapshot;
 
         public TrayHostContext(bool startMinimized, int preferredPort, bool waitForPreferredPort)
         {
@@ -411,6 +412,7 @@ namespace ZapretControlHost
         private void ApplyTraySnapshotToNotifyIcon(TraySnapshot snap)
         {
             if (isShuttingDown || trayIcon == null) return;
+            latestTraySnapshot = snap;
             int nextBadge = snap.Testing ? 2 : (snap.Running ? 1 : 0);
             if (nextBadge != currentBadgeState)
             {
@@ -529,7 +531,9 @@ namespace ZapretControlHost
                 activeMenu = null;
             }
 
-            TraySnapshot snap = FetchTraySnapshot();
+            // Use the snapshot maintained by the watchdog. A synchronous HTTP
+            // request here made the context menu feel delayed on slower disks.
+            TraySnapshot snap = latestTraySnapshot ?? FetchTraySnapshot();
             activeMenu = new DarkTrayMenuForm(
                 snap,
                 smallIcon,
@@ -1286,10 +1290,10 @@ namespace ZapretControlHost
         private static readonly Color AccentAmber = Color.FromArgb(247, 201, 110);   // #F7C96E
         private static readonly Color AccentCoral = Color.FromArgb(242, 184, 181);   // #F2B8B5
 
-        private const int MenuWidth = 264;
-        private const int HeaderHeight = 38;
-        private const int ItemHeight = 34;
-        private const int SeparatorHeight = 11;
+        private const int MenuWidth = 242;
+        private const int HeaderHeight = 0;
+        private const int ItemHeight = 31;
+        private const int SeparatorHeight = 7;
 
         public DarkTrayMenuForm(
             TraySnapshot snap,
@@ -1314,7 +1318,7 @@ namespace ZapretControlHost
             BuildEntries(onOpenWindow, onToggleBypass, onSelectProfile, onOpenZapretFolder, onExitApp);
             LayoutEntries();
 
-            Region = Region.FromHrgn(NativeWin32.CreateRoundRectRgn(0, 0, Width + 1, Height + 1, 16, 16));
+            Region = Region.FromHrgn(NativeWin32.CreateRoundRectRgn(0, 0, Width + 1, Height + 1, 10, 10));
 
             Deactivate += (s, e) =>
             {
@@ -1607,38 +1611,6 @@ namespace ZapretControlHost
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
-            // Header surface showing status dot + current strategy name
-            using (SolidBrush hb = new SolidBrush(BgHeader))
-            {
-                g.FillRectangle(hb, 0, 0, Width, HeaderHeight);
-            }
-            using (Pen divPen = new Pen(DividerCol, 1f))
-            {
-                g.DrawLine(divPen, 0, HeaderHeight, Width, HeaderHeight);
-            }
-
-            Color statusDotCol = snapshot.Testing
-                ? AccentAmber
-                : (snapshot.Running ? AccentGreen : TextMuted);
-            using (SolidBrush sb = new SolidBrush(statusDotCol))
-            {
-                g.FillEllipse(sb, 17f, (HeaderHeight - 7f) * 0.5f, 7f, 7f);
-            }
-
-            string strategyTitle = string.IsNullOrEmpty(snapshot.StrategyLabel) ? "general" : snapshot.StrategyLabel;
-            using (Font stratFont = new Font("Segoe UI Semibold", 9.15f, FontStyle.Bold))
-            using (SolidBrush stratBrush = new SolidBrush(TextPrimary))
-            {
-                RectangleF headerRect = new RectangleF(30f, 0f, Width - 42f, HeaderHeight);
-                StringFormat sf = new StringFormat
-                {
-                    LineAlignment = StringAlignment.Center,
-                    Trimming = StringTrimming.EllipsisCharacter,
-                    FormatFlags = StringFormatFlags.NoWrap
-                };
-                g.DrawString(strategyTitle, stratFont, stratBrush, headerRect, sf);
-            }
-
             // Menu items
             for (int i = 0; i < entries.Count; i++)
             {
@@ -1657,7 +1629,7 @@ namespace ZapretControlHost
                 if (hovered)
                 {
                     Color fill = item.Icon == IconKind.Exit ? HoverDangerFill : HoverFill;
-                    using (GraphicsPath pill = RoundedRect(item.Bounds, 9))
+                    using (GraphicsPath pill = RoundedRect(item.Bounds, 5))
                     using (SolidBrush hb = new SolidBrush(fill))
                     {
                         g.FillPath(hb, pill);
@@ -1694,7 +1666,7 @@ namespace ZapretControlHost
             }
 
             // Outer rounded border
-            using (GraphicsPath outer = RoundedRect(new Rectangle(0, 0, Width - 1, Height - 1), 15))
+            using (GraphicsPath outer = RoundedRect(new Rectangle(0, 0, Width - 1, Height - 1), 9))
             using (Pen borderPen = new Pen(BorderCol, 1f))
             {
                 g.DrawPath(borderPen, outer);

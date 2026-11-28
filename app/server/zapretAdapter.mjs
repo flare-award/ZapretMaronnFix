@@ -178,7 +178,7 @@ export function loadSettings() {
       }
       merged.autoRestartOnCrash = merged.autoRestartOnCrash !== false;
       if (!['dark', 'light'].includes(merged.theme)) merged.theme = 'dark';
-      if (!['blue', 'violet', 'green', 'orange'].includes(merged.accent)) merged.accent = 'blue';
+      if (!['blue', 'violet', 'green', 'orange', 'red', 'yellow'].includes(merged.accent)) merged.accent = 'blue';
       if (typeof merged.skippedZapretVersion !== 'string') merged.skippedZapretVersion = null;
       if (!path.isAbsolute(merged.zapretDir)) {
         merged.zapretDir = path.resolve(REPO_ROOT, merged.zapretDir);
@@ -965,6 +965,8 @@ export function parseBatWinwsArgs(zapretDir, batFileName) {
   };
 }
 
+let strategiesCache = { key: '', value: [] };
+
 export function readStrategies(zapretDir) {
   if (!fs.existsSync(zapretDir)) return [];
   const files = fs.readdirSync(zapretDir)
@@ -975,7 +977,23 @@ export function readStrategies(zapretDir) {
       return naturalCompare(a, b);
     });
 
-  return files.map((fileName) => {
+  // State is requested frequently by the UI and tray. Parsing every large
+  // strategy on every poll is unnecessary; invalidate only when an input file
+  // or the game-filter substitution source changes.
+  const cacheParts = [path.resolve(zapretDir)];
+  for (const fileName of files) {
+    const stat = fs.statSync(path.join(zapretDir, fileName));
+    cacheParts.push(`${fileName}:${stat.size}:${Math.floor(stat.mtimeMs)}`);
+  }
+  const gameFilterPath = path.join(zapretDir, 'utils', 'game_filter.enabled');
+  if (fs.existsSync(gameFilterPath)) {
+    const stat = fs.statSync(gameFilterPath);
+    cacheParts.push(`game-filter:${stat.size}:${Math.floor(stat.mtimeMs)}`);
+  }
+  const cacheKey = cacheParts.join('|');
+  if (strategiesCache.key === cacheKey) return strategiesCache.value;
+
+  const value = files.map((fileName) => {
     const fullPath = path.join(zapretDir, fileName);
     const stat = fs.statSync(fullPath);
     const content = fs.readFileSync(fullPath, 'utf8');
@@ -997,6 +1015,8 @@ export function readStrategies(zapretDir) {
       commandPreview,
     };
   });
+  strategiesCache = { key: cacheKey, value };
+  return value;
 }
 
 export function readZapretInfo(zapretDir) {
@@ -2901,7 +2921,7 @@ export function importFullConfig(zapretDir, bundle) {
     if (bundle.settings.theme === 'dark' || bundle.settings.theme === 'light') {
       allowedPatch.theme = bundle.settings.theme;
     }
-    if (['blue', 'violet', 'green', 'orange'].includes(bundle.settings.accent)) {
+    if (['blue', 'violet', 'green', 'orange', 'red', 'yellow'].includes(bundle.settings.accent)) {
       allowedPatch.accent = bundle.settings.accent;
     }
     if (typeof bundle.settings.skippedZapretVersion === 'string') {

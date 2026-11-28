@@ -7,8 +7,6 @@ import {
   XCircle,
   Eraser,
   ShieldAlert,
-  Globe,
-  Copy,
   Search,
   Plus,
 } from 'lucide-react';
@@ -16,7 +14,6 @@ import { api } from '../api';
 import type {
   DiagnosticCheck,
   FullAppState,
-  HostsCheckReport,
   SiteDiagnosisReport,
 } from '../types';
 
@@ -29,8 +26,6 @@ interface ToolsViewProps {
 export const ToolsView: React.FC<ToolsViewProps> = ({ onStateUpdated, onNotify }) => {
   const [checks, setChecks] = useState<DiagnosticCheck[]>([]);
   const [loadingDiag, setLoadingDiag] = useState<boolean>(false);
-  const [hostsReport, setHostsReport] = useState<HostsCheckReport | null>(null);
-  const [loadingHosts, setLoadingHosts] = useState<boolean>(false);
   const [toolBusy, setToolBusy] = useState<boolean>(false);
 
   // Site availability & list check (#5)
@@ -128,32 +123,6 @@ export const ToolsView: React.FC<ToolsViewProps> = ({ onStateUpdated, onNotify }
       onNotify(err instanceof Error ? err.message : String(err), true);
     } finally {
       setToolBusy(false);
-    }
-  };
-
-  const handleCheckHosts = async () => {
-    setLoadingHosts(true);
-    try {
-      const rep = await api.checkHosts();
-      setHostsReport(rep);
-      onNotify(
-        rep.upToDate
-          ? 'Файл hosts актуален'
-          : `Не хватает записей в hosts: ${rep.missingCount}`
-      );
-    } catch (err) {
-      onNotify(err instanceof Error ? err.message : String(err), true);
-    } finally {
-      setLoadingHosts(false);
-    }
-  };
-
-  const copyText = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      onNotify('Скопировано в буфер обмена');
-    } catch {
-      onNotify('Не удалось скопировать', true);
     }
   };
 
@@ -345,57 +314,7 @@ export const ToolsView: React.FC<ToolsViewProps> = ({ onStateUpdated, onNotify }
           </button>
         </div>
 
-        <div className="m3-card-compact" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '12px' }}>
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
-            <div className="brand-mark">
-              <Globe size={18} />
-            </div>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: '14px' }}>Сверка файла hosts</div>
-              <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '2px' }}>
-                Проверяет записи для сервисов с региональным блоком
-              </div>
-            </div>
-          </div>
-          <button type="button" className="btn btn-tonal" disabled={loadingHosts} onClick={handleCheckHosts}>
-            {loadingHosts ? 'Проверка...' : 'Проверить hosts'}
-          </button>
-        </div>
       </div>
-
-      {/* Hosts Diff Result */}
-      {hostsReport && (
-        <div className="m3-card">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px', marginBottom: hostsReport.missingLines.length > 0 ? '10px' : 0 }}>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: '14.5px' }}>
-                Файл hosts ({hostsReport.systemHostsPath})
-              </div>
-              <div style={{ fontSize: '12px', color: 'var(--m3-text-secondary)', marginTop: '2px' }}>
-                Всего записей: {hostsReport.totalRemoteEntries} / Не хватает: {hostsReport.missingCount}
-              </div>
-            </div>
-            <button
-              type="button"
-              className="btn btn-surface"
-              onClick={() => copyText(hostsReport.missingLines.join('\r\n') || hostsReport.remoteRaw)}
-            >
-              <Copy size={14} />
-              Скопировать
-            </button>
-          </div>
-          {hostsReport.missingLines.length > 0 && (
-            <div className="m3-textarea-shell">
-              <textarea
-                readOnly
-                className="m3-textarea"
-                style={{ minHeight: '140px', height: '165px' }}
-                value={hostsReport.missingLines.join('\n')}
-              />
-            </div>
-          )}
-        </div>
-      )}
 
       {/* 3. System & Conflict Diagnostics (#13) */}
       <div className="m3-card">

@@ -63,10 +63,30 @@
 :root[data-accent='violet'] { --m3-primary: #c9b6ff; --m3-on-primary: #2d145f; --m3-primary-container: #392b5c; }
 :root[data-accent='green'] { --m3-primary: #80d7aa; --m3-on-primary: #053823; --m3-primary-container: #173d2d; }
 :root[data-accent='orange'] { --m3-primary: #ffbd80; --m3-on-primary: #4c2500; --m3-primary-container: #513218; }
+:root[data-accent='red'] { --m3-primary: #ffb4ab; --m3-on-primary: #690005; --m3-primary-container: #5c1c1c; }
+:root[data-accent='yellow'] { --m3-primary: #e8c349; --m3-on-primary: #3d3000; --m3-primary-container: #453a12; }
 :root[data-theme='light'][data-accent='blue'] { --m3-primary: #315f9d; --m3-on-primary: #ffffff; }
 :root[data-theme='light'][data-accent='violet'] { --m3-primary: #6842ad; --m3-on-primary: #ffffff; --m3-primary-container: #ebddff; }
 :root[data-theme='light'][data-accent='green'] { --m3-primary: #146c45; --m3-on-primary: #ffffff; --m3-primary-container: #c8f1db; }
 :root[data-theme='light'][data-accent='orange'] { --m3-primary: #9a4f00; --m3-on-primary: #ffffff; --m3-primary-container: #ffdcc1; }
+:root[data-theme='light'][data-accent='red'] { --m3-primary: #b3261e; --m3-on-primary: #ffffff; --m3-primary-container: #ffdad6; }
+:root[data-theme='light'][data-accent='yellow'] { --m3-primary: #745b00; --m3-on-primary: #ffffff; --m3-primary-container: #ffe16b; }
+
+.accent-options { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.accent-swatch {
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  background: var(--swatch);
+  box-shadow: 0 0 0 1px var(--m3-outline-strong);
+  cursor: pointer;
+  transition: transform 140ms var(--ease-m3), box-shadow 140ms var(--ease-m3), border-color 140ms var(--ease-m3);
+}
+.accent-swatch:hover { transform: scale(1.1); }
+.accent-swatch.selected { border-color: var(--m3-surface); box-shadow: 0 0 0 2px var(--m3-text); }
+.accent-swatch:focus-visible { outline: 2px solid var(--m3-primary); outline-offset: 3px; }
 
 *,
 *::before,

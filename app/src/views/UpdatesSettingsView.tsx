@@ -542,10 +542,22 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             <div style={{ fontSize: '15.5px', fontWeight: 600 }}>Версии Zapret и проверка обновлений</div>
           </div>
 
-          <button type="button" className="btn btn-tonal" disabled={checkingUpdate} onClick={onCheckUpdate}>
-            <RefreshCw size={14} className={checkingUpdate ? 'spin-icon' : ''} />
-            {checkingUpdate ? 'Проверка...' : 'Проверить обновление'}
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            {updateInfo?.updateAvailable && (
+              <button
+                type="button"
+                className="btn btn-surface"
+                onClick={() => onUpdateSettings({ skippedZapretVersion: updateInfo.latestVersion })}
+              >
+                <CheckCircle2 size={14} />
+                Пропустить обновление
+              </button>
+            )}
+            <button type="button" className="btn btn-tonal" disabled={checkingUpdate} onClick={onCheckUpdate}>
+              <RefreshCw size={14} className={checkingUpdate ? 'spin-icon' : ''} />
+              {checkingUpdate ? 'Проверка...' : 'Проверить обновление'}
+            </button>
+          </div>
         </div>
 
         <div
@@ -628,17 +640,6 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             {downloadingZapretZip ? 'Загрузка...' : 'Скачать релиз Zapret'}
           </button>
 
-          {updateInfo?.latestVersion && (
-            <button
-              type="button"
-              className="btn btn-surface"
-              onClick={() => onUpdateSettings({ skippedZapretVersion: updateInfo.latestVersion })}
-            >
-              <CheckCircle2 size={14} />
-              Пропустить обновление
-            </button>
-          )}
-
           <button
             type="button"
             className="btn btn-surface"
@@ -701,9 +702,19 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
               <div className="m3-switch-title">Акцент</div>
               <div className="m3-switch-desc">Цвет основных кнопок и выделений</div>
             </div>
-            <div className="chip-row">
-              {([['blue', 'Синий'], ['violet', 'Фиолетовый'], ['green', 'Зелёный'], ['orange', 'Оранжевый']] as const).map(([accent, label]) => (
-                <button key={accent} type="button" className={`m3-chip ${settings.accent === accent ? 'selected' : ''}`} onClick={() => onUpdateSettings({ accent })}>{label}</button>
+            <div className="accent-options" role="radiogroup" aria-label="Цвет акцента">
+              {([['blue', 'Синий', '#79a9f5'], ['violet', 'Фиолетовый', '#a98ae8'], ['green', 'Зелёный', '#55b984'], ['orange', 'Оранжевый', '#e78a35'], ['red', 'Красный', '#df5b55'], ['yellow', 'Жёлтый', '#d2ad25']] as const).map(([accent, label, color]) => (
+                <button
+                  key={accent}
+                  type="button"
+                  role="radio"
+                  aria-checked={settings.accent === accent}
+                  aria-label={label}
+                  title={label}
+                  className={`accent-swatch ${settings.accent === accent ? 'selected' : ''}`}
+                  style={{ '--swatch': color } as React.CSSProperties}
+                  onClick={() => onUpdateSettings({ accent })}
+                />
               ))}
             </div>
           </div>

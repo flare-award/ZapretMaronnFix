@@ -135,12 +135,9 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
       <div className="lists-layout">
         {/* Left Sidebar of Lists */}
         <div className="m3-card-compact" style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
-          <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--m3-text-secondary)', padding: '2px 4px 4px' }}>
-            Списки
-          </div>
-          {groupedLists.map((group) => (
+          {groupedLists.map((group, groupIndex) => (
             <React.Fragment key={group.title}>
-              <div style={{ fontSize: '10.5px', fontWeight: 650, color: 'var(--m3-text-muted)', padding: '8px 4px 1px', textTransform: 'uppercase' }}>
+              <div style={{ fontSize: '10.5px', fontWeight: 650, color: 'var(--m3-text-muted)', padding: groupIndex === 0 ? '1px 4px' : '8px 4px 1px', textTransform: 'uppercase' }}>
                 {group.title}
               </div>
               {group.items.map((lm) => {

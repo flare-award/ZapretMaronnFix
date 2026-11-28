@@ -355,39 +355,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
 
   const quickTilesEl = (
     <div className={isSplitLayout ? 'quick-tiles-stack' : 'quick-tiles-grid'}>
-      {/* 1. Profile Switcher Tile */}
-      <div className="quick-tile">
-        <div className="tile-head">
-          <span className="tile-label">
-            <Bookmark size={15} strokeWidth={1.85} />
-            Профиль
-          </span>
-          <button
-            type="button"
-            className="m3-chip"
-            style={{ height: '25px', fontSize: '11.5px', padding: '0 9px' }}
-            onClick={() => onNavigate('profiles')}
-          >
-            Все
-          </button>
-        </div>
-        <div className="chip-row">
-          {profiles.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              disabled={busy}
-              className={`m3-chip ${activeProfileId === p.id ? 'selected' : ''}`}
-              style={{ height: '29px', padding: '0 11px', fontSize: '12.5px' }}
-              onClick={() => onSelectProfile(p.id)}
-            >
-              {p.name}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* 2. Game Filter Quick Tile */}
+      {/* 1. Game Filter Quick Tile */}
       <div className="quick-tile">
         <div className="tile-head">
           <span className="tile-label">
@@ -424,7 +392,7 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
         )}
       </div>
 
-      {/* 3. IPSet Filter Quick Tile */}
+      {/* 2. IPSet Filter Quick Tile */}
       <div className="quick-tile">
         <div className="tile-head">
           <span className="tile-label">
@@ -455,6 +423,39 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
           ))}
         </div>
       </div>
+
+      {/* 3. Profile Switcher Tile */}
+      <div className="quick-tile">
+        <div className="tile-head">
+          <span className="tile-label">
+            <Bookmark size={15} strokeWidth={1.85} />
+            Профиль
+          </span>
+          <button
+            type="button"
+            className="m3-chip"
+            style={{ height: '25px', fontSize: '11.5px', padding: '0 9px' }}
+            onClick={() => onNavigate('profiles')}
+          >
+            Все
+          </button>
+        </div>
+        <div className="chip-row">
+          {profiles.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              disabled={busy}
+              className={`m3-chip ${activeProfileId === p.id ? 'selected' : ''}`}
+              style={{ height: '29px', padding: '0 11px', fontSize: '12.5px' }}
+              onClick={() => onSelectProfile(p.id)}
+            >
+              {p.name}
+            </button>
+          ))}
+        </div>
+      </div>
+
     </div>
   );
 

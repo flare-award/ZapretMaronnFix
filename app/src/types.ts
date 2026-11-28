@@ -19,7 +19,7 @@ export interface AppSettings {
   showBestStrategyCards: boolean;
   connectLayout: ConnectLayoutMode;
   theme: 'dark' | 'light';
-  accent: 'blue' | 'violet' | 'green' | 'orange';
+  accent: 'blue' | 'violet' | 'green' | 'orange' | 'red' | 'yellow';
   skippedZapretVersion: string | null;
   developerMode: boolean;
 }
