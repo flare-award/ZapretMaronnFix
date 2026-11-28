@@ -18,6 +18,9 @@ export interface AppSettings {
   showWinwsConsole: boolean;
   showBestStrategyCards: boolean;
   connectLayout: ConnectLayoutMode;
+  theme: 'dark' | 'light';
+  accent: 'blue' | 'violet' | 'green' | 'orange';
+  skippedZapretVersion: string | null;
   developerMode: boolean;
 }
 

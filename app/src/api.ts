@@ -259,6 +259,17 @@ export const api = {
 
   checkHosts: () => request<HostsCheckReport>('/api/diagnostics/check-hosts'),
 
+  getSystemHosts: () => request<{ path: string; content: string }>('/api/hosts'),
+  saveSystemHosts: (content: string) =>
+    request<{ path: string; content: string }>('/api/hosts', {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
+  updateSystemHosts: () =>
+    request<{ path: string; content: string; sourceUrl: string }>('/api/hosts/update', { method: 'POST' }),
+  openSystemHostsLocation: () =>
+    request<{ opened: boolean; path: string }>('/api/hosts/open-location', { method: 'POST' }),
+
   openZapretFolder: () =>
     request<{ opened: boolean; path: string; note?: string }>('/api/system/open-folder', { method: 'POST' }),
 

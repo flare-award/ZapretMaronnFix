@@ -162,7 +162,7 @@ namespace ZapretControlHost
                 catch
                 {
                     MessageBox.Show(
-                        "Для работы драйвера WinDivert и запуска winws.exe необходимы права Администратора.",
+                        "Для работы драйвера WinDivert и запуска winws необходимы права Администратора.",
                         "Zapret Control",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning
@@ -1226,6 +1226,7 @@ namespace ZapretControlHost
                 RunSilentProcess("sc.exe", "stop \"" + svc + "\"", 800);
             }
 
+            RunSilentProcess("taskkill.exe", "/IM winws2.exe /F", 600);
             RunSilentProcess("taskkill.exe", "/IM winws.exe /F", 600);
             RunSilentProcess("taskkill.exe", "/IM goodbyedpi.exe /F", 600);
 

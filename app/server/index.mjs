@@ -785,6 +785,59 @@ async function handleApi(req, res, pathname, urlObj) {
     return;
   }
 
+  if (pathname === '/api/hosts' && method === 'GET') {
+    const hostsPath = os.platform() === 'win32'
+      ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts')
+      : '/etc/hosts';
+    const content = fs.existsSync(hostsPath) ? fs.readFileSync(hostsPath, 'utf8') : '';
+    sendJson(res, 200, { path: hostsPath, content });
+    return;
+  }
+
+  if (pathname === '/api/hosts' && method === 'PUT') {
+    if (os.platform() !== 'win32') {
+      sendJson(res, 400, { error: 'Системный hosts изменяется только в Windows' });
+      return;
+    }
+    const body = await readJsonBody(req);
+    const hostsPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts');
+    fs.writeFileSync(hostsPath, String(body.content ?? ''), 'utf8');
+    sendJson(res, 200, { path: hostsPath, content: fs.readFileSync(hostsPath, 'utf8') });
+    return;
+  }
+
+  if (pathname === '/api/hosts/update' && method === 'POST') {
+    if (os.platform() !== 'win32') {
+      sendJson(res, 400, { error: 'Обновление системного hosts доступно только в Windows' });
+      return;
+    }
+    const sourceUrl = 'https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/hosts';
+    const response = await fetch(`${sourceUrl}?t=${Date.now()}`, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new Error(`Не удалось загрузить официальный hosts (${response.status})`);
+    const official = (await response.text()).trim();
+    const hostsPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts');
+    const begin = '# BEGIN ZAPRET OFFICIAL HOSTS';
+    const end = '# END ZAPRET OFFICIAL HOSTS';
+    const current = fs.existsSync(hostsPath) ? fs.readFileSync(hostsPath, 'utf8') : '';
+    const managed = `${begin}\r\n${official.replace(/\r?\n/g, '\r\n')}\r\n${end}`;
+    const blockPattern = new RegExp(`${begin}[\\s\\S]*?${end}`, 'g');
+    const content = blockPattern.test(current)
+      ? current.replace(blockPattern, managed)
+      : `${current.trimEnd()}\r\n\r\n${managed}\r\n`;
+    fs.writeFileSync(hostsPath, content, 'utf8');
+    sendJson(res, 200, { path: hostsPath, content, sourceUrl });
+    return;
+  }
+
+  if (pathname === '/api/hosts/open-location' && method === 'POST') {
+    const hostsPath = os.platform() === 'win32'
+      ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts')
+      : '/etc/hosts';
+    if (os.platform() === 'win32') execFile('explorer.exe', [`/select,${hostsPath}`], () => {});
+    sendJson(res, 200, { opened: os.platform() === 'win32', path: hostsPath });
+    return;
+  }
+
   if (method === 'GET' && pathname === '/api/diagnostics') {
     const settings = loadSettings();
     const diag = await runDiagnostics(settings.zapretDir);

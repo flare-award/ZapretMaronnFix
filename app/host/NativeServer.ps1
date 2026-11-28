@@ -27,6 +27,9 @@ function Get-AppSettings {
         activeProfileId = "default"
         showBestStrategyCards = $true
         connectLayout = "split"
+        theme = "dark"
+        accent = "blue"
+        skippedZapretVersion = $null
         developerMode = $false
         autoStartStrategyOnLaunch = $false
         launchOnWindowsStartup = $false
@@ -123,7 +126,7 @@ function Stop-WinwsDirect {
     if ($script:ActiveWinws -and -not $script:ActiveWinws.HasExited) {
         try { $script:ActiveWinws.Kill() } catch {}
     }
-    Get-Process -Name "winws" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process -Name "winws","winws2" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     $script:ActiveWinws = $null
     $script:StartedAtMs = $null
     $script:ActiveStrategy = $null
@@ -140,28 +143,34 @@ function Start-WinwsDirect($strategyName) {
     $effTcp = if ($gf.mode -in @("all", "tcp")) { $gf.tcpRange } else { "12" }
     $effUdp = if ($gf.mode -in @("all", "udp")) { $gf.udpRange } else { "12" }
 
-    $raw = (Get-Content $batPath -Raw -Encoding UTF8) -replace "\^\r?\n", " "
-    $match = [regex]::Match($raw, '(?im)winws\.exe"\s+(.+)$')
-    if (-not $match.Success) { throw "Не найдена команда winws.exe в $batName" }
+    $raw = (Get-Content $batPath -Raw -Encoding UTF8) -replace "\^\s*\r?\n", " "
+    $raw = $raw -replace "\r?\n", " "
+    $match = [regex]::Match($raw, '(?im)(winws2?\.exe)"\s+(.+)$')
+    if (-not $match.Success) { throw "Не найдена команда winws.exe или winws2.exe в $batName" }
+    $winwsName = $match.Groups[1].Value
 
-    $argLine = $match.Groups[1].Value.Trim()
+    $argLine = $match.Groups[2].Value.Trim()
     $binPath = (Join-Path $zDir "bin") + "\"
     $listsPath = (Join-Path $zDir "lists") + "\"
+    $luaPath = (Join-Path $zDir "lua") + "\"
     $argLine = $argLine.Replace("%BIN%", $binPath).Replace("!BIN!", $binPath)
     $argLine = $argLine.Replace("%LISTS%", $listsPath).Replace("!LISTS!", $listsPath)
+    $argLine = $argLine.Replace("%LUA%", $luaPath).Replace("!LUA!", $luaPath)
     $argLine = $argLine.Replace("%GameFilterTCP%", $effTcp).Replace("!GameFilterTCP!", $effTcp)
     $argLine = $argLine.Replace("%GameFilterUDP%", $effUdp).Replace("!GameFilterUDP!", $effUdp)
     $argLine = $argLine.Replace("%GameFilter%", $effUdp).Replace("!GameFilter!", $effUdp)
-    $problemPrefix = Get-ProblemLaunchPrefix $zDir
-    if ($problemPrefix) {
-        $firstFilter = New-Object System.Text.RegularExpressions.Regex('(?=--filter-)')
-        $argLine = $firstFilter.Replace($argLine, "$problemPrefix ", 1)
-    }
-
     Stop-WinwsDirect
     & netsh interface tcp set global timestamps=enabled | Out-Null
 
-    $winwsExe = Join-Path $zDir "bin\winws.exe"
+    $winwsExe = Join-Path (Join-Path $zDir "bin") $winwsName
+    if (-not (Test-Path $winwsExe) -and $winwsName -ieq "winws.exe") {
+        $officialName = $batName -replace ' my\)\.bat$', ').bat'
+        if ($officialName -ne $batName -and (Test-Path (Join-Path $zDir $officialName)) -and (Test-Path (Join-Path $zDir "bin\winws2.exe"))) {
+            Start-WinwsDirect $officialName
+            return
+        }
+        throw "Стратегия $batName использует отсутствующий старый winws.exe"
+    }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $winwsExe
     $psi.Arguments = $argLine
@@ -690,10 +699,12 @@ function Check-ZapretReleasePs([string]$zDir) {
             $assetName = [System.IO.Path]::GetFileName($dlUrl)
         }
     } catch {}
+    $settingsNow = Get-AppSettings
+    $isSkipped = ([string]$settingsNow.skippedZapretVersion -eq $cleanVer)
     return @{
-        localVersion = $localVer
+        localVersion = if ($isSkipped) { $cleanVer } else { $localVer }
         latestVersion = $cleanVer
-        updateAvailable = ($localVer -ne $cleanVer)
+        updateAvailable = (($localVer -ne $cleanVer) -and -not $isSkipped)
         publishedAt = $pubAt
         releaseName = "Zapret $cleanVer"
         releaseNotes = ""
@@ -705,9 +716,6 @@ function Check-ZapretReleasePs([string]$zDir) {
 }
 
 $initSettings = Get-AppSettings
-Migrate-ProblemFixesPs $initSettings
-Migrate-WorkshopFixPs $initSettings
-Apply-ProblemFixLists $initSettings
 if (Test-Path $ResumeFlagFile) {
     try {
         $resumeObj = Get-Content $ResumeFlagFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -750,6 +758,44 @@ while ($listener.IsListening) {
                 if ($rawBody.Trim()) { $bodyObj = $rawBody | ConvertFrom-Json }
             }
 
+            if ($urlPath -eq "/api/hosts" -and $req.HttpMethod -eq "GET") {
+                $hostsContent = if (Test-Path $SystemHostsFile) { [System.IO.File]::ReadAllText($SystemHostsFile) } else { "" }
+                $hBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ path = $SystemHostsFile; content = $hostsContent } | ConvertTo-Json -Depth 4))
+                $res.StatusCode = 200; $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($hBytes, 0, $hBytes.Length); $res.Close(); continue
+            }
+
+            if ($urlPath -eq "/api/hosts" -and $req.HttpMethod -eq "PUT") {
+                [System.IO.File]::WriteAllText($SystemHostsFile, [string]$bodyObj.content, (New-Object System.Text.UTF8Encoding($false)))
+                $hostsContent = [System.IO.File]::ReadAllText($SystemHostsFile)
+                $hBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ path = $SystemHostsFile; content = $hostsContent } | ConvertTo-Json -Depth 4))
+                $res.StatusCode = 200; $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($hBytes, 0, $hBytes.Length); $res.Close(); continue
+            }
+
+            if ($urlPath -eq "/api/hosts/update" -and $req.HttpMethod -eq "POST") {
+                $sourceUrl = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/hosts?t=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+                $official = (Invoke-WebRequest -Uri $sourceUrl -UseBasicParsing -TimeoutSec 15).Content.Trim() -replace "`r?`n", "`r`n"
+                $beginHosts = "# BEGIN ZAPRET OFFICIAL HOSTS"; $endHosts = "# END ZAPRET OFFICIAL HOSTS"
+                $currentHosts = if (Test-Path $SystemHostsFile) { [System.IO.File]::ReadAllText($SystemHostsFile) } else { "" }
+                $managedHosts = "$beginHosts`r`n$official`r`n$endHosts"
+                $escapedBegin = [regex]::Escape($beginHosts); $escapedEnd = [regex]::Escape($endHosts)
+                if ($currentHosts -match "$escapedBegin[\s\S]*?$escapedEnd") {
+                    $nextHosts = [regex]::Replace($currentHosts, "$escapedBegin[\s\S]*?$escapedEnd", [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $managedHosts })
+                } else { $nextHosts = $currentHosts.TrimEnd() + "`r`n`r`n$managedHosts`r`n" }
+                [System.IO.File]::WriteAllText($SystemHostsFile, $nextHosts, (New-Object System.Text.UTF8Encoding($false)))
+                $hBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ path = $SystemHostsFile; content = $nextHosts; sourceUrl = $sourceUrl } | ConvertTo-Json -Depth 4))
+                $res.StatusCode = 200; $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($hBytes, 0, $hBytes.Length); $res.Close(); continue
+            }
+
+            if ($urlPath -eq "/api/hosts/open-location" -and $req.HttpMethod -eq "POST") {
+                Start-Process "explorer.exe" -ArgumentList "/select,`"$SystemHostsFile`"" | Out-Null
+                $hBytes = [System.Text.Encoding]::UTF8.GetBytes((@{ opened = $true; path = $SystemHostsFile } | ConvertTo-Json))
+                $res.StatusCode = 200; $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($hBytes, 0, $hBytes.Length); $res.Close(); continue
+            }
+
             if ($urlPath -eq "/api/updates/check" -and $req.HttpMethod -eq "GET") {
                 $stCur = Get-AppSettings
                 $uInfo = Check-ZapretReleasePs $stCur.zapretDir
@@ -785,6 +831,7 @@ while ($listener.IsListening) {
                 }
                 Stop-WinwsDirect
                 foreach ($svc in @("zapret","GoodbyeDPI","discordfix_zapret","winws1","winws2")) { & sc.exe stop $svc 2>&1 | Out-Null }
+                & taskkill.exe /IM winws2.exe /F 2>&1 | Out-Null
                 & taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
                 & taskkill.exe /IM goodbyedpi.exe /F 2>&1 | Out-Null
                 Start-Sleep -Milliseconds 180
@@ -1045,6 +1092,7 @@ try {
 
 Get-Process -Name 'ZapretControl' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Wait-Process -Name 'ZapretControl' -Timeout 4 -ErrorAction SilentlyContinue
+& taskkill.exe /IM winws2.exe /F 2>&1 | Out-Null
 & taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
 
 for (`$pWait = 0; `$pWait -lt 45; `$pWait++) {
@@ -1201,7 +1249,7 @@ Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction Silen
                 }
                 zapretInfo = @{
                     valid = (Test-Path $svcFile)
-                    hasWinwsBinary = (Test-Path (Join-Path $zDir "bin\winws.exe"))
+                    hasWinwsBinary = ((Test-Path (Join-Path $zDir "bin\winws.exe")) -or (Test-Path (Join-Path $zDir "bin\winws2.exe")))
                     localVersion = $ver
                     zapretPath = $zDir
                     lastModified = $null

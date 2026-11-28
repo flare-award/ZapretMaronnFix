@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Cable,
   Shield,
   Bookmark,
   Gauge,
-  Download,
-  CircleAlert,
   SlidersHorizontal,
   ListFilter,
   Wrench,
+  FileText,
   Settings,
   RotateCw,
   AlertCircle,
@@ -28,24 +28,22 @@ import type {
 import { ConnectView } from './views/ConnectView';
 import { ProfilesView } from './views/ProfilesView';
 import { TestsView } from './views/TestsView';
-import { SpeedView } from './views/SpeedView';
-import { ProblemsView } from './views/ProblemsView';
 import { FiltersView } from './views/FiltersView';
 import { ListsView } from './views/ListsView';
+import { HostsView } from './views/HostsView';
 import { ToolsView } from './views/ToolsView';
 import { UpdatesSettingsView } from './views/UpdatesSettingsView';
 import { formatDuration } from './utils/metrics';
 
-type NavTab = 'connect' | 'profiles' | 'tests' | 'speed' | 'problems' | 'filters' | 'lists' | 'tools' | 'settings';
+type NavTab = 'connect' | 'profiles' | 'tests' | 'filters' | 'lists' | 'hosts' | 'tools' | 'settings';
 
 const TAB_LABELS: Record<NavTab, string> = {
   connect: 'Подключение',
   profiles: 'Профили',
   tests: 'Тесты',
-  speed: 'Скорость',
-  problems: 'Проблемы',
   filters: 'Фильтры',
   lists: 'Списки',
+  hosts: 'Hosts',
   tools: 'Инструменты',
   settings: 'Настройки',
 };
@@ -211,6 +209,11 @@ export const App: React.FC = () => {
     }
     return state.latestTestRun || null;
   }, [state, selectedHistoryFile, customHistoryReport]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = state?.settings.theme || 'dark';
+    document.documentElement.dataset.accent = state?.settings.accent || 'blue';
+  }, [state?.settings.theme, state?.settings.accent]);
 
   // Uptime clock tick only when running
   useEffect(() => {
@@ -434,6 +437,13 @@ export const App: React.FC = () => {
     try {
       const next = await api.updateSettings(patch);
       setState(next);
+      if (patch.skippedZapretVersion) {
+        setUpdateInfo((current) => current ? {
+          ...current,
+          localVersion: patch.skippedZapretVersion || current.localVersion,
+          updateAvailable: false,
+        } : current);
+      }
       notify('Настройки сохранены');
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err), true);
@@ -473,7 +483,7 @@ export const App: React.FC = () => {
     {
       id: 'connect',
       label: TAB_LABELS.connect,
-      icon: <Shield size={17} strokeWidth={1.9} />,
+      icon: <Cable size={17} strokeWidth={1.9} />,
       badge: String(state.strategies.length),
     },
     {
@@ -481,20 +491,6 @@ export const App: React.FC = () => {
       label: TAB_LABELS.tests,
       icon: <Gauge size={17} strokeWidth={1.9} />,
       badge: state.testJob.running ? `${state.testJob.progressPct}%` : undefined,
-    },
-    {
-      id: 'speed',
-      label: TAB_LABELS.speed,
-      icon: <Download size={17} strokeWidth={1.9} />,
-      badge: state.steamSpeedJob.running ? `${state.steamSpeedJob.progressPct}%` : undefined,
-    },
-    {
-      id: 'problems',
-      label: TAB_LABELS.problems,
-      icon: <CircleAlert size={17} strokeWidth={1.9} />,
-      badge: state.problemFixes.filter((fix) => fix.enabled).length > 0
-        ? String(state.problemFixes.filter((fix) => fix.enabled).length)
-        : undefined,
     },
     {
       id: 'filters',
@@ -511,6 +507,11 @@ export const App: React.FC = () => {
       label: TAB_LABELS.lists,
       icon: <ListFilter size={17} strokeWidth={1.9} />,
       badge: String(state.listsMeta.length),
+    },
+    {
+      id: 'hosts',
+      label: TAB_LABELS.hosts,
+      icon: <FileText size={17} strokeWidth={1.9} />,
     },
     {
       id: 'tools',
@@ -677,23 +678,6 @@ export const App: React.FC = () => {
             />
           )}
 
-          {tab === 'speed' && (
-            <SpeedView
-              state={state}
-              onStateUpdated={setState}
-              onApplyStrategy={handleSelectStrategy}
-              onNotify={notify}
-            />
-          )}
-
-          {tab === 'problems' && (
-            <ProblemsView
-              state={state}
-              onStateUpdated={setState}
-              onNotify={notify}
-            />
-          )}
-
           {tab === 'filters' && (
             <FiltersView
               state={state}
@@ -708,6 +692,8 @@ export const App: React.FC = () => {
           {tab === 'lists' && (
             <ListsView state={state} onStateUpdated={setState} onNotify={notify} />
           )}
+
+          {tab === 'hosts' && <HostsView onNotify={notify} />}
 
           {tab === 'tools' && (
             <ToolsView state={state} onStateUpdated={setState} onNotify={notify} />

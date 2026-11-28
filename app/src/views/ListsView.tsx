@@ -23,7 +23,7 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
   const [selectedId, setSelectedId] = useState<string>('list-general-user');
   const [doc, setDoc] = useState<ListDocument | null>(null);
   const [rawText, setRawText] = useState<string>('');
-  const [editorMode, setEditorMode] = useState<'visual' | 'raw'>('visual');
+  const [editorMode, setEditorMode] = useState<'visual' | 'raw'>('raw');
   const [filterQuery, setFilterQuery] = useState<string>('');
   const [newEntry, setNewEntry] = useState<string>('');
   const [saving, setSaving] = useState<boolean>(false);
@@ -38,9 +38,7 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
         if (cancelled) return;
         setDoc(loaded);
         setRawText(loaded.content);
-        if (loaded.kind === 'targets') {
-          setEditorMode('raw');
-        }
+        // Keep the chosen editor mode when moving between files.
       })
       .catch((err) => {
         if (!cancelled) onNotify(err instanceof Error ? err.message : String(err), true);
@@ -118,6 +116,12 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
     }
   };
 
+  const groupedLists = useMemo(() => [
+    { title: 'Обход', items: state.listsMeta.filter((item) => !item.id.includes('exclude') && item.id !== 'targets') },
+    { title: 'Исключения', items: state.listsMeta.filter((item) => item.id.includes('exclude')) },
+    { title: 'Цели проверки', items: state.listsMeta.filter((item) => item.id === 'targets') },
+  ], [state.listsMeta]);
+
   const handleRemoveEntry = async (entryToRemove: string) => {
     if (!doc) return;
     const nextLines = rawText
@@ -134,34 +138,25 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
           <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--m3-text-secondary)', padding: '2px 4px 4px' }}>
             Списки
           </div>
-          {state.listsMeta.map((lm) => {
-            const active = lm.id === selectedId;
-            return (
-              <button
-                key={lm.id}
-                type="button"
-                className={`list-selector-item ${active ? 'active' : ''}`}
-                onClick={() => setSelectedId(lm.id)}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
-                  <span style={{ fontWeight: 600, fontSize: '13px' }}>{lm.title}</span>
-                  <span className="score-pill">{lm.entriesCount}</span>
-                </div>
-                {state.settings.developerMode && (
-                  <div
-                    className="mono"
-                    style={{
-                      fontSize: '11px',
-                      color: active ? 'var(--m3-on-primary-container)' : 'var(--m3-text-muted)',
-                      opacity: active ? 0.85 : 1,
-                    }}
-                  >
-                    {lm.relPath}
-                  </div>
-                )}
-              </button>
-            );
-          })}
+          {groupedLists.map((group) => (
+            <React.Fragment key={group.title}>
+              <div style={{ fontSize: '10.5px', fontWeight: 650, color: 'var(--m3-text-muted)', padding: '8px 4px 1px', textTransform: 'uppercase' }}>
+                {group.title}
+              </div>
+              {group.items.map((lm) => {
+                const active = lm.id === selectedId;
+                const fileName = lm.relPath.split(/[\\/]/).pop() || lm.relPath;
+                return (
+                  <button key={lm.id} type="button" className={`list-selector-item ${active ? 'active' : ''}`} onClick={() => setSelectedId(lm.id)}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                      <span className="mono" style={{ fontWeight: 600, fontSize: '12px' }}>{fileName}</span>
+                      <span className="score-pill">{lm.entriesCount}</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </React.Fragment>
+          ))}
         </div>
 
         {/* Right Editor Area */}
@@ -180,7 +175,7 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <FileText size={16} color="var(--m3-primary)" />
-                    <span style={{ fontSize: '15.5px', fontWeight: 600 }}>{doc.title}</span>
+                    <span style={{ fontSize: '15.5px', fontWeight: 600 }}>{doc.relPath.split(/[\\/]/).pop()}</span>
                     {doc.isUser && (
                       <span className="score-pill good">
                         <ShieldCheck size={11} />
@@ -194,16 +189,7 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                  {doc.kind !== 'targets' && (
-                    <div className="chip-row">
-                      <button
-                        type="button"
-                        className={`m3-chip ${editorMode === 'visual' ? 'selected' : ''}`}
-                        onClick={() => setEditorMode('visual')}
-                      >
-                        <LayoutGrid size={13} />
-                        Список
-                      </button>
+                  <div className="chip-row">
                       <button
                         type="button"
                         className={`m3-chip ${editorMode === 'raw' ? 'selected' : ''}`}
@@ -212,8 +198,15 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                         <Code2 size={13} />
                         Текст
                       </button>
+                      <button
+                        type="button"
+                        className={`m3-chip ${editorMode === 'visual' ? 'selected' : ''}`}
+                        onClick={() => setEditorMode('visual')}
+                      >
+                        <LayoutGrid size={13} />
+                        Список
+                      </button>
                     </div>
-                  )}
 
                   {doc.kind === 'domains' && (
                     <button
@@ -240,7 +233,7 @@ export const ListsView: React.FC<ListsViewProps> = ({ state, onStateUpdated, onN
                 </div>
               </div>
 
-              {editorMode === 'visual' && doc.kind !== 'targets' ? (
+              {editorMode === 'visual' ? (
                 <>
                   <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
                     <form onSubmit={handleAddEntry} style={{ display: 'flex', gap: '8px', flex: '1 1 280px' }}>

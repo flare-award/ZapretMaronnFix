@@ -628,6 +628,17 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
             {downloadingZapretZip ? 'Загрузка...' : 'Скачать релиз Zapret'}
           </button>
 
+          {updateInfo?.latestVersion && (
+            <button
+              type="button"
+              className="btn btn-surface"
+              onClick={() => onUpdateSettings({ skippedZapretVersion: updateInfo.latestVersion })}
+            >
+              <CheckCircle2 size={14} />
+              Пропустить обновление
+            </button>
+          )}
+
           <button
             type="button"
             className="btn btn-surface"
@@ -671,6 +682,32 @@ export const UpdatesSettingsView: React.FC<UpdatesSettingsViewProps> = ({
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div className="m3-switch-row">
+            <div className="m3-switch-info">
+              <div className="m3-switch-title">Тема</div>
+              <div className="m3-switch-desc">Тёмная используется по умолчанию</div>
+            </div>
+            <div className="chip-row">
+              {(['dark', 'light'] as const).map((theme) => (
+                <button key={theme} type="button" className={`m3-chip ${settings.theme === theme ? 'selected' : ''}`} onClick={() => onUpdateSettings({ theme })}>
+                  {theme === 'dark' ? 'Тёмная' : 'Светлая'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="m3-switch-row">
+            <div className="m3-switch-info">
+              <div className="m3-switch-title">Акцент</div>
+              <div className="m3-switch-desc">Цвет основных кнопок и выделений</div>
+            </div>
+            <div className="chip-row">
+              {([['blue', 'Синий'], ['violet', 'Фиолетовый'], ['green', 'Зелёный'], ['orange', 'Оранжевый']] as const).map(([accent, label]) => (
+                <button key={accent} type="button" className={`m3-chip ${settings.accent === accent ? 'selected' : ''}`} onClick={() => onUpdateSettings({ accent })}>{label}</button>
+              ))}
+            </div>
+          </div>
+
           <div className="m3-switch-row">
             <div className="m3-switch-info">
               <div className="m3-switch-title">Карточки лучших стратегий во вкладке "Тесты"</div>

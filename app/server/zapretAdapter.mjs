@@ -85,6 +85,9 @@ const DEFAULT_SETTINGS = {
   showWinwsConsole: false,
   showBestStrategyCards: true,
   connectLayout: 'split',
+  theme: 'dark',
+  accent: 'blue',
+  skippedZapretVersion: null,
   developerMode: false,
 };
 
@@ -174,6 +177,9 @@ export function loadSettings() {
         );
       }
       merged.autoRestartOnCrash = merged.autoRestartOnCrash !== false;
+      if (!['dark', 'light'].includes(merged.theme)) merged.theme = 'dark';
+      if (!['blue', 'violet', 'green', 'orange'].includes(merged.accent)) merged.accent = 'blue';
+      if (typeof merged.skippedZapretVersion !== 'string') merged.skippedZapretVersion = null;
       if (!path.isAbsolute(merged.zapretDir)) {
         merged.zapretDir = path.resolve(REPO_ROOT, merged.zapretDir);
       }
@@ -897,18 +903,39 @@ export function parseBatWinwsArgs(zapretDir, batFileName) {
   const listsDir = path.join(zapretDir, 'lists') + path.sep;
 
   const raw = fs.readFileSync(batPath, 'utf8');
-  const idx = raw.toLowerCase().indexOf('winws.exe"');
-  if (idx === -1) {
-    throw new Error(`В файле ${batFileName} не найден вызов winws.exe`);
+  // A folder can contain both generations. Always obey the executable named by
+  // the strategy instead of guessing from whichever binary happens to exist.
+  const exeMatch = raw.match(/(?:%BIN%|[^"\r\n]*[\\/])?(winws2?\.exe)"/i);
+  if (!exeMatch || exeMatch.index === undefined) {
+    throw new Error(`В файле ${batFileName} не найден вызов winws.exe или winws2.exe`);
   }
+  const executableName = exeMatch[1].toLowerCase();
+  const executablePath = path.join(zapretDir, 'bin', executableName);
+  if (!fs.existsSync(executablePath) && executableName === 'winws.exe') {
+    // Older user variants shipped as "ALT11 my" / "ALT13 my" cannot be
+    // translated by swapping the executable: winws2 has a different Lua DSL.
+    // Safely use the matching current official strategy when winws1 was removed.
+    const officialName = path.basename(batFileName).replace(/\s+my(?=\)\.bat$)/i, '');
+    if (officialName !== path.basename(batFileName) && fs.existsSync(path.join(zapretDir, officialName))) {
+      return { ...parseBatWinwsArgs(zapretDir, officialName), migratedFrom: path.basename(batFileName) };
+    }
+    throw new Error(
+      `Стратегия ${batFileName} использует старый winws.exe. Выберите её актуальную версию для winws2.`
+    );
+  }
+  // Official winws2 strategies intentionally contain blank lines between groups;
+  // every continued line still belongs to the one start command.
   const afterExe = raw
-    .slice(idx + 'winws.exe"'.length)
-    .replace(/\^\r?\n/g, ' ')
-    .split(/\r?\n/)[0];
+    .slice(exeMatch.index + exeMatch[0].length)
+    .replace(/\^\s*\r?\n/g, ' ')
+    .split(/\r?\n(?!(?:\s*--|\s*$))/)[0]
+    .replace(/\r?\n/g, ' ');
 
   const expanded = afterExe
     .replace(/%BIN%/gi, binDir)
     .replace(/%LISTS%/gi, listsDir)
+    .replace(/%LUA%/gi, path.join(zapretDir, 'lua') + path.sep)
+    .replace(/%~dp0/gi, zapretDir + path.sep)
     .replace(/%GameFilterTCP%/gi, gf.effectiveTcp)
     .replace(/%GameFilterUDP%/gi, gf.effectiveUdp)
     .replace(/%GameFilter%/gi, gf.effectiveTcp);
@@ -926,18 +953,13 @@ export function parseBatWinwsArgs(zapretDir, batFileName) {
     if (tok === '^') continue;
     args.push(tok.replace(/"/g, ''));
   }
-  const problemArgs = getProblemFixLaunchArgs(zapretDir);
-  if (problemArgs.length > 0) {
-    const firstFilterIndex = args.findIndex((arg) => arg.startsWith('--filter-'));
-    args.splice(firstFilterIndex >= 0 ? firstFilterIndex : args.length, 0, ...problemArgs);
-  }
-
   return {
-    winwsPath: path.join(zapretDir, 'bin', 'winws.exe'),
+    executableName,
+    winwsPath: path.join(zapretDir, 'bin', executableName),
     cwd: path.join(zapretDir, 'bin'),
     args,
     expandedPreview:
-      `"${path.join(zapretDir, 'bin', 'winws.exe')}" ` +
+      `"${path.join(zapretDir, 'bin', executableName)}" ` +
       args.map((arg) => arg.includes(' ') ? `"${arg}"` : arg).join(' '),
     appliedGameFilter: gf.mode,
   };
@@ -979,7 +1001,7 @@ export function readStrategies(zapretDir) {
 
 export function readZapretInfo(zapretDir) {
   const servicePath = path.join(zapretDir, 'service.bat');
-  const winwsPath = path.join(zapretDir, 'bin', 'winws.exe');
+  const winwsPaths = ['winws2.exe', 'winws.exe'].map((name) => path.join(zapretDir, 'bin', name));
   const listsPath = path.join(zapretDir, 'lists');
   const valid = fs.existsSync(servicePath) && fs.existsSync(listsPath);
 
@@ -999,7 +1021,7 @@ export function readZapretInfo(zapretDir) {
 
   return {
     valid,
-    hasWinwsBinary: fs.existsSync(winwsPath),
+    hasWinwsBinary: winwsPaths.some((filePath) => fs.existsSync(filePath)),
     localVersion,
     zapretPath: zapretDir,
     lastModified,
@@ -1983,11 +2005,14 @@ export async function checkZapretUpdates(zapretDir) {
   const info = readZapretInfo(zapretDir);
   const meta = await fetchLatestFlowsealReleaseMeta();
   const cmp = compareSemver(info.localVersion, meta.latestVersion);
+  const skippedVersion = loadSettings().skippedZapretVersion;
+  const isSkipped = Boolean(skippedVersion && skippedVersion === meta.latestVersion);
 
   return {
-    localVersion: info.localVersion,
+    localVersion: isSkipped ? meta.latestVersion : info.localVersion,
     latestVersion: meta.latestVersion || info.localVersion,
-    updateAvailable: cmp > 0,
+    updateAvailable: cmp > 0 && !isSkipped,
+    skippedVersion: isSkipped ? meta.latestVersion : null,
     publishedAt: meta.publishedAt,
     releaseName: meta.releaseName,
     releaseNotes: meta.releaseNotes,
@@ -2126,11 +2151,11 @@ export async function runDiagnostics(zapretDir) {
   });
 
   const binDir = path.join(zapretDir, 'bin');
-  const hasWinws = fs.existsSync(path.join(binDir, 'winws.exe'));
+  const hasWinws = ['winws2.exe', 'winws.exe'].some((name) => fs.existsSync(path.join(binDir, name)));
   const hasWinDivert = fs.existsSync(path.join(binDir, 'WinDivert64.sys')) || fs.existsSync(path.join(binDir, 'WinDivert.dll'));
   checks.push({
     id: 'binaries',
-    title: 'Файлы winws.exe и WinDivert',
+    title: 'Файлы winws и WinDivert',
     status: hasWinws && hasWinDivert ? 'ok' : 'error',
     detail: hasWinws && hasWinDivert ? 'Исполняемые файлы на месте' : 'Не найдены файлы в zapret/bin/',
     fixAction: null,
@@ -2813,7 +2838,7 @@ export function importFullConfig(zapretDir, bundle) {
       if (!cs || typeof cs.fileName !== 'string' || typeof cs.content !== 'string') continue;
       const safeName = path.basename(cs.fileName).trim();
       if (!/^custom\s*-\s*[^\\/:*?"<>|]+\.bat$/i.test(safeName)) continue;
-      if (!/winws\.exe/i.test(cs.content)) continue;
+      if (!/winws2?\.exe/i.test(cs.content)) continue;
       writeCrlfFile(path.join(zapretDir, safeName), cs.content);
       restoredCustomStrats++;
     }
@@ -2873,6 +2898,15 @@ export function importFullConfig(zapretDir, bundle) {
     if (bundle.settings.connectLayout === 'split' || bundle.settings.connectLayout === 'stacked') {
       allowedPatch.connectLayout = bundle.settings.connectLayout;
     }
+    if (bundle.settings.theme === 'dark' || bundle.settings.theme === 'light') {
+      allowedPatch.theme = bundle.settings.theme;
+    }
+    if (['blue', 'violet', 'green', 'orange'].includes(bundle.settings.accent)) {
+      allowedPatch.accent = bundle.settings.accent;
+    }
+    if (typeof bundle.settings.skippedZapretVersion === 'string') {
+      allowedPatch.skippedZapretVersion = bundle.settings.skippedZapretVersion;
+    }
     if (Array.isArray(bundle.settings.favoriteStrategies)) {
       allowedPatch.favoriteStrategies = bundle.settings.favoriteStrategies.filter((s) => typeof s === 'string');
     }
@@ -2923,11 +2957,11 @@ export function getStrategyBuilderSource(zapretDir, fileName) {
     throw new Error('Базовая стратегия не найдена');
   }
   const raw = fs.readFileSync(fullPath, 'utf8');
-  const idx = raw.toLowerCase().indexOf('winws.exe"');
+  const exeMatch = raw.match(/winws2?\.exe"/i);
   let winwsTail = '';
-  if (idx !== -1) {
+  if (exeMatch && exeMatch.index !== undefined) {
     winwsTail = raw
-      .slice(idx + 'winws.exe"'.length)
+      .slice(exeMatch.index + exeMatch[0].length)
       .replace(/\^\r?\n/g, '\n')
       .trim();
   }
@@ -3039,6 +3073,16 @@ export function saveCustomStrategy(zapretDir, payload = {}) {
     argsBlock = buildWinwsArgsFromParams(payload.params || {});
   }
 
+  const usesWinws2 = /--(?:lua-|template=|import=|wf-(?:tcp|udp)-out=)/i.test(argsBlock);
+  const executableName = usesWinws2 ? 'winws2.exe' : 'winws.exe';
+  if (!fs.existsSync(path.join(zapretDir, 'bin', executableName))) {
+    throw new Error(
+      executableName === 'winws.exe'
+        ? 'В этой сборке нет старого winws.exe. Создайте стратегию на основе актуальной winws2 в режиме «Текст».'
+        : 'Не найден bin/winws2.exe'
+    );
+  }
+
   const batContent = [
     '@echo off',
     'chcp 65001 > nul',
@@ -3053,9 +3097,10 @@ export function saveCustomStrategy(zapretDir, payload = {}) {
     '',
     'set "BIN=%~dp0bin\\"',
     'set "LISTS=%~dp0lists\\"',
+    'set "LUA=%~dp0lua\\"',
     'cd /d %BIN%',
     '',
-    `start "zapret: %~n0" /min "%BIN%winws.exe" ${argsBlock}`,
+    `start "zapret: %~n0" /min "%BIN%${executableName}" ${argsBlock}`,
     '',
   ].join('\n');
 

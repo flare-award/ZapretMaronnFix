@@ -37,7 +37,7 @@ let runtimeState = {
   autoRestartsCount: 0,
   lastRecoveryAt: null,
   lastExitReason: null,
-  modeNote: isWin ? null : 'Режим предпросмотра (на Windows запускает нативный bin/winws.exe)',
+  modeNote: isWin ? null : 'Режим предпросмотра (на Windows запускает нативный bin/winws2.exe или bin/winws.exe)',
 };
 
 let testJob = {
@@ -78,12 +78,14 @@ export function getTestJobState() {
   return { ...testJob };
 }
 
-async function killExistingWinwsOnWindows() {
+async function killExistingWinwsProcessesOnWindows() {
   if (!isWin) return;
-  try {
-    await execFileAsync('taskkill', ['/IM', 'winws.exe', '/F']);
-  } catch {
-    // ignore if not running
+  for (const executable of ['winws2.exe', 'winws.exe']) {
+    try {
+      await execFileAsync('taskkill', ['/IM', executable, '/F']);
+    } catch {
+      // ignore if not running
+    }
   }
 }
 
@@ -140,7 +142,7 @@ export async function shutdownBypassServicesAndDriver() {
     }
   }
 
-  for (const procName of ['winws.exe', 'goodbyedpi.exe']) {
+  for (const procName of ['winws2.exe', 'winws.exe', 'goodbyedpi.exe']) {
     try {
       await execFileAsync('taskkill', ['/IM', procName, '/F']);
     } catch {
@@ -183,7 +185,7 @@ export async function stopStrategyProcess(options = {}) {
     }
     activeChild = null;
   }
-  await killExistingWinwsOnWindows();
+  await killExistingWinwsProcessesOnWindows();
   if (!options.keepDriver) {
     await unloadWinDivertDriverIfIdle();
   }
@@ -203,7 +205,7 @@ function scheduleCrashAutoRecovery(crashedStrategy) {
   if (stoppingIntentionally || testJob.running) return;
   const settings = loadSettings();
   if (!settings.autoRestartOnCrash) {
-    runtimeState.lastExitReason = 'Процесс winws.exe завершился';
+    runtimeState.lastExitReason = 'Процесс winws завершился';
     notifyRuntimeChanged();
     return;
   }
@@ -218,7 +220,7 @@ function scheduleCrashAutoRecovery(crashedStrategy) {
     return;
   }
 
-  runtimeState.lastExitReason = 'Перезапуск после сбоя winws.exe...';
+  runtimeState.lastExitReason = 'Перезапуск после сбоя winws...';
   notifyRuntimeChanged();
 
   setTimeout(async () => {
@@ -316,7 +318,7 @@ export async function startStrategyProcess(strategyFileOverride, options = {}) {
       appliedIpsetMode: ipset.mode,
       expandedCommand: parsed.expandedPreview,
       lastExitReason: null,
-      modeNote: 'Предпросмотр в Linux: на Windows запускается прямой процесс winws.exe без установки службы',
+      modeNote: 'Предпросмотр в Linux: на Windows запускается прямой процесс winws без установки службы',
     };
   }
 
@@ -415,7 +417,7 @@ export async function fixWinDivertConflictsOnWindows() {
       // ignore
     }
   }
-  await killExistingWinwsOnWindows();
+  await killExistingWinwsProcessesOnWindows();
   if (actions.length === 0) {
     actions.push('Конфликтующих служб и зависших драйверов WinDivert не обнаружено');
   }
@@ -562,7 +564,7 @@ function serializeTestReport(strategiesResults, reportType = 'standard') {
   return lines.join('\r\n') + '\r\n';
 }
 
-// Live quick availability probe without stopping active winws.exe (#1)
+// Live quick availability probe without stopping active winws (#1)
 export async function runQuickLiveProbe() {
   const settings = loadSettings();
   const zapretDir = settings.zapretDir;
@@ -658,7 +660,7 @@ export async function runQuickLiveProbe() {
 async function evaluateStrategyAgainstTargets(zapretDir, stratFile, targetsSubset, timeoutSec, previewCtx) {
   if (isWin) {
     const parsed = parseBatWinwsArgs(zapretDir, stratFile);
-    await killExistingWinwsOnWindows();
+    await killExistingWinwsProcessesOnWindows();
     const child = spawn(parsed.winwsPath, parsed.args, {
       cwd: parsed.cwd,
       windowsHide: true,
@@ -673,7 +675,7 @@ async function evaluateStrategyAgainstTargets(zapretDir, stratFile, targetsSubse
       } catch {
         // ignore
       }
-      await killExistingWinwsOnWindows();
+      await killExistingWinwsProcessesOnWindows();
     }
   }
 

@@ -947,6 +947,7 @@ try {
     Wait-Process -Name 'ZapretControl' -Timeout 4 -ErrorAction SilentlyContinue
 } catch {}
 
+& taskkill.exe /IM winws2.exe /F 2>&1 | Out-Null
 & taskkill.exe /IM winws.exe /F 2>&1 | Out-Null
 Wait-PortFree $targetPort 4500 | Out-Null
 
